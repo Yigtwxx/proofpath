@@ -7,12 +7,12 @@ Spec: `specs/2026-09-10-proofpath-design.md` · Plan: `plans/2026-09-10-proofpat
 
 ---
 
-## 1. Blocked — needs an action outside this repo
+## 1. Blocked — resolved 2026-09-10
 
-| # | Item | What to do |
+| # | Item | Outcome |
 |---|---|---|
-| 1.1 | **CI workflow is not in the repo.** The file is written and working locally but the GitHub token lacks the `workflow` scope, so the push was rejected. | Run `gh auth refresh -h github.com -s workflow`, complete the device flow, then commit `.github/workflows/ci.yml` on its own. The file already exists on disk, untracked. |
-| 1.2 | PyPI name `proofpath` is free but **not reserved**. | Publish `0.0.1` once there is a working skeleton. Publishing an empty placeholder is against PyPI policy, so this waits for Phase 0 to finish. |
+| 1.1 | CI workflow could not be pushed; the token lacked the `workflow` scope. The Contents API refuses workflow files for the same reason, so the token refresh was the only route. | **Done.** CI runs on Linux, macOS and Windows × Python 3.10 and 3.13. All seven jobs green. |
+| 1.2 | PyPI name `proofpath` was free but unreserved. | **Done.** Published 0.0.1 through trusted publishing (OIDC), so no API token is stored anywhere. A working CLI was added first — the declared entry point did not exist, and publishing it would have shipped a command that raises ImportError. |
 
 ---
 
@@ -111,10 +111,9 @@ Not problems, just not now. Recorded so they are not rediscovered as new ideas.
 
 ## 7. Next session starts here
 
-1. Finish item **1.1** — CI is a prerequisite for every "works on three platforms" claim.
-2. Check assumption **3.1** — if no usable ONNX NLI model exists, the packaging story
+1. Check assumption **3.1** — if no usable ONNX NLI model exists, the packaging story
    changes and it is better to know before Phase 1 than during it.
-3. Begin **Phase 1**: pin SciFact, build `scripts/eval.py`, get a first number.
+2. Begin **Phase 1**: pin SciFact, build `scripts/eval.py`, get a first number.
 
 Phase 1 carries a kill criterion on purpose. Getting to a real number quickly is the
 point of the whole ordering.
