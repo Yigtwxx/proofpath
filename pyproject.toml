@@ -7,7 +7,8 @@ name = "proofpath"
 dynamic = ["version"]
 description = "Check whether the sources behind a claim actually say what the claim says."
 readme = "README.md"
-license = { file = "LICENSE" }
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.10"
 authors = [{ name = "Yigit Erdogan" }]
 keywords = [
@@ -18,7 +19,6 @@ classifiers = [
     "Development Status :: 2 - Pre-Alpha",
     "Environment :: Console",
     "Intended Audience :: Science/Research",
-    "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
