@@ -187,12 +187,13 @@ Publish to PyPI, tag `v0.1.0`, write the CHANGELOG entry.
 
 | Task | How |
 |---|---|
-| TUI | `textual`; paste a path, URL or raw text; streaming progress; **cancellable mid-run** |
+| TUI | `textual`, streaming-prompt layout per spec §13.1; paste a path, URL or raw text; **cancellable mid-run**; permission prompts inline |
 | SARIF output | maps findings to page/line so VS Code shows them inline without an extension |
 | Shared core | TUI and CLI both call one `verify()`; no logic in either front-end |
 
-**Done when:** a SARIF file opens in VS Code with findings on the right lines, and
-cancelling a run leaves no partial cache entries.
+**Done when:** a SARIF file opens in VS Code with findings on the right lines,
+cancelling a run leaves no partial cache entries, the coverage footer never scrolls
+away, and the TUI renders correctly at 80 columns.
 
 ---
 
@@ -204,10 +205,11 @@ cancelling a run leaves no partial cache entries.
 | Escalation | only verdicts below the Phase 1 calibration threshold |
 | Batching | 20 claims per prompt |
 | Cost reporting | calls made, tokens used, printed at the end of the run |
+| Report summary | `--summarize`: one final call over the finished report, cannot alter verdicts, labelled as model-written (spec §11.1) |
 
 **Done when:** a 118-citation paper costs 2-4 calls, works under a 1 request/minute
 limit, and disabling the judge changes cost to zero without changing the report
-format.
+format. `--summarize` adds exactly one call and its absence changes nothing else.
 
 ---
 

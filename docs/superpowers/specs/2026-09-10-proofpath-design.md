@@ -80,7 +80,7 @@ The core is source-agnostic. Everything platform-specific lives behind an
 | `retrieval` | `EvidenceDoc` → ranked passages for a claim | ONNX embeddings, sqlite-vec |
 | `entailment` | (claim, passage) → `SUPPORTED / REFUTED / NEI` + score | local NLI model (ONNX) |
 | `numerics` | numeric/unit claims, checked before NLI (§10) | — |
-| `judge` | optional second opinion on low-confidence verdicts | LLM adapter (opt-in) |
+| `judge` | optional second opinion on low-confidence verdicts, and an optional plain-language summary of the finished report | LLM adapter (opt-in) |
 | `report` | verdicts + coverage stats → markdown / json / sarif | — |
 | `cli` / `tui` | two front-ends over one `verify()` entry point | all of the above |
 
@@ -281,6 +281,9 @@ Retraction Watch is queried independently of this, keyed on the resolved DOI.
 7. `numerics` runs first on numeric claims; `entailment` classifies the top passages.
 8. `judge` re-checks only low-confidence verdicts, in batches, if enabled.
 9. `report` emits per-line findings with quotes, plus the coverage summary (§15).
+10. `judge` optionally writes a plain-language summary of the finished report
+    (§11.1). This runs last, reads only what the report already contains, and is
+    off by default.
 
 ## 10. Numeric claims
 
@@ -310,9 +313,29 @@ The default configuration makes **zero** LLM API calls.
 | numeric check | rule-based | 0 |
 | entailment | local NLI (DeBERTa-MNLI class) | 0 |
 | **judge (opt-in)** | 20 claims per prompt, batched | **2-4** per paper |
+| **report summary (opt-in)** | one prompt over the finished report | **1** |
 
 Verdicts are cached in sqlite keyed by `(claim_hash, source_id, model_id)`, so a
 re-run of the same document costs 0 calls.
+
+### 11.1 Report summary
+
+`--summarize` adds one final call that turns the finished report into a few
+sentences a human can act on:
+
+> 42 references, 3 of them fabricated and 1 retracted. Six claims are not supported
+> by the source they cite; the most serious is on page 9, where a 40% speedup is
+> attributed to a source reporting 4-8%. Coverage is weak — 17% of sources could not
+> be reached, so the real figure may be higher.
+
+Constraints that make this safe rather than a second guessing layer:
+
+- It runs **after** the report is final and **cannot change a single verdict**.
+- Its only input is the report the deterministic pipeline produced. It never sees a
+  source document, so it cannot introduce a claim of its own.
+- It is off by default. `proofpath` stays fully offline unless asked otherwise.
+- The summary is labelled as model-written in the output, so it is never mistaken
+  for a computed result.
 
 Even a 1 request/minute free tier finishes a 118-citation paper in ~4 minutes with
 the judge enabled. With Ollama there is no wait at all.
@@ -351,8 +374,113 @@ proofpath cache clear
 one-shot. Implemented as a Typer callback with `invoke_without_command=True`, so a
 bare invocation is a first-class entry point rather than a help screen.
 
-TUI is built with `textual`. It accepts a file path, a URL, or raw pasted text,
-streams progress, supports cancellation mid-run, and writes a report on completion.
+### 13.1 TUI — streaming prompt
+
+The TUI is a streaming log with a prompt at the bottom, in the manner of Claude Code
+and OpenClaw. Chosen over a split-pane browser because it handles several documents
+in one session naturally, surfaces the permission prompt (§7.1) inline in the flow
+where it happened, and keeps one code path with the one-shot output.
+
+Built with `textual`. Accepts a file path, a URL, or raw pasted text. Streams
+progress, is cancellable mid-run, and writes a report on completion.
+
+```
+╭─ proofpath ──────────────────────────────────────────── academic · offline ─╮
+│  Paste a file path, a URL, or a claim.        /help  /config  /quit          │
+╰─────────────────────────────────────────────────────────────────────────────╯
+
+› ~/Desktop/paper.pdf
+
+  ⏺ Parse                                                                 1.2s
+    24 pages · 42 references · 118 citations
+
+  ⏺ Resolve references                                       Crossref·OpenAlex
+    ✓ 38 resolved    ⚠ 3 ambiguous    ✗ 1 ghost
+
+  ⏺ Retractions                                              Retraction Watch
+    ⚠ 1 retracted
+
+  ⏺ Fetch sources                              ███████████████░░░░░     34/42
+    22 full text · 11 abstract · 9 blocked
+    ⚠ sciencedirect.com blocked — allow browser engine?  /allow
+
+  ⏺ Verify claims                              ████████░░░░░░░░░░░░    51/118
+    running locally on mps
+
+ ─────────────────────────────────────────────────────────────────────────────
+  ✗  p.4  L112   [12] Zhang 2021                              GHOST REFERENCE
+         DOI 10.1016/j.xxxx.2021.99999 resolves to nothing
+         no author, title or year agreement with any candidate
+
+  ⚠  p.7  L203   [28] Lee 2019                             RETRACTED  2023-06
+         "Concerns about data integrity" — Retraction Watch
+
+  ✗  p.9  L260   [31] Kumar 2022                        NOT SUPPORTED    0.91
+         you     "the method yields a 40% speedup"
+         source  "we observed a 4-8% improvement in throughput"
+         → numeric mismatch, not an entailment call
+ ─────────────────────────────────────────────────────────────────────────────
+  42 refs · 3 ghost · 1 retracted · 6 unsupported      coverage 62/21/17%
+  report.md written · 0 API calls · 38s
+
+› _
+```
+
+Design rules:
+
+- Each pipeline stage is one collapsible block. The provider or model that produced
+  a result is named on its right, so no number is unattributable.
+- Findings appear below a rule, after the stages, newest run last.
+- Every finding carries page and line, the verdict, the confidence, and the quoted
+  passage. A finding without a passage is a bug, not a display choice.
+- The footer always shows coverage. It is not optional and does not scroll away.
+- Permission prompts appear inline at the point of failure with a slash command to
+  answer, never as a modal that blocks the log.
+
+### 13.2 One-shot output
+
+`proofpath check` prints compiler-style diagnostics: pipeable, greppable, and
+readable in CI logs. It shares the verdict data with the TUI and adds no logic.
+
+```
+$ proofpath check paper.pdf
+
+  Parsing      paper.pdf                         24 pages, 42 refs      1.2s
+  Resolving    Crossref, OpenAlex                38 ok, 3 amb, 1 ghost  3.4s
+  Retractions  Retraction Watch                  1 retracted            0.8s
+  Fetching     22 full text, 11 abstract, 9 blocked                    14.7s
+  Verifying    118 claims on mps                                       21.4s
+
+error[ghost-reference]: cited source does not exist
+  --> paper.pdf:4:112
+   |
+   | [12] Zhang, K. et al. (2021). Neural cascade alignment for zero-shot...
+   |      ^^^^^^^^^^^^^^^^^^^^^^^ no record in Crossref or OpenAlex
+   |
+   = note: no author, title or year agreement with any candidate
+
+error[numeric-mismatch]: claim contradicts the cited source
+  --> paper.pdf:9:260
+   |
+   | The method yields a 40% speedup on long-context workloads [31]
+   |                     ^^^^^^^^^^^^ source reports 4-8%
+   |
+   = source: "we observed a 4-8% improvement in throughput"  ([31] p.6 §4.2)
+
+warning[retracted]: cited source was retracted 2023-06
+  --> paper.pdf:7:203
+   |
+   | [28] Lee, S. (2019). Adaptive gating for efficient inference
+   |
+   = note: "Concerns about data integrity" — Retraction Watch
+
+  42 refs: 3 ghost, 1 retracted, 6 unsupported, 32 ok
+  coverage: 62% full text, 21% abstract, 17% unverified
+  report.md written  ·  0 API calls  ·  38.4s
+```
+
+Exit codes: `0` clean, `1` findings present, `2` the run itself failed. CI can gate
+on this without parsing the text.
 
 ## 14. Evaluation
 
