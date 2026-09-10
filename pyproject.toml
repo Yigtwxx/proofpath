@@ -1,0 +1,95 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "proofpath"
+dynamic = ["version"]
+description = "Check whether the sources behind a claim actually say what the claim says."
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+authors = [{ name = "Yigit Erdogan" }]
+keywords = [
+    "fact-checking", "citation", "rag", "retrieval-augmented-generation",
+    "nli", "entailment", "research-integrity", "cli",
+]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering",
+    "Topic :: Text Processing :: Linguistic",
+    "Typing :: Typed",
+]
+
+# Base install stays small on purpose: no torch, no browser engine.
+dependencies = [
+    "typer>=0.15",
+    "textual>=1.0",
+    "httpx>=0.28",
+    "curl_cffi>=0.16.1",
+    "scrapling>=0.4.15",
+    "pymupdf>=1.25",
+    "python-docx>=1.1",
+    "fastembed>=0.5",
+    "sqlite-vec>=0.1.6",
+    "platformdirs>=4.3",
+    "orjson>=3.11",
+]
+
+[project.optional-dependencies]
+# Browser engine for fetch-ladder step 3. Installed on demand with explicit
+# consent; see spec section 7.1.
+browser = ["scrapling[fetchers]>=0.4.15"]
+# GPU-accelerated embeddings and NLI. Device order stays CUDA -> MPS -> CPU.
+gpu = ["torch>=2.5", "sentence-transformers>=3.3"]
+dev = [
+    "ruff>=0.9",
+    "pytest>=8.3",
+    "pytest-cov>=6.0",
+    "mypy>=1.14",
+    "respx>=0.22",
+]
+
+[project.scripts]
+proofpath = "proofpath.cli:app"
+
+[project.urls]
+Homepage = "https://github.com/Yigtwxx/proofpath"
+Repository = "https://github.com/Yigtwxx/proofpath"
+Issues = "https://github.com/Yigtwxx/proofpath/issues"
+Changelog = "https://github.com/Yigtwxx/proofpath/blob/main/CHANGELOG.md"
+
+[tool.hatch.version]
+path = "src/proofpath/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/proofpath"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "UP", "B", "A", "C4", "SIM", "PTH", "RUF", "ANN"]
+ignore = ["ANN401"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["ANN"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+files = ["src"]

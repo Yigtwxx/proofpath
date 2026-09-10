@@ -1,0 +1,39 @@
+name: Wrong verdict
+description: A claim was judged incorrectly
+labels: ["accuracy"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Accuracy reports are the most valuable issues this project receives.
+        They become regression cases in the evaluation set.
+  - type: textarea
+    id: claim
+    attributes:
+      label: The claim
+    validations:
+      required: true
+  - type: input
+    id: source
+    attributes:
+      label: The cited source (DOI or URL)
+    validations:
+      required: true
+  - type: dropdown
+    id: reported
+    attributes:
+      label: What proofpath reported
+      options: [SUPPORTED, REFUTED, NEI, GHOST REFERENCE, AMBIGUOUS, RETRACTED, UNVERIFIED]
+    validations:
+      required: true
+  - type: dropdown
+    id: correct
+    attributes:
+      label: What it should have reported
+      options: [SUPPORTED, REFUTED, NEI, GHOST REFERENCE, AMBIGUOUS, RETRACTED, UNVERIFIED]
+    validations:
+      required: true
+  - type: textarea
+    id: passage
+    attributes:
+      label: The passage that settles it
