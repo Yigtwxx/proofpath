@@ -32,7 +32,10 @@ proofpath check draft.md --format sarif
 
 ## Status
 
-🚧 Design stage. See [the design doc](docs/superpowers/specs/2026-09-10-proofpath-design.md).
+🚧 Design stage — no working code yet.
+
+- [Design specification](docs/superpowers/specs/2026-09-10-proofpath-design.md) — what it does and the measurements behind each decision
+- [Implementation plan](docs/superpowers/plans/2026-09-10-proofpath-implementation-plan.md) — phases, ordered by risk retired
 
 ## License
 
