@@ -74,6 +74,21 @@ def test_find_doi_in_raw_string() -> None:
     assert rs.find_doi(ALPHAFOLD) is None
 
 
+ENTRY = 'A. Vaswani, N. Shazeer, "Attention is all you need," NeurIPS, 2017.'
+
+
+@pytest.mark.parametrize("marker", ["[12] ", "12. ", "12) ", "12  "])
+def test_every_bibliography_marker_form_is_stripped(marker: str) -> None:
+    # ingest._ENTRY_START accepts all four shapes, so resolve must strip all four --
+    # as ingest actually emits them (whitespace collapsed), not as typed.
+    from proofpath import ingest
+
+    doc = ingest.from_text(f"Body.\n\nReferences\n{marker}{ENTRY}\n", name="t", kind="text")
+    raw = doc.references[0].raw
+    assert rs.title_segments(raw)[0] == "Attention is all you need"
+    assert rs.author_hint(raw) == "Vaswani"
+
+
 def test_title_segments_keep_colons_quotes_and_drop_author_blocks() -> None:
     ieee = (
         '[12] A. Vaswani, N. Shazeer, and I. Polosukhin, "Attention is all you need," in '

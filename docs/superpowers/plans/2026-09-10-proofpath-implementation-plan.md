@@ -180,6 +180,17 @@ abstract only, 10 % none, every miss with an honesty state
 the correct sentence at a measured rate that is written into the repo, and every
 finding can be traced back to a page and line.
 
+**Status (2026-09-11): done.** `document.py` (types with page/line locators),
+`ingest.py` (pymupdf blocks → paragraphs with per-page line numbers, docx paragraphs
+and tables, markdown/text; bibliography as raw strings; `PageError` per unparseable
+page), `claims.py` (numeric markers, paragraph-scoped rule, author-year →
+`UNSUPPORTED CITATION STYLE`, unresolved markers reported). Superscript citations in
+PDFs pulled forward from Phase 8 (Nature-style `text¹²` → `[12]`). Hand set: 61
+passages, 109 expectations, **pairing rate 0.98**; four real documents (three PDFs and
+one extracted text) measured (`docs/eval/2026-09-11-pairing.md`). Known gaps recorded there: bylines' affiliation
+superscripts become claims, a mixed `(Smith, 2020; [12])` loses its author-year half,
+one Nature PDF exposes no `References` heading.
+
 ---
 
 ## Phase 6 — Report and coverage

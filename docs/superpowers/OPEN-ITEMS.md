@@ -224,3 +224,40 @@ Findings from inspecting the installed base environment, and the decisions they 
    `UNSUPPORTED CITATION STYLE` states (spec §9).
 2. Wire `oa.OpenAccess` + `Cache` into the pipeline so `check` produces its first
    end-to-end verdicts.
+
+---
+
+## 9. Phase 5 — done 2026-09-11 (night)
+
+- Document model, ingest (PDF / docx / markdown / text) and claim extraction shipped;
+  680 tests, all offline. Pairing rate on the hand set 0.98; four real documents (three
+  PDFs and one extracted text) measured in `docs/eval/2026-09-11-pairing.md`.
+- Decisions taken while building: PDF line numbers count every extracted line
+  (headers/footers included) so `p.4 L3` matches what a reader sees; digits-only
+  furniture is dropped only in the top/bottom 10 % band; a bibliography heading is a
+  paragraph boundary even without a blank line; `Reference.raw` keeps its printed
+  marker (`resolve._MARKER` strips every form ingest accepts); a superscript after
+  punctuation is a footnote, after a letter or `)` a citation; sentence boundaries are
+  never placed after a single capital initial (`J. Smith`), at the accepted cost of
+  merging `vitamin D. The …`.
+
+### New open items
+
+| # | Item | Note |
+|---|---|---|
+| 9.1 | Byline affiliation superscripts become claims | 34 of AlphaFold's 129 claims come from the author list; needs block-level filtering (a byline is not prose). Phase 6 or 8 |
+| 9.2 | Mixed `(Smith, 2020; [12])` loses its author-year half | `find_markers` lets the numeric marker win the overlap; fixing it changes paragraph scoping. Phase 8 with author-year pairing |
+| 9.3 | Nature PDF without a `References` heading | AlphaFold's list is not detected, so the paper has **no reference list at all** and its markers cannot be checked against anything: they are neither resolved nor reported. The 2026-09-11 re-run shows the row as 126 markers, 0 references, **0 unresolved** — the citations are visible and not yet checkable, which the coverage line has to say. (An earlier note here claimed every marker was reported unresolved; it never was.) Try the last numbered block as a fallback in Phase 8 |
+| 9.4 | Cross-bracket ranges `[1]-[3]` | paired as 1 and 3, an IEEE reader means 1–3 |
+| 9.5 | `km²` / `m³` read as citations `[2]` / `[3]` | accepted cost of the superscript rule; only when the PDF marks the digit as superscript |
+| 9.6 | `retrieval.sentence_spans` needs whitespace after a stop | `…cycles.[15] Later` stays one sentence. Not shared with the SciFact numbers as previously written — `sentence_spans` / `split_sentences` is used by `ingest` alone today. Left alone because a boundary before `[15]` with no whitespace after the stop would also split decimals and version strings (`v1.2`) |
+| 9.7 | An unnumbered first bibliography entry is dropped | Text standing before the first printed number is heading residue as often as it is an entry, so ingest drops it and the list starts at `[2]`. The `[1]` citing that entry is now reported as unresolved (fix round 3) rather than pointed at entry 2 — visible, but a real reference nobody can reach |
+| 9.8 | A decimal followed by a superscript reads as a citation | `0.5³` → `[3]`. The cost of keeping `OpenMM v.7.3.1⁶⁹`: a digit after a full stop no longer takes an exponent. Same trade as 9.5 — a false marker a reader can see, against a real citation nobody would |
+| 9.9 | .docx footnotes, endnotes, text boxes and nested tables are not read | `_docx_lines` walks body-level paragraphs and top-level table rows only; python-docx exposes neither the footnote/endnote parts nor drawing-anchored text, and `cell.text` stops at the cell's own paragraphs. A claim printed in any of them is invisible, not reported |
+
+### Next session
+
+1. **Phase 6:** `verify()` (prepare / decide_all), cache wiring (chunks keyed by text
+   sha256, verdict rows), `report.py`, `proofpath check`. Briefs in
+   `.superpowers/sdd/phase6/`.
+

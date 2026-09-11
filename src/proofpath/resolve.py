@@ -199,7 +199,10 @@ def find_arxiv_id(raw: str) -> str | None:
 
 _QUOTED = re.compile(r"[\"“]([^\"”]{10,}?)[,.]?[\"”]")
 _SPLIT = re.compile(r"[.?!]\s+")
-_MARKER = re.compile(r"^\s*(\[\d+\]|\d+\.)\s*")
+# Every marker form ingest._ENTRY_START accepts: "[12] ", "12. ", "12) " and the
+# wide-space "12  " (already collapsed to one space by ingest; 1-3 digits so a year
+# opening an author-year entry survives).
+_MARKER = re.compile(r"^\s*(\[\d+\]|\d+[.)]|\d{1,3}(?=\s))\s*")
 _NAME = r"[A-Z][\w'\u2019-]+(?:\s[A-Z][\w'\u2019-]+)*"
 _INITIALS = r"(?:[A-Z]{1,3}\.?(?![a-z])\s*(?:-\s*)?){1,3}"
 _YEAR = r"(?:19|20)\d{2}[a-z]?"

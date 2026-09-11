@@ -21,14 +21,52 @@ from proofpath.models import Passage
 # letter, a digit or an opening bracket. Common abbreviations are excluded so
 # "et al." and "Dr." do not split. Good enough for abstracts; full text gets
 # re-checked in Phase 4.
-_ABBREVIATIONS = ("et al.", "Dr.", "Mr.", "Ms.", "Prof.", "Fig.", "vs.", "e.g.", "i.e.", "cf.")
+_ABBREVIATIONS = (
+    "et al.", "Dr.", "Mr.", "Ms.", "Prof.", "Fig.", "vs.", "e.g.", "i.e.", "cf.",
+    "Eq.", "Ref.", "Refs.", "No.", "Sec.", "Tab.", "approx.", "ca.", "Jr.", "St.",
+)  # fmt: skip
 _NOT_AFTER_ABBREVIATION = "".join(f"(?<!\\b{re.escape(a)})" for a in _ABBREVIATIONS)
 _BOUNDARY = re.compile(_NOT_AFTER_ABBREVIATION + r"(?<=[.!?])\s+(?=[A-Z0-9(\[\"'])")
+# A lone capital before a period is an author initial ("J. Smith"), not a sentence
+# end -- wherever in the sentence it sits ("a study by J. Smith showed"). Checked
+# after the match, not in the pattern: the rule needs no context to its left, and
+# writing it as a look-behind made what precedes the initial matter.
+_INITIAL_BEFORE = re.compile(r"\b[A-Z]\.$")
+
+
+def sentence_spans(text: str) -> list[tuple[int, int]]:
+    """``(start, end)`` char spans of the sentences, in order, blank fragments dropped.
+
+    The spans are exact offsets into ``text``, so a caller that knows where its
+    lines start can map a sentence back to a line (``ingest.py`` does).
+    """
+    spans: list[tuple[int, int]] = []
+    cursor = 0
+    # A boundary match consumes the whitespace between two sentences, so a sentence
+    # runs from the end of the previous match to the start of this one.
+    for boundary in _BOUNDARY.finditer(text):
+        start = boundary.start()
+        # Three characters are context enough: the initial, its period, and the word
+        # boundary in front of it that keeps "USA." from looking like one.
+        if _INITIAL_BEFORE.search(text[max(0, start - 3) : start]):
+            continue
+        spans.append((cursor, start))
+        cursor = boundary.end()
+    spans.append((cursor, len(text)))
+    trimmed: list[tuple[int, int]] = []
+    for start, end in spans:
+        fragment = text[start:end]
+        if not fragment.strip():
+            continue
+        lead = len(fragment) - len(fragment.lstrip())
+        trail = len(fragment) - len(fragment.rstrip())
+        trimmed.append((start + lead, end - trail))
+    return trimmed
 
 
 def split_sentences(text: str) -> list[str]:
     """Split text into sentences, dropping blank fragments."""
-    return [s.strip() for s in _BOUNDARY.split(text) if s.strip()]
+    return [text[start:end] for start, end in sentence_spans(text)]
 
 
 class Embedder(Protocol):

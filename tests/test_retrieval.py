@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 
 from proofpath.models import Passage
-from proofpath.retrieval import PassageIndex, rank, split_sentences
+from proofpath.retrieval import PassageIndex, rank, sentence_spans, split_sentences
 
 
 class FakeEmbedder:
@@ -39,6 +39,69 @@ def test_split_sentences_keeps_abbreviations_and_decimals() -> None:
 
 def test_split_sentences_drops_blank_fragments() -> None:
     assert split_sentences("  One.   \n\n Two.  ") == ["One.", "Two."]
+
+
+def test_sentence_spans_round_trip_to_the_split_strings() -> None:
+    text = "Results improved by 4.5% (p < 0.01). Dr. Smith et al. disagreed! Why? Because."
+    spans = sentence_spans(text)
+    assert [text[start:end] for start, end in spans] == split_sentences(text)
+    assert spans[0] == (0, len("Results improved by 4.5% (p < 0.01)."))
+    assert all(0 <= start < end <= len(text) for start, end in spans)
+
+
+def test_sentence_spans_are_exact_offsets_after_leading_whitespace() -> None:
+    assert sentence_spans("  One.   \n\n Two.  ") == [(2, 6), (12, 16)]
+
+
+def test_sentence_spans_of_blank_text_are_empty() -> None:
+    assert sentence_spans("   \n  ") == []
+
+
+def test_split_sentences_keeps_equation_and_figure_references() -> None:
+    assert split_sentences("See Eq. 3 and Fig. 2. Then more.") == [
+        "See Eq. 3 and Fig. 2.",
+        "Then more.",
+    ]
+
+
+def test_split_sentences_keeps_author_initials_together() -> None:
+    # An initial is never a sentence end, wherever it sits in the sentence.
+    assert split_sentences("A study by J. Smith showed an effect. Then Y.") == [
+        "A study by J. Smith showed an effect.",
+        "Then Y.",
+    ]
+    assert split_sentences("J. Smith et al. (2020) reported it. Then Y.") == [
+        "J. Smith et al. (2020) reported it.",
+        "Then Y.",
+    ]
+    # The cost of that rule: a sentence really ending in a capital letter and a period
+    # does not split -- "said X.", "we gave vitamin D.", "tested for hepatitis B." all
+    # merge with the sentence after them. Merging two sentences is the safe direction;
+    # cutting one in half, which the earlier look-behind did, is not.
+    assert split_sentences("J. Smith et al. (2020) said X. Then Y.") == [
+        "J. Smith et al. (2020) said X. Then Y."
+    ]
+
+
+def test_split_sentences_does_not_mistake_an_acronym_for_an_initial() -> None:
+    assert split_sentences("The trial ran in the USA. Then it stopped.") == [
+        "The trial ran in the USA.",
+        "Then it stopped.",
+    ]
+
+
+def test_split_sentences_keeps_the_new_abbreviations() -> None:
+    text = "Ref. 4 and Refs. 5 agree. No. 7 in Sec. 2 and Tab. 1 too. St. Louis, Jr. did it."
+    assert split_sentences(text) == [
+        "Ref. 4 and Refs. 5 agree.",
+        "No. 7 in Sec. 2 and Tab. 1 too.",
+        "St. Louis, Jr. did it.",
+    ]
+    assert split_sentences("We used approx. 5 ml. Then ca. 3 more. Jr. Smith agreed.") == [
+        "We used approx. 5 ml.",
+        "Then ca. 3 more.",
+        "Jr. Smith agreed.",
+    ]
 
 
 def test_index_returns_nearest_passage_first() -> None:

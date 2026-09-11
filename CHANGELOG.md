@@ -53,6 +53,18 @@ All notable changes to this project are documented here. The format follows
 - `scripts/eval_coverage.py`: measured 72 % full text / 18 % abstract / 10 % none
   on 50 DOIs (`docs/eval/2026-09-11-coverage.md`).
 
+- Document ingest and claim extraction (spec §9): `document.py` value types with
+  page/line locators; `ingest.py` for PDF (pymupdf blocks, per-page line numbers,
+  running header/footer removal, superscript citations), docx (paragraphs and tables),
+  markdown and plain text, with the bibliography kept as raw strings, every
+  unparseable page reported as a `PageError` and a page holding an image and no text
+  reported as a scan rather than passed on as an empty page; `claims.py` pairs numeric
+  markers (`[12]`, `[12,15]`, `[12-15]`) with their sentence, applies the
+  `PARAGRAPH-SCOPED` rule, reports author-year markers as `UNSUPPORTED CITATION STYLE`
+  and any number the bibliography does not print as unresolved. Hand-built pairing set
+  (61 passages, rate 0.98) and `scripts/eval_pairing.py`; four real documents (three
+  PDFs and one extracted text) measured in `docs/eval/2026-09-11-pairing.md`.
+
 ### Changed
 - CLI surface (spec §13.3): `permissions` and `judge` groups replaced by `config`
   (`config` / `show` / `path` / `set SECTION.KEY VALUE` / `check`); global
