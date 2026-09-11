@@ -6,6 +6,26 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- Config and permissions module: `config.toml` under the platform config dir,
+  `proofpath permissions` / `proofpath permissions set`, and the rule that an `ask`
+  permission without a TTY resolves to `deny` and is reported (spec §7.1).
+- Core types (`Verdict` cannot be `SUPPORTED`/`REFUTED` without a passage), device
+  selection (CUDA → CoreML → CPU), sentence retrieval over `fastembed` + `sqlite-vec`,
+  ONNX NLI entailment on `cross-encoder/nli-deberta-v3-base`, and the aggregation
+  pipeline.
+- Judge settings (`[judge]` in config, Groq default) with `proofpath judge`,
+  `judge check` and `judge set`; API key resolved from the environment or `.env`,
+  never stored or printed. `.env.example` added.
+- SciFact loader pinned to the AI2 tarball by sha256, evaluation metrics, and
+  `scripts/eval_scifact.py`. First measured result: dev accuracy 0.606 vs 0.406
+  trivial baseline (`docs/eval/2026-09-11-scifact-dev.md`).
+
+### Changed
+- Spec: `PARAGRAPH-SCOPED` and `UNSUPPORTED CITATION STYLE` states, three-tier
+  confidence display, 7-day raw-text cache TTL, v0.1 limited to numeric citation
+  markers.
+
 ## [0.0.1] - 2026-09-10
 
 First release. The verification pipeline is not implemented; this reserves the name

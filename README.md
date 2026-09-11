@@ -30,9 +30,30 @@ proofpath check paper.pdf        # one-shot report
 proofpath check draft.md --format sarif
 ```
 
+## Optional LLM judge
+
+Everything above runs locally. An LLM is used only at the very end, as an opt-in
+second opinion on low-confidence verdicts and for a plain-language summary — it
+never sees a source document and cannot change a verdict. Default provider is Groq
+(free, no card, no training on your data); Gemini and a local Ollama are the
+alternatives.
+
+```bash
+cp .env.example .env             # then paste GROQ_API_KEY=gsk_... into .env
+proofpath judge check            # one tiny request to prove the key works
+proofpath judge set provider gemini
+```
+
+The key is read from the environment or a `.env` file, never stored in config, and
+never printed.
+
 ## Status
 
-🚧 Design stage — no working code yet.
+🚧 Core measured, product not assembled yet. On SciFact dev the local retrieval +
+entailment core scores 0.606 accuracy against a 0.406 trivial baseline, with no
+verdict ever emitted without its passage
+([results](docs/eval/2026-09-11-scifact-dev.md)). Document ingest, reference
+resolution and fetching are the next phases.
 
 - [Design specification](docs/superpowers/specs/2026-09-10-proofpath-design.md) — what it does and the measurements behind each decision
 - [Implementation plan](docs/superpowers/plans/2026-09-10-proofpath-implementation-plan.md) — phases, ordered by risk retired
