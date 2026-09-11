@@ -21,6 +21,7 @@ from pathlib import Path
 
 import numpy as np
 
+from proofpath import numerics
 from proofpath.device import onnx_providers
 from proofpath.entailment import LABEL_ORDER, OnnxNli, pick_onnx_file
 from proofpath.eval import metrics, scifact
@@ -50,8 +51,12 @@ class Scored:
 Row = tuple[Label, Label, float, int | None]
 
 
-def _row(scored: Scored, k: int, thresholds: Thresholds) -> Row:
+def _row(scored: Scored, k: int, thresholds: Thresholds, *, use_numerics: bool) -> Row:
     """(decided label, strongest non-NEI label, its score, passage index or None)."""
+    if use_numerics:
+        numeric = numerics.check(scored.pair.claim, [h.passage for h in scored.hits[:k]])
+        if numeric is not None and numeric.mismatch:
+            return Label.REFUTED, Label.REFUTED, 1.0, numeric.passage.index
     verdict = aggregate(scored.hits[:k], scored.probs[:k], thresholds=thresholds)
     strongest = verdict.label
     if strongest is Label.NEI and scored.hits[:k]:
@@ -74,9 +79,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--nli-file", default=pick_onnx_file(platform.machine()))
     parser.add_argument("--providers", default="", help="comma list, e.g. cpu or coreml,cpu")
     parser.add_argument("--out", default="")
+    parser.add_argument(
+        "--no-numerics", action="store_true", help="skip the numeric layer (spec section 10)"
+    )
     args = parser.parse_args(argv)
 
     ks = [int(x) for x in args.k.split(",")]
+    use_numerics = not args.no_numerics
     providers = (
         [PROVIDER_NAMES[p.strip().lower()] for p in args.providers.split(",")]
         if args.providers
@@ -122,6 +131,7 @@ def main(argv: list[str] | None = None) -> int:
     lines.append(f"- pairs: {len(pairs)}  (limit={args.limit or 'none'})")
     lines.append(f"- embedder: `{embedder.name}`")
     lines.append(f"- nli: `{scorer.name}`  providers: `{', '.join(scorer.providers)}`")
+    lines.append(f"- numeric layer: {'on' if use_numerics else 'off (--no-numerics)'}")
     lines.append(
         f"- machine: {platform.system()} {platform.machine()}  "
         f"scoring {elapsed:.1f}s, {ms_per_pair:.0f} ms/pair"
@@ -160,11 +170,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     lines.append("|---|---|---|---|---|---|---|---|")
     best_overall: tuple[float, int, metrics.SweepResult] | None = None
+    numeric_notes: list[str] = []
     for k in ks:
         loose = Thresholds(decide=0.0, high=1.0, medium=1.0)
         rows: list[metrics.Row] = []
         for s in scored:
-            _, strongest, score, _ = _row(s, k, loose)
+            _, strongest, score, _ = _row(s, k, loose, use_numerics=use_numerics)
             rows.append((s.pair.label, strongest, score))
         best = metrics.sweep_decide(rows, grid=GRID)
         high, medium = metrics.tier_cutpoints(
@@ -173,11 +184,20 @@ def main(argv: list[str] | None = None) -> int:
         tuned = Thresholds(decide=best.threshold, high=max(high, medium), medium=medium)
         preds, pred_rationale, missing = [], [], 0
         for s in scored:
-            label, _, _, index = _row(s, k, tuned)
+            label, _, _, index = _row(s, k, tuned, use_numerics=use_numerics)
             preds.append(label)
             pred_rationale.append(frozenset({index}) if index is not None else frozenset())
             missing += label is not Label.NEI and index is None
         rf1 = metrics.rationale_f1(rationale, pred_rationale)
+        if use_numerics:
+            fired = [
+                s
+                for s in scored
+                if (n := numerics.check(s.pair.claim, [h.passage for h in s.hits[:k]]))
+                and n.mismatch
+            ]
+            correct = sum(s.pair.label is Label.REFUTED for s in fired)
+            numeric_notes.append(f"- k={k}: numeric layer refuted {len(fired)}, {correct} correct")
         lines.append(
             _md_row(
                 k,
@@ -193,6 +213,12 @@ def main(argv: list[str] | None = None) -> int:
         if best_overall is None or best.accuracy > best_overall[0]:
             best_overall = (best.accuracy, k, best)
     lines.append("")
+
+    if numeric_notes:
+        lines.append("Numeric layer firings on the top-k passages:")
+        lines.append("")
+        lines.extend(numeric_notes)
+        lines.append("")
 
     assert best_overall is not None
     _, best_k, best_sweep = best_overall

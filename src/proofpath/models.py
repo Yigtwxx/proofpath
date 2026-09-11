@@ -37,6 +37,8 @@ class Verdict:
     score: float
     tier: Tier
     passage: Passage | None
+    # Set when a rule, not the model, decided: e.g. "numeric mismatch: ...".
+    reason: str = ""
 
     def __post_init__(self) -> None:
         if self.label is not Label.NEI and self.passage is None:

@@ -3,7 +3,8 @@
 - pairs: 340  (limit=none)
 - embedder: `BAAI/bge-small-en-v1.5`
 - nli: `cross-encoder/nli-deberta-v3-base@6c749ce:model_qint8_arm64`  providers: `CPUExecutionProvider`
-- machine: Darwin arm64  scoring 65.1s, 191 ms/pair
+- numeric layer: on
+- machine: Darwin arm64  scoring 63.6s, 187 ms/pair
 
 ## Baselines
 
@@ -25,17 +26,23 @@
 
 | k | decide | accuracy | macro-F1 | rationale F1 | high cut | medium cut | asserted w/o passage |
 |---|---|---|---|---|---|---|---|
-| 1 | 0.45 | 0.606 | 0.593 | 0.300 | 1.00 | 0.46 | 0 |
-| 2 | 0.75 | 0.606 | 0.597 | 0.324 | 1.00 | 0.96 | 0 |
-| 3 | 0.50 | 0.600 | 0.595 | 0.343 | 1.00 | 1.00 | 0 |
+| 1 | 0.45 | 0.609 | 0.597 | 0.299 | 1.00 | 0.46 | 0 |
+| 2 | 0.75 | 0.609 | 0.601 | 0.324 | 1.00 | 0.96 | 0 |
+| 3 | 0.50 | 0.603 | 0.598 | 0.342 | 1.00 | 1.00 | 0 |
 | 5 | 0.75 | 0.544 | 0.542 | 0.329 | 1.00 | 1.00 | 0 |
+
+Numeric layer firings on the top-k passages:
+
+- k=1: numeric layer refuted 1, 1 correct
+- k=2: numeric layer refuted 1, 1 correct
+- k=3: numeric layer refuted 1, 1 correct
+- k=5: numeric layer refuted 0, 0 correct
 
 ## Verdict on Phase 1
 
-Best: k=1, decide=0.45, accuracy 0.606 vs best trivial baseline 0.406 → margin **+0.200**.
+Best: k=1, decide=0.45, accuracy 0.609 vs best trivial baseline 0.406 → margin **+0.203**.
 
 Kill criterion: margin near zero after tuning means stop before Phase 2.
-
 ## Notes
 
 - **Kill criterion passed.** +0.200 accuracy over the trivial baseline with no
@@ -63,3 +70,17 @@ Kill criterion: margin near zero after tuning means stop before Phase 2.
   CUDA → CoreML → CPU rule was kept; the eval ran with `--providers cpu`.
   Whole dev split on CPU: 65s for 340 pairs (191 ms/pair including embedding).
 - Reproduce: `uv run python scripts/eval_scifact.py --providers cpu --k 1,2,3,5`.
+- **Phase 2 (numeric layer) added later the same day.** Accuracy with the layer on
+  vs off: k=1 0.609 vs 0.606, k=2 0.609 vs 0.606, k=3 0.603 vs 0.600 — never lower.
+  On the top-k passages it refuted 1 pair, correctly. Reproduce the "off" row with
+  `--no-numerics`.
+- **The numeric layer was tightened three times against this split.** The first
+  version fired 4 times over whole abstracts, all wrong: `5% of perinatal mortality`
+  against a `95% CI` bound, `decreased by 10%` against `57% women`, `H3.3` parsed as
+  `3.3`, "less than 10%" read as a decrease. Rules now: numbers glued to letters or
+  signs are labels; "than" comparators carry no direction; `NN% CI` is a confidence
+  level; a mismatch needs exactly one comparable figure in the passage and one in
+  the claim; a change (with direction) is never refuted by a level (without). After
+  that, whole-abstract firings on dev dropped to 0 and the layer only decides when
+  attribution is unambiguous. SciFact has almost no numeric contradictions, so the
+  hand-built set in `tests/test_numerics.py` is the real acceptance test.

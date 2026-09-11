@@ -73,3 +73,39 @@ def test_no_passages_is_nei() -> None:
 def test_thresholds_must_be_ordered() -> None:
     with pytest.raises(ValueError):
         Thresholds(decide=0.8, high=0.7, medium=0.9)
+
+
+class NeverScorer:
+    name = "never"
+
+    def score(self, pairs: Sequence[tuple[str, str]]) -> np.ndarray:
+        raise AssertionError("scorer must not be called on a numeric mismatch")
+
+
+def _embedder_knowing(*texts: str) -> FakeEmbedder:
+    embedder = FakeEmbedder()
+    known = dict.fromkeys(texts, (1.0, 0.0, 0.0))
+    embedder._table = {**embedder._table, **known}  # type: ignore[misc]
+    return embedder
+
+
+def test_numeric_mismatch_refutes_before_nli_and_names_both_figures() -> None:
+    source = [Passage("we observed a 4-8% improvement in throughput", "s", 0)]
+    claim = "the method yields a 40% speedup"
+    embedder = _embedder_knowing(source[0].text, claim)
+    verdict = judge(claim, source, embedder, NeverScorer(), k=1, thresholds=THRESHOLDS)
+    assert verdict.label is Label.REFUTED
+    assert verdict.passage is source[0]
+    assert verdict.tier == "high" and verdict.score == 1.0
+    assert verdict.reason == "numeric mismatch: claim says 40%, source says 4-8%"
+
+
+def test_consistent_numbers_still_go_to_nli() -> None:
+    source = [Passage("we observed a 4-8% improvement in throughput", "s", 0)]
+    claim = "the method yields a 6% speedup"
+    embedder = _embedder_knowing(source[0].text, claim)
+    scorer = TableScorer({source[0].text: (0.2, 0.1, 0.7)})
+    verdict = judge(claim, source, embedder, scorer, k=1, thresholds=THRESHOLDS)
+    assert scorer.seen, "NLI must run when numbers agree"
+    assert verdict.label is Label.NEI
+    assert verdict.reason == ""

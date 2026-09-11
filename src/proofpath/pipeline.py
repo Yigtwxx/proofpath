@@ -13,6 +13,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from proofpath import numerics
 from proofpath.entailment import LABEL_ORDER, Scorer
 from proofpath.models import Label, Passage, Tier, Verdict
 from proofpath.retrieval import Embedder, Hit, rank
@@ -83,6 +84,16 @@ def judge(
     hits = rank(claim, passages, embedder, k=k)
     if not hits:
         return Verdict(Label.NEI, 0.0, "low", None)
+
+    # Numbers first (spec section 10): a contradicting figure is decided by rule,
+    # with both figures named, and never reaches the NLI model.
+    numeric = numerics.check(claim, [hit.passage for hit in hits])
+    if numeric is not None and numeric.mismatch:
+        reason = (
+            f"numeric mismatch: claim says {numeric.claim_text}, source says {numeric.source_text}"
+        )
+        return Verdict(Label.REFUTED, 1.0, "high", numeric.passage, reason=reason)
+
     # NLI convention: premise is the source passage, hypothesis is the claim.
     probs = scorer.score([(hit.passage.text, claim) for hit in hits])
     return aggregate(hits, probs, thresholds=thresholds)

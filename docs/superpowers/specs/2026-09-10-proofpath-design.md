@@ -306,10 +306,32 @@ exists to catch, and a generic entailment model will often mark it supported.
 
 Numeric claims are therefore handled before NLI:
 
-1. Extract `(value, unit, direction, subject)` spans from claim and passage.
-2. Compare magnitudes with unit normalization.
-3. Mismatch beyond tolerance → `REFUTED (numeric mismatch)` with both figures shown.
-4. Only if no numeric span is found does the claim fall through to NLI.
+1. Extract quantities from claim and passage: percentages (`40%`, `4-8%`, `-31%`),
+   factors (`2x`, `10-fold`, `three times`) and counts with a unit (`50 mg`,
+   `1,000 genomes`, `2.3 million people`), each with an optional direction read
+   from nearby words (`increased`, `reduction`, `faster`…).
+2. Compare only like with like: same kind, same normalised unit.
+3. Mismatch → `REFUTED (numeric mismatch)` with both figures shown, decided by rule
+   (`score 1.0`, tier `high`, reason string on the verdict).
+4. Otherwise the claim falls through to NLI. A matching number never asserts
+   support on its own.
+
+Rules fixed 2026-09-11 (OPEN-ITEMS 4.3), each one traced to a wrong firing on
+SciFact dev:
+
+| Rule | Why |
+|---|---|
+| Tolerance is relative **10 %**, applied to the source figure; a point agrees with a range if it lies in the stretched range, two ranges agree if they overlap | `40%` vs `38%` agrees, `40%` vs `35%` does not, `8.5%` vs `4-8%` agrees |
+| Refute only when the claim holds **one** quantity of that kind and the passage holds **exactly one** comparable figure | with two candidate figures the layer cannot tell which the claim refers to; every ambiguous firing on dev was wrong |
+| A change (explicit direction) is never refuted by a level (no direction), or vice versa | `decreased by 10%` vs `57% women` |
+| Opposite explicit directions disagree even with equal values | `12% increase` vs `12% decrease` |
+| `NN% CI` is a confidence level, not a quantity; numbers glued to letters or signs (`H3.3`, `+1`, `CD4`) are labels; `less/more than` are bounds, not directions | all three produced false refutations |
+| No subject matching in v0.1 | too unreliable without parsing; the single-figure rule stands in for it |
+
+Measured effect on SciFact dev: never lower than without the layer (+0.003
+accuracy), one firing on the top-k passages, correct. SciFact holds almost no
+numeric contradictions, so the hand-built set in `tests/test_numerics.py` is the
+acceptance test for this stage.
 
 ## 11. LLM budget
 

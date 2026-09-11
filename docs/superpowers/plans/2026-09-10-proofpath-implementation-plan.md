@@ -92,6 +92,10 @@ supported.
 **Done when:** a hand-built numeric test set passes, and adding this layer does not
 lower Phase 1's SciFact numbers.
 
+**Status (2026-09-11): done.** 51 hand-built cases in `tests/test_numerics.py`;
+SciFact dev accuracy with the layer 0.609 vs 0.606 without, one correct firing.
+The rule set was tightened three times against real dev failures (spec §10).
+
 ---
 
 ## Phase 3 — Reference resolution and ghost detection

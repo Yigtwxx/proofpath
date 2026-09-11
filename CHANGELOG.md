@@ -14,6 +14,10 @@ All notable changes to this project are documented here. The format follows
   selection (CUDA → CoreML → CPU), sentence retrieval over `fastembed` + `sqlite-vec`,
   ONNX NLI entailment on `cross-encoder/nli-deberta-v3-base`, and the aggregation
   pipeline.
+- Numeric claim layer (spec §10): percentages, factors and unit counts with
+  direction are compared before NLI; an unambiguous contradiction is refuted by
+  rule with both figures named (`Verdict.reason`). Conservative by design: one
+  comparable figure on each side, change never against level.
 - Judge settings (`[judge]` in config, Groq default) with `proofpath judge`,
   `judge check` and `judge set`; API key resolved from the environment or `.env`,
   never stored or printed. `.env.example` added.

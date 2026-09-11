@@ -59,7 +59,7 @@ precision. Each must end up written into the spec once measured.
 |---|---|---|
 | 4.1 | Title token-set Jaccard threshold for reference matching (spec §8) | Phase 3, tuned on the ghost test set |
 | 4.2 | Year tolerance beyond ±1 for online-first publications | Phase 3 |
-| 4.3 | Numeric comparison tolerance, and how to treat ranges vs point values (spec §10) | Phase 2 |
+| 4.3 | Numeric comparison tolerance, and how to treat ranges vs point values (spec §10) | **Set 2026-09-11:** relative 10 % on the source side; point-in-stretched-range; overlapping ranges; single-figure attribution rule; change ≠ level. Spec §10 |
 | 4.4 | Confidence threshold that routes a verdict to the judge | Phase 1 calibration |
 | 4.5 | Chunk size and `k` for retrieval. Abstracts are trivial; a 12,000-word full text is not, and the two may need different settings | Phase 1, re-checked in Phase 4 |
 | 4.6 | Which embedding model and which NLI model, by name and revision | Phase 1 |
