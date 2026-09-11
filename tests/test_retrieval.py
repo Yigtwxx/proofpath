@@ -6,7 +6,6 @@ from typing import ClassVar
 import numpy as np
 import pytest
 
-from proofpath import retrieval
 from proofpath.models import Passage
 from proofpath.retrieval import PassageIndex, rank, split_sentences
 
@@ -42,50 +41,39 @@ def test_split_sentences_drops_blank_fragments() -> None:
     assert split_sentences("  One.   \n\n Two.  ") == ["One.", "Two."]
 
 
-BACKENDS = ["numpy", "sqlite-vec"]
-
-
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_index_returns_nearest_passage_first(backend: str) -> None:
+def test_index_returns_nearest_passage_first() -> None:
     passages = [
         Passage("cats purr", "d", 0),
         Passage("dogs bark", "d", 1),
         Passage("fish swim", "d", 2),
     ]
     embedder = FakeEmbedder()
-    index = PassageIndex(dim=embedder.dim, backend=backend)  # type: ignore[arg-type]
-    if index.backend != backend:
-        pytest.skip(f"{backend} unavailable on this Python build")
+    index = PassageIndex(dim=embedder.dim)
     index.add(passages, embedder.embed([p.text for p in passages]))
     hits = index.search(embedder.embed(["a cat purring"])[0], k=2)
     assert [hit.passage.text for hit in hits] == ["cats purr", "dogs bark"]
     assert hits[0].similarity > hits[1].similarity
 
 
-def test_index_falls_back_to_numpy_when_sqlite_vec_cannot_load(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(retrieval, "_open_vec_connection", lambda path: None)
+def test_index_similarity_is_cosine_on_unit_vectors() -> None:
     index = PassageIndex(dim=3)
-    assert index.backend == "numpy"
-    index.add([Passage("cats purr", "d", 0)], FakeEmbedder().embed(["cats purr"]))
-    assert (
-        index.search(FakeEmbedder().embed(["a cat purring"])[0], k=1)[0].passage.text == "cats purr"
-    )
+    index.add([Passage("cats purr", "d", 0)], np.array([[2.0, 0.0, 0.0]], dtype=np.float32))
+    hit = index.search(np.array([1.0, 1.0, 0.0], dtype=np.float32), k=1)[0]
+    assert hit.similarity == pytest.approx(1 / np.sqrt(2))
 
 
-def test_both_backends_agree_on_similarity() -> None:
+def test_index_rejects_wrong_dimension() -> None:
+    index = PassageIndex(dim=3)
+    with pytest.raises(ValueError, match="dim"):
+        index.add([Passage("x", "d", 0)], np.zeros((1, 4), dtype=np.float32))
+
+
+def test_index_can_be_rebuilt_from_stored_vectors() -> None:
     embedder = FakeEmbedder()
     passages = [Passage("cats purr", "d", 0), Passage("dogs bark", "d", 1)]
-    results = []
-    for backend in BACKENDS:
-        index = PassageIndex(dim=3, backend=backend)  # type: ignore[arg-type]
-        if index.backend != backend:
-            pytest.skip("sqlite-vec unavailable")
-        index.add(passages, embedder.embed([p.text for p in passages]))
-        hits = index.search(embedder.embed(["a cat purring"])[0], k=2)
-        results.append([(h.passage.text, round(h.similarity, 4)) for h in hits])
-    assert results[0] == results[1]
+    vectors = embedder.embed([p.text for p in passages])
+    index = PassageIndex.from_vectors(passages, vectors)
+    assert index.search(embedder.embed(["a cat purring"])[0], k=1)[0].passage.text == "cats purr"
 
 
 def test_rank_wraps_index_and_respects_k() -> None:

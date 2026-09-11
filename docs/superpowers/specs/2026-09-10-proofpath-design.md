@@ -77,12 +77,12 @@ The core is source-agnostic. Everything platform-specific lives behind an
 | `fetch` | URL → HTML/PDF/JSON, through the escalation ladder (§7) | httpx, scrapling, wayback |
 | `resolve` | raw reference string → verified source identity or a honesty state (§8) | Crossref, OpenAlex |
 | `providers` | `Claim` → `EvidenceDoc` candidates | fetch, resolve |
-| `retrieval` | `EvidenceDoc` → ranked passages for a claim | ONNX embeddings, sqlite-vec |
+| `retrieval` | `EvidenceDoc` → ranked passages for a claim | ONNX embeddings, numpy cosine scan |
 | `entailment` | (claim, passage) → `SUPPORTED / REFUTED / NEI` + score | local NLI model (ONNX) |
 | `numerics` | numeric/unit claims, checked before NLI (§10) | — |
 | `judge` | optional second opinion on low-confidence verdicts, and an optional plain-language summary of the finished report | LLM adapter (opt-in) |
 | `report` | verdicts + coverage stats → markdown / json / sarif | — |
-| `cache` | one local SQLite file under the platform cache dir: `sqlite-vec` vectors, verdicts keyed `(claim_hash, source_id, model_id)`, raw fetched text with a 7-day TTL (§16). No server database, ever | sqlite-vec, platformdirs |
+| `cache` | one **plain** SQLite file under the platform cache dir (`proofpath.sqlite3`): `sources`, `raw_text` (7-day TTL, §16), `chunks` with float32 embeddings as BLOBs, `verdicts` keyed `(claim_hash, source_id, model_id)` where `model_id` includes NLI, embedder, `k` and thresholds. A `CHECK` constraint refuses `SUPPORTED`/`REFUTED` rows without a passage. No extension, no server: DB Browser for SQLite opens it; `proofpath cache path/ls/show/clear` reads it | sqlite3 (stdlib), numpy, platformdirs |
 | `cli` / `tui` | two front-ends over one `verify()` entry point | all of the above |
 
 No logic lives in `cli` or `tui`.
@@ -392,7 +392,7 @@ adapter covers them. The API key is read from an environment variable or a
 |---|---|---|
 | PDF parsing | GROBID needs Java + Docker | pure-Python `pymupdf` default; GROBID opt-in via `--parser grobid` |
 | Reference parsing | structured extraction is hard | avoided entirely — raw string to Crossref (§8) |
-| Vector store | Qdrant server needs Docker | per-document corpus is ~10²-10³ chunks; `sqlite-vec`, no server |
+| Vector store | Qdrant server needs Docker; Chroma embedded adds 47 packages / 161 MB (kubernetes, grpc, otel) and a directory; LanceDB +280 MB; `sqlite-vec` needs extension loading that python.org macOS builds lack | **numpy brute-force cosine scan** over a per-source matrix: measured 2026-09-11 at 1.2 ms for 10⁵ vectors vs 7.4 ms for sqlite-vec. Queries are always scoped to one source (≤500 chunks), so no ANN index earns its weight. Vectors persist as float32 BLOBs in the plain SQLite cache. Revisit only for cross-source search above ~2×10⁵ vectors — then `usearch` (+4 MB), not a server |
 | Scrapling | browser engines are heavy | core + `curl_cffi` bundled (2.7 MB); browser engine installed on demand with explicit consent (§7.1) |
 | **Inference runtime** | **`torch` + `sentence-transformers` is ~800 MB — larger than the browser engine we ask consent for** | **ONNX runtime by default (base install stays small). `torch` moves to an opt-in `[gpu]` extra.** |
 | Compute device | CUDA on Windows, MPS on Mac | preference order is always CUDA → MPS → CPU; under ONNX the equivalent is CUDA → CoreML → CPU |
@@ -603,9 +603,11 @@ told so directly.
 - `robots.txt` respected on step 1 and step 2 of the fetch ladder.
 - Exponential backoff on 429/5xx, then an explicit `UNVERIFIED` state.
 - Fetched full text is cached locally and not redistributed. Raw publisher text
-  expires after **7 days**; verdicts and embeddings are kept until cleared, since they
-  contain only short quoted passages. Everything lives in one SQLite file under the
-  user cache dir and `proofpath cache clear` removes all of it.
+  expires after **7 days**, and with it the chunk texts derived from it are set to
+  NULL (a full text split into sentences is still the full text); embeddings stay,
+  and the short passage quoted on each verdict stays with the verdict. Everything
+  lives in one SQLite file under the user cache dir; `proofpath cache clear`
+  removes all of it, `--expired` only what has aged out.
 
 ## 17. Milestones
 

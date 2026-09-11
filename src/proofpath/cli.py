@@ -15,6 +15,7 @@ import typer
 from proofpath import __version__
 from proofpath import config as cfg
 from proofpath import judge as judge_mod
+from proofpath.cache import Cache
 from proofpath.paths import config_path
 
 app = typer.Typer(
@@ -181,6 +182,107 @@ def judge_set(
         typer.echo(str(exc), err=True)
         raise typer.Exit(EXIT_ERROR) from exc
     typer.echo(f"judge.{key} = {value}  ({config_path()})")
+
+
+cache_app = typer.Typer(
+    name="cache",
+    help="Inspect or clear the local cache (one SQLite file; any SQLite GUI can open it).",
+    invoke_without_command=True,
+    no_args_is_help=False,
+)
+app.add_typer(cache_app)
+
+
+@cache_app.callback()
+def cache(ctx: typer.Context) -> None:
+    """Show where the cache lives and how much it holds."""
+    if ctx.invoked_subcommand is not None:
+        return
+    with Cache() as db:
+        entries = db.summary()
+        typer.echo(f"cache     {db.path}")
+        typer.echo(
+            f"holds     {len(entries)} sources, {sum(e.chunks for e in entries)} chunks, "
+            f"{sum(e.verdicts for e in entries)} verdicts"
+        )
+        typer.echo("open it with DB Browser for SQLite, TablePlus or DBeaver — plain tables.")
+
+
+@cache_app.command("path")
+def cache_path() -> None:
+    """Print the SQLite file path, nothing else (pipeable)."""
+    with Cache() as db:
+        typer.echo(str(db.path))
+
+
+@cache_app.command("ls")
+def cache_ls() -> None:
+    """List cached sources with chunk and verdict counts and text expiry."""
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc).isoformat()
+    with Cache() as db:
+        entries = db.summary()
+    if not entries:
+        typer.echo("cache is empty")
+        return
+    for e in entries:
+        if e.expires_at is None:
+            expiry = "no raw text"
+        elif e.expires_at <= now:
+            expiry = "raw text expired"
+        else:
+            expiry = f"raw text until {e.expires_at[:10]}"
+        typer.echo(
+            f"{e.source_id}  {e.title or '(untitled)'}  [{e.scheme}/{e.text_kind}]  "
+            f"{e.chunks} chunk(s), {e.verdicts} verdict(s), {expiry}"
+        )
+
+
+@cache_app.command("show")
+def cache_show(
+    source_id: Annotated[str, typer.Argument(help="Source id, as listed by ls.")],
+) -> None:
+    """Print a source's chunks and verdicts."""
+    with Cache() as db:
+        detail = db.detail(source_id)
+    if detail is None:
+        typer.echo(f"no cached source {source_id!r}", err=True)
+        raise typer.Exit(EXIT_ERROR)
+    s = detail.summary
+    typer.echo(
+        f"{s.source_id}  {s.title or '(untitled)'}  [{s.scheme}/{s.text_kind}]  "
+        f"fetched {s.fetched_at[:19]}"
+    )
+    if detail.embed_models:
+        typer.echo(f"embeddings  {', '.join(detail.embed_models)}  dim={detail.dim}")
+    typer.echo("")
+    typer.echo(f"chunks ({len(detail.chunks)})")
+    for ordinal, text in detail.chunks:
+        typer.echo(f"  [{ordinal}] {text if text is not None else '(text expired)'}")
+    typer.echo("")
+    typer.echo(f"verdicts ({len(detail.verdicts)})")
+    for v in detail.verdicts:
+        typer.echo(
+            f"  {v.label:<9} {v.tier:<6} {v.score:.2f}  claim {v.claim_hash[:12]}…  "
+            f"model {v.model_id}"
+        )
+        if v.passage_text is not None:
+            typer.echo(f'            "{v.passage_text}"  [{v.passage_index}]')
+        if v.reason:
+            typer.echo(f"            {v.reason}")
+
+
+@cache_app.command("clear")
+def cache_clear(
+    expired: Annotated[
+        bool, typer.Option("--expired", help="Only sources whose raw text expired.")
+    ] = False,
+) -> None:
+    """Delete cached sources with their text, chunks and verdicts."""
+    with Cache() as db:
+        removed = db.clear(expired_only=expired)
+    typer.echo(f"removed {removed} source(s){' (expired only)' if expired else ''}")
 
 
 @app.command()

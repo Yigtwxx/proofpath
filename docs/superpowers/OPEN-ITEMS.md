@@ -30,7 +30,7 @@ Spec: `specs/2026-09-10-proofpath-design.md` · Plan: `plans/2026-09-10-proofpat
 | 2.4 | `reasonhound` keeps its name | yes (not re-raised) |
 | 2.5 | Turkish sources | **After v0.4**, as a separate provider (TR Dizin / DergiPark class) |
 | 2.6 | `--summarize` in the TUI | **Off by default in both front-ends**; TUI enables with `/summarize` |
-| 2.7 | Database | **One local SQLite file** (sqlite-vec vectors, verdict cache, raw-text cache with TTL). No server database |
+| 2.7 | Database | **One plain SQLite file**, no extension (`sqlite-vec` removed 2026-09-11 after an architecture review: numpy is faster at every scale, GUIs cannot open `vec0` tables). Chroma / LanceDB / Qdrant rejected for this workload — see spec §12 |
 
 ---
 
@@ -129,6 +129,9 @@ Not problems, just not now. Recorded so they are not rediscovered as new ideas.
 | 7.2 | CPU is 3× faster than CoreML for the int8 NLI graph | **Done.** `entailment.providers_for()` skips CoreML for int8 exports; the CUDA → CoreML → CPU rule is unchanged for fp32 |
 | 7.3 | Default judge provider (Phase 9) | **Groq `openai/gpt-oss-120b`** default; Gemini and Ollama selectable with `proofpath judge set provider`; NVIDIA build.nvidia.com is dev-only and not documented. Key lives in env or `.env`, never in config (`judge.py`, `proofpath judge check`) |
 | 7.4 | Second embedding model for assumption 3.6 | compare `all-MiniLM-L6-v2` once, in Phase 4 alongside full text |
+| 7.5 | Vector store: keep `sqlite-vec`, or Chroma? | **Neither.** Plain SQLite BLOB + numpy scan (`cache.py`, `retrieval.py`); `proofpath cache path/ls/show/clear` for inspection, DB Browser for SQLite for the GUI |
+| 7.6 | Full-text chunk text after the 7-day TTL | **NULLed** with the raw text; embeddings kept; the verdict keeps its own quoted passage |
+| 7.7 | `verdicts.model_id` contents | **NLI + embedder + k + thresholds**, so a threshold change never serves a stale verdict |
 
 ### Next session
 

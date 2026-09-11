@@ -30,6 +30,21 @@ proofpath check paper.pdf        # one-shot report
 proofpath check draft.md --format sarif
 ```
 
+## Looking inside the cache
+
+Everything proofpath fetches, embeds and decides lands in one plain SQLite file:
+
+```bash
+proofpath cache            # where it is and what it holds
+proofpath cache ls         # sources, chunk/verdict counts, text expiry
+proofpath cache show <id>  # one source's chunks and verdicts
+proofpath cache clear --expired
+```
+
+Open `proofpath cache path` in [DB Browser for SQLite](https://sqlitebrowser.org/),
+TablePlus or DBeaver — plain tables, no extension needed. Raw publisher text
+expires after 7 days; verdicts keep the passage they quote.
+
 ## Optional LLM judge
 
 Everything above runs locally. An LLM is used only at the very end, as an opt-in

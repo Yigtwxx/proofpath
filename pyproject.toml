@@ -45,7 +45,6 @@ dependencies = [
     "huggingface_hub>=0.30",
     "tokenizers>=0.20",
     "numpy>=1.26",
-    "sqlite-vec>=0.1.6",
     "platformdirs>=4.3",
     "orjson>=3.11",
     "tomli>=2.0; python_version < '3.11'",
@@ -104,5 +103,5 @@ files = ["src"]
 
 [[tool.mypy.overrides]]
 # Ship no stubs or no py.typed marker.
-module = ["onnxruntime.*", "sqlite_vec", "torch", "torch.*", "fastembed.*", "tokenizers.*"]
+module = ["onnxruntime.*", "torch", "torch.*", "fastembed.*", "tokenizers.*"]
 ignore_missing_imports = true

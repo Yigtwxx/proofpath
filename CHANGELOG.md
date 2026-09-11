@@ -14,6 +14,10 @@ All notable changes to this project are documented here. The format follows
   selection (CUDA → CoreML → CPU), sentence retrieval over `fastembed` + `sqlite-vec`,
   ONNX NLI entailment on `cross-encoder/nli-deberta-v3-base`, and the aggregation
   pipeline.
+- Persistent cache: one plain SQLite file (`sources`, `raw_text` with 7-day TTL,
+  `chunks` with float32 embeddings, `verdicts`), a schema `CHECK` that refuses an
+  asserted verdict without a passage, and `proofpath cache` / `cache path` / `ls` /
+  `show` / `clear [--expired]`.
 - Numeric claim layer (spec §10): percentages, factors and unit counts with
   direction are compared before NLI; an unambiguous contradiction is refuted by
   rule with both figures named (`Verdict.reason`). Conservative by design: one
@@ -26,6 +30,8 @@ All notable changes to this project are documented here. The format follows
   trivial baseline (`docs/eval/2026-09-11-scifact-dev.md`).
 
 ### Changed
+- Retrieval no longer depends on `sqlite-vec`: a numpy cosine scan is faster at
+  every measured scale and the plain SQLite file opens in any GUI.
 - Spec: `PARAGRAPH-SCOPED` and `UNSUPPORTED CITATION STYLE` states, three-tier
   confidence display, 7-day raw-text cache TTL, v0.1 limited to numeric citation
   markers.

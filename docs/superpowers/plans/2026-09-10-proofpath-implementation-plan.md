@@ -53,7 +53,7 @@ No network. No PDF. Input is a SciFact claim plus its gold abstract.
 |---|---|
 | Load SciFact | the AI2 tarball via `httpx`, sha256 pinned, cached under the platform cache dir — the HF loader is script-based and unusable with `datasets ≥ 4` |
 | Chunk & embed | ONNX embeddings via `fastembed`; abstracts are short, so sentence-level chunks |
-| Rank passages | cosine similarity in `sqlite-vec`; top-k with k tuned on dev split |
+| Rank passages | numpy cosine scan (sqlite-vec dropped 2026-09-11); top-k with k tuned on dev split |
 | Entailment | `cross-encoder/nli-deberta-v3-base` @ `6c749ce`, int8 ONNX chosen by CPU arch, run with `onnxruntime` + `tokenizers` → `SUPPORTED / REFUTED / NEI` + score |
 | Calibration | threshold sweep on dev → the `NEI` cut-off, the judge escalation threshold, and the `high / medium / low` tier cut-points shown in reports |
 | Harness | `scripts/eval_scifact.py` printing per-stage metrics against two baselines (majority label, "source exists → SUPPORTED"); results table committed under `docs/eval/` |
@@ -171,7 +171,7 @@ finding can be traced back to a page and line.
 | Markdown report | per-line findings, verdict, confidence, quoted passage, fetch step used |
 | JSON report | same data, machine-readable |
 | Coverage summary | full text % / abstract only % / unverified %, always present |
-| Cache | sqlite, keyed `(claim_hash, source_id, model_id)` |
+| Cache | **done early (2026-09-11):** `cache.py`, plain SQLite, `model_id` = NLI + embedder + k + thresholds; wiring into `verify()` happens here |
 
 **Done when:** a report with low coverage is visibly different from a clean one at a
 glance, and a second run of the same document makes zero network calls.
