@@ -33,9 +33,12 @@ classifiers = [
 dependencies = [
     "typer>=0.15",
     "textual>=1.0",
+    # Already pulled in by textual; declared because ui.py imports it directly.
+    "rich>=13",
     "httpx>=0.28",
     "curl_cffi>=0.16.1",
     "scrapling>=0.4.15",
+    "protego>=0.3",  # parses robots.txt for fetch-ladder steps 1-2
     "pymupdf>=1.25",
     "python-docx>=1.1",
     "fastembed>=0.5",
@@ -94,6 +97,12 @@ ignore = ["ANN401"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+filterwarnings = [
+    # Third-party noise from the fetch ladder's parsers, not ours to fix:
+    # scrapling passes lxml a no-op option; pymupdf's SWIG layer trips a CPython check.
+    "ignore:The 'strip_cdata' option of HTMLParser:DeprecationWarning",
+    "ignore:builtin type (SwigPy\\w+|swigvarlink) has no __module__ attribute:DeprecationWarning",
+]
 
 [tool.mypy]
 # No python_version pin: numpy's stubs use the 3.12 `type` statement, and the

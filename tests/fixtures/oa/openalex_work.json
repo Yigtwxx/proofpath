@@ -1,0 +1,19 @@
+{
+  "id": "https://openalex.org/W3177828909",
+  "doi": "https://doi.org/10.1038/s41586-021-03819-2",
+  "display_name": "Highly accurate protein structure prediction with AlphaFold",
+  "abstract_inverted_index": {
+    "structure": [8],
+    "Proteins": [0],
+    "are": [1],
+    "essential": [2],
+    "to": [3],
+    "life,": [4],
+    "and": [5],
+    "understanding": [6],
+    "their": [7, 11],
+    "informs": [9],
+    "about": [10],
+    "function.": [12]
+  }
+}

@@ -106,6 +106,7 @@ Not problems, just not now. Recorded so they are not rediscovered as new ideas.
 | Landing site: one Astro site, four pages (`evidencelab.dev/`, `/proofpath`, `/reasonhound`, `/spiyweb`) | after v0.1 ships something runnable |
 | GitHub org `evidencelab` (free at time of checking) | when the landing site is built |
 | `evidencelab.dev` domain (free at time of checking) | same |
+| Pet family and names: one ASCII animal per project in the same drawing style with the same single red stamp (proofpath ferret · reasonhound hound · spiyweb spider); names only if the landing page presents them as characters, chosen for all three at once | when the landing site is built |
 | `spiyweb` as an alternative retrieval backend for `proofpath` | after Phase 6; the real tie between the three projects |
 | GROBID parser as an opt-in `--parser` | if Phase 5 citation pairing accuracy proves inadequate |
 | Turkish sources | after v0.4 |
@@ -155,3 +156,71 @@ Not problems, just not now. Recorded so they are not rediscovered as new ideas.
 1. **Phase 4:** fetch ladder and permissions (spec §7) — start with the 50-DOI
    coverage sample (5.3), then steps 1, 2 and 4; step 3 behind the consent prompt.
 2. Wire `cache.py` into fetching (raw text + TTL) as it lands.
+
+---
+
+## 8. Phase 4 — decided 2026-09-11 (night), before the fetch ladder was written
+
+Findings from inspecting the installed base environment, and the decisions they forced.
+
+| # | Item | Outcome |
+|---|---|---|
+| 8.1 | `scrapling 0.4.15`'s static `Fetcher` imports `playwright` at module load, so it cannot run in the base install | **Step 2 uses `curl_cffi` directly** (`impersonate="chrome"`); `scrapling` stays in the base install only as the HTML→text parser (`scrapling.parser.Selector`, which imports cleanly). Spec §7 table unchanged in cost, changed in wording |
+| 8.2 | `robots.txt` parser | **`protego` added** to the base dependencies (pure Python, wildcard-aware). Consulted on steps 1 and 2 only; a disallow is reported as `UNVERIFIED (blocked, robots.txt)` |
+| 8.3 | Open-access chain metadata source, given OpenAlex's ~100 searches/day budget | **Semantic Scholar `openAccessPdf` → Crossref `link` → Europe PMC → arXiv → landing page (doi.org) → abstract.** Unpaywall only when `contact.email` is set (it requires an address). OpenAlex last, abstract fallback only |
+| 8.4 | What happens when the step-3 prompt is answered "yes" | **Automatic install** into the tool's own environment: `python -m pip install "scrapling[fetchers]"`, falling back to `uv pip install --python <sys.executable>` when the venv has no pip, then `python -m scrapling install` for the browser. Every step and its outcome is written into the report; tests mock the subprocess |
+| 8.5 | Coverage sample (5.3) | Taken from the 106 real references of the ghost set (those with a DOI), 50 of them, before writing the ladder; result in `docs/eval/` and spec §6.1 |
+
+### CLI surface — decided 2026-09-11 (night), spec §13.3
+
+| # | Decision | Outcome |
+|---|---|---|
+| 8.6 | Command tree | **Verbs flat (`check`, `resolve`, `fetch`); settings under `config` (`show`, `path`, `set section.key value`, `check`); `cache` stays.** `permissions` and `judge` top-level commands removed; closes 7.8 |
+| 8.7 | Output language | **`rich` through one thin `ui.py`, restrained:** coloured state words on a TTY only, borderless key/value grids, progress bars on a TTY only, no panels; plain text when piped or `NO_COLOR` |
+| 8.8 | Machine output | **`--format text|json` on every verb, `sarif` only on `check`;** JSON alone on stdout, humans on stderr |
+| 8.9 | Exit codes | **0 clean · 1 any finding or honesty state · 2 tool failure only.** `resolve`'s unavailable → 2 becomes 1 |
+| 8.10 | Global flags | **`--no-color`, `-q/--quiet` only.** `--config`, `--offline` deferred until asked for |
+| 8.11 | TUI slash commands | **Mirror rule:** every verb/group is the same-named slash command; `/allow /summarize /help /quit` are TUI-only |
+| 8.12 | Entry model | **TUI is the primary surface:** the user types `proofpath` and works inside it. One-shot subcommands stay only as the no-TTY path (CI, pipes, SARIF to file) and are documented as such |
+| 8.13 | TUI slash awaiting mode | **`/verb` alone tints the input bar and waits for the argument (Esc cancels); `/verb <arg>` runs at once; the echoed command line keeps the verb's accent colour in the log, nothing else does.** Spec §13.1; built in Phase 8 |
+| 8.14 | Several runs per TUI session | **Each `/check` is its own numbered, distinctly coloured block, listed at once. Scheduling by stage: parse/resolve/fetch concurrent (≤ 3 runs), verify a single FIFO slot; states queued / running / waiting for verify / verifying / done / cancelled; `/cancel #n`.** Spec §13.1; Phase 8 |
+| 8.15 | Mouse in the TUI | **Enabled (Textual native, no new dependency); nothing mouse-only, nothing keyboard-only.** Click targets: run header, stage line, finding (toggle detail), permission prompt buttons, `#n`/URL hyperlinks (OSC 8), copy-passage. Spec §13.1; Phase 8 |
+| 8.18 | Colour system | **ANSI-16 only; meaning layer (green ok / yellow caution / red finding / dim NEI, key column bold) + rotating run accents (cyan, magenta, blue, bright cyan, bright magenta). Red/yellow/green never used as accents.** Spec §13.3; `ui.py` owns the tables |
+| 8.19 | Pet | **A ferret** ("ferrets out the facts"; body `~` = the proof path ending in a red `[PROOF]` stamp — the banner's only colour). Pure ASCII, re-flows with width, eyes animate by run state in the TUI only. Owl rejected (Syft, Odoo Owl, Owl language), lynx rejected (`lynx` terminal browser). Spec §13.1; Phase 8 |
+
+### New open items (Phase 4, from review)
+
+| # | Item | Note |
+|---|---|---|
+| 8.16 | `FULLTEXT_MIN_WORDS = 1500` starves short papers | **Kept at 1500 (2026-09-11).** In the 50-DOI sample only 3 abstract-only results had a reachable page under the threshold, and each was a landing page (abstract + boilerplate), not a short paper. Revisit if a real short-paper case appears |
+| 8.17 | Crossref `text/xml` TDM links are dropped | PLOS/Frontiers-style publishers serve JATS XML through Crossref links; `jats_body_text` already exists, so keeping them as `Location(..., "text")` is cheap. Decide after the coverage numbers |
+
+### Phase 4 — done 2026-09-11 (night)
+
+- Fetch ladder, consent gate, OA chain, `proofpath fetch`, `ui.py` + `config` group
+  shipped; 458 tests, all offline. Live: Science.org 403 → `curl_cffi` → 200;
+  coverage 72 / 18 / 10 % on 50 DOIs (`docs/eval/2026-09-11-coverage.md`), every
+  miss carrying an honesty state; 12 of 50 wait on the browser consent.
+- Findings that changed the code: DataCite arXiv DOIs carry their own arXiv id;
+  a 200 page with zero extractable text is a bot wall; `scrapling`'s fetchers need
+  playwright, so step 2 calls `curl_cffi` directly.
+- CLI/TUI design decided and written into the spec (§13.1 pet, awaiting mode,
+  multi-run scheduling, mouse; §13.3 surface, colours, exit codes).
+
+### New open items
+
+| # | Item | Note |
+|---|---|---|
+| 8.20 | Browser step never exercised live | `--allow-browser` path (pip/uv install + `StealthyFetcher`) is unit-tested with mocks only. Run once by hand before v0.1: `proofpath fetch <blocked url> --allow-browser` on a machine where the ~280 MB download is acceptable |
+| 8.21 | Semantic Scholar is the single biggest full-text source (23/36) | Its shared 1 req/s pool and occasional 429s make it the fragile link; 7.9 (free S2 API key) moves up in priority |
+| 8.22 | `install_log` is now a general gate log | Rename to `gate.log`/`events` when the report layer (Phase 6) consumes it |
+| 8.23 | Deferred polish from the Phase 4 reviews | `resolve.py` blanket `noqa: F401` on the re-export block; `fetch.py` `retry_after` float↔str round trip and no 3xx→`final_url` test; `polite.py` assert-based narrowing; `oa.py` `_JATS_BIBR_XREF` needs `ref-type` as first attribute; six `ui` tests pin exact ANSI sequences; `_json_default` dead branches; `evidence` line does not dim `none`; `Cache()` OSError → traceback instead of exit 2; OA and Fetcher hold separate `PoliteClient` throttles (Europe PMC search + fullTextXML not spaced); `_browser` loses redirects in `final_url`; `install()` is silent for minutes; a cached `doi:` abstract short-circuits a later `--allow-browser` run (use `--no-cache`) |
+| 8.24 | Re-fetch with changed content keeps old chunks | `add_source` now upserts (keeps chunks/verdicts, spec §16). If the re-fetched raw text differs (`raw_text.sha256` changes), Phase 5 ingest must re-chunk and re-embed instead of trusting the stored chunks |
+
+### Next session
+
+1. **Phase 5:** document ingest (`pymupdf`, `python-docx`, markdown) and claim
+   extraction with numeric markers only; `PARAGRAPH-SCOPED` and
+   `UNSUPPORTED CITATION STYLE` states (spec §9).
+2. Wire `oa.OpenAccess` + `Cache` into the pipeline so `check` produces its first
+   end-to-end verdicts.

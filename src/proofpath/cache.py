@@ -169,16 +169,26 @@ class Cache:
         ttl_days: int = RAW_TEXT_TTL_DAYS,
     ) -> None:
         moment = now or _now()
+        # Upserts, never INSERT OR REPLACE: a replace deletes the old row first, and
+        # with foreign keys on that cascades into the source's chunks and verdicts.
+        # A re-fetch must keep both (spec section 16: embeddings stay, the quoted
+        # passage stays with the verdict).
         with self._conn:
             self._conn.execute(
-                "INSERT OR REPLACE INTO sources(source_id, scheme, title, url, text_kind, "
-                "fetched_at) VALUES (?, ?, ?, ?, ?, ?)",
+                "INSERT INTO sources(source_id, scheme, title, url, text_kind, fetched_at) "
+                "VALUES (?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(source_id) DO UPDATE SET scheme = excluded.scheme, "
+                "title = excluded.title, url = excluded.url, text_kind = excluded.text_kind, "
+                "fetched_at = excluded.fetched_at",
                 (source_id, scheme, title, url, text_kind, _iso(moment)),
             )
             if raw_text is not None:
                 self._conn.execute(
-                    "INSERT OR REPLACE INTO raw_text(source_id, content, sha256, fetched_at, "
-                    "expires_at) VALUES (?, ?, ?, ?, ?)",
+                    "INSERT INTO raw_text(source_id, content, sha256, fetched_at, expires_at) "
+                    "VALUES (?, ?, ?, ?, ?) "
+                    "ON CONFLICT(source_id) DO UPDATE SET content = excluded.content, "
+                    "sha256 = excluded.sha256, fetched_at = excluded.fetched_at, "
+                    "expires_at = excluded.expires_at",
                     (
                         source_id,
                         raw_text,
@@ -194,6 +204,33 @@ class Cache:
             (source_id, _iso(now or _now())),
         ).fetchone()
         return None if row is None else str(row[0])
+
+    def set_text_kind(self, source_id: str, text_kind: str) -> None:
+        """Relabel a stored source once its real grade is known (the open-access
+        chain measures a page's length only after the ladder has cached it). A
+        source that was never stored stays absent."""
+        with self._conn:
+            self._conn.execute(
+                "UPDATE sources SET text_kind = ? WHERE source_id = ?", (text_kind, source_id)
+            )
+
+    def text_kind(self, source_id: str) -> str | None:
+        """``abstract`` or ``fulltext`` as stored for the source, ``None`` when unknown."""
+        row = self._conn.execute(
+            "SELECT text_kind FROM sources WHERE source_id = ?", (source_id,)
+        ).fetchone()
+        return None if row is None else str(row[0])
+
+    def text_kind_and_url(self, source_id: str) -> tuple[str, str] | None:
+        """``(text_kind, url)`` as stored for the source, ``None`` when unknown.
+
+        Lets a cache hit report the URL the text came from, not just its kind, in one
+        read.
+        """
+        row = self._conn.execute(
+            "SELECT text_kind, url FROM sources WHERE source_id = ?", (source_id,)
+        ).fetchone()
+        return None if row is None else (str(row[0]), str(row[1] or ""))
 
     def expire(self, *, now: datetime | None = None) -> int:
         """Drop expired raw text and the quotable chunk text that came from it."""

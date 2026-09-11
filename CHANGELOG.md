@@ -8,8 +8,8 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 - Config and permissions module: `config.toml` under the platform config dir,
-  `proofpath permissions` / `proofpath permissions set`, and the rule that an `ask`
-  permission without a TTY resolves to `deny` and is reported (spec §7.1).
+  `proofpath config` / `proofpath config set permissions.<key>`, and the rule that an
+  `ask` permission without a TTY resolves to `deny` and is reported (spec §7.1).
 - Core types (`Verdict` cannot be `SUPPORTED`/`REFUTED` without a passage), device
   selection (CUDA → CoreML → CPU), sentence retrieval over `fastembed` + `sqlite-vec`,
   ONNX NLI entailment on `cross-encoder/nli-deberta-v3-base`, and the aggregation
@@ -30,14 +30,40 @@ All notable changes to this project are documented here. The format follows
   direction are compared before NLI; an unambiguous contradiction is refuted by
   rule with both figures named (`Verdict.reason`). Conservative by design: one
   comparable figure on each side, change never against level.
-- Judge settings (`[judge]` in config, Groq default) with `proofpath judge`,
-  `judge check` and `judge set`; API key resolved from the environment or `.env`,
-  never stored or printed. `.env.example` added.
+- Judge settings (`[judge]` in config, Groq default) with `proofpath config check`
+  and `proofpath config set judge.<key>`; API key resolved from the environment or
+  `.env`, never stored or printed. `.env.example` added.
 - SciFact loader pinned to the AI2 tarball by sha256, evaluation metrics, and
   `scripts/eval_scifact.py`. First measured result: dev accuracy 0.606 vs 0.406
   trivial baseline (`docs/eval/2026-09-11-scifact-dev.md`).
 
+- Fetch ladder (spec §7): `httpx` → `curl_cffi` TLS impersonation → browser engine
+  behind the §7.1 consent prompt → Wayback Machine; `robots.txt` via `protego`;
+  content type from headers; per-host throttling and backoff shared in `polite.py`;
+  fetched text cached with the 7-day TTL. Distinct honesty states for blocked,
+  blocked-by-robots, browser-not-permitted, unreachable, provider-unavailable and
+  network-denied — never collapsed.
+- Consent gate for the ~280 MB browser engine: asks at most once per run, never
+  without a TTY, `always`/`never` persist to config, installs with `pip` (or `uv`)
+  and `scrapling install`, and reports how many sources were skipped.
+- Open-access chain: Semantic Scholar → Crossref TDM links → Unpaywall (only with a
+  contact address) → Europe PMC → arXiv → landing page → abstract (OpenAlex last);
+  abstract-only results labelled `LOW CONFIDENCE (abstract only)`. DataCite arXiv
+  DOIs resolve straight to the arXiv PDF. `proofpath fetch <url|doi|arXiv id>`.
+- `scripts/eval_coverage.py`: measured 72 % full text / 18 % abstract / 10 % none
+  on 50 DOIs (`docs/eval/2026-09-11-coverage.md`).
+
 ### Changed
+- CLI surface (spec §13.3): `permissions` and `judge` groups replaced by `config`
+  (`config` / `show` / `path` / `set SECTION.KEY VALUE` / `check`); global
+  `--no-color` and `-q`; one `ui.py` layer over `rich` owns every colour and the
+  10-column key/value layout; `resolve --format json`; "provider unavailable"
+  exits `1` (a finding), no longer `2`. A resolved but retracted reference and a
+  URL that was reached but yielded no text (`reached but no text extracted`) are
+  findings too (`1`). `skipped N source(s)` counts sources, not the URLs tried for
+  them; `--format json` adds `browser.skipped_urls`. `permissions.network` binds
+  the open-access providers as well as the ladder, and `ask` without a TTY is
+  `deny`, reported.
 - Retrieval no longer depends on `sqlite-vec`: a numpy cosine scan is faster at
   every measured scale and the plain SQLite file opens in any GUI.
 - Spec: `PARAGRAPH-SCOPED` and `UNSUPPORTED CITATION STYLE` states, three-tier

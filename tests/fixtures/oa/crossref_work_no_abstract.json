@@ -1,0 +1,16 @@
+{
+  "status": "ok",
+  "message-type": "work",
+  "message": {
+    "DOI": "10.1038/s41586-021-03819-2",
+    "title": ["Highly accurate protein structure prediction with AlphaFold"],
+    "link": [
+      {
+        "URL": "https://www.nature.com/articles/s41586-021-03819-2",
+        "content-type": "text/html",
+        "content-version": "vor",
+        "intended-application": "text-mining"
+      }
+    ]
+  }
+}

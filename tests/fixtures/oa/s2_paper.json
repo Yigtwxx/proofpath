@@ -1,0 +1,15 @@
+{
+  "paperId": "0f7a4b1c2d3e4f5061728394a5b6c7d8e9f00112",
+  "externalIds": {
+    "DOI": "10.1038/s41586-021-03819-2",
+    "PubMedCentral": "8371605",
+    "ArXiv": "2103.00020",
+    "CorpusId": 235959867
+  },
+  "abstract": "Proteins are essential to life, and understanding their structure can facilitate a mechanistic understanding of their function.",
+  "openAccessPdf": {
+    "url": "https://www.nature.com/articles/s41586-021-03819-2.pdf",
+    "status": "HYBRID",
+    "license": "CCBY"
+  }
+}

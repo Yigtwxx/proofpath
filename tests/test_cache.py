@@ -109,6 +109,100 @@ def test_raw_text_expires_after_seven_days_and_chunk_text_is_dropped(db: Cache) 
     assert row == (None, 12)
 
 
+def test_refetch_keeps_chunks_and_verdicts(db: Cache) -> None:
+    """Spec section 16: a re-fetched source keeps its embeddings and the passages
+    quoted on its verdicts. Re-adding the source must update the row in place,
+    not replace it (which, with ON DELETE CASCADE, would wipe both)."""
+    db.add_source(
+        "doi:10.1/x",
+        scheme="academic",
+        title="X",
+        url="https://x/v1",
+        text_kind="abstract",
+        raw_text="cats purr. dogs bark.",
+        now=NOW,
+    )
+    db.put_chunks("doi:10.1/x", "bge@rev", PASSAGES, VECTORS)
+    verdict = Verdict(Label.SUPPORTED, 0.93, "high", PASSAGES[0], reason="")
+    db.put_verdict("h1", "doi:10.1/x", "m", verdict, now=NOW)
+
+    later = NOW + timedelta(days=9)
+    db.add_source(
+        "doi:10.1/x",
+        scheme="academic",
+        title="X, second edition",
+        url="https://x/v2",
+        text_kind="fulltext",
+        raw_text="cats purr. dogs bark. birds sing.",
+        now=later,
+    )
+    assert db.get_chunks("doi:10.1/x", "bge@rev") == (PASSAGES, pytest.approx(VECTORS))
+    assert db.get_verdict("h1", "doi:10.1/x", "m") == verdict
+    assert db.text_kind_and_url("doi:10.1/x") == ("fulltext", "https://x/v2")
+    assert db.get_raw_text("doi:10.1/x", now=later) == "cats purr. dogs bark. birds sing."
+    (entry,) = db.summary()
+    assert (entry.title, entry.chunks, entry.verdicts) == ("X, second edition", 2, 1)
+    assert entry.expires_at == (later + timedelta(days=7)).isoformat()
+
+
+def test_text_kind_reports_the_stored_kind(db: Cache) -> None:
+    db.add_source(
+        "doi:10.1/x",
+        scheme="academic",
+        title="",
+        url="",
+        text_kind="abstract",
+        raw_text="t",
+        now=NOW,
+    )
+    assert db.text_kind("doi:10.1/x") == "abstract"
+    db.add_source(
+        "doi:10.1/x",
+        scheme="academic",
+        title="",
+        url="",
+        text_kind="fulltext",
+        raw_text="t",
+        now=NOW,
+    )
+    assert db.text_kind("doi:10.1/x") == "fulltext"
+    assert db.text_kind("doi:10.1/missing") is None
+
+
+def test_set_text_kind_relabels_a_stored_source_only(db: Cache) -> None:
+    db.add_source(
+        "url:https://x", scheme="web", title="", url="", text_kind="fulltext", raw_text="t", now=NOW
+    )
+    db.set_text_kind("url:https://x", "abstract")
+    assert db.text_kind("url:https://x") == "abstract"
+    db.set_text_kind("url:https://missing", "abstract")  # a no-op, never an insert
+    assert db.text_kind("url:https://missing") is None
+
+
+def test_text_kind_and_url_reports_the_stored_values(db: Cache) -> None:
+    db.add_source(
+        "doi:10.1/x",
+        scheme="academic",
+        title="",
+        url="https://example.org/paper.pdf",
+        text_kind="fulltext",
+        raw_text="t",
+        now=NOW,
+    )
+    assert db.text_kind_and_url("doi:10.1/x") == ("fulltext", "https://example.org/paper.pdf")
+    db.add_source(
+        "doi:10.1/x",
+        scheme="academic",
+        title="",
+        url="",
+        text_kind="abstract",
+        raw_text="t",
+        now=NOW,
+    )
+    assert db.text_kind_and_url("doi:10.1/x") == ("abstract", "")
+    assert db.text_kind_and_url("doi:10.1/missing") is None
+
+
 def test_summary_lists_sources_with_counts(db: Cache) -> None:
     db.add_source(
         "s", scheme="academic", title="Paper", url="", text_kind="abstract", raw_text="t", now=NOW

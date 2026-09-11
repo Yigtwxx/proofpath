@@ -1,0 +1,47 @@
+{
+  "status": "ok",
+  "message-type": "work",
+  "message": {
+    "DOI": "10.1038/s41586-021-03819-2",
+    "title": ["Highly accurate protein structure prediction with AlphaFold"],
+    "abstract": "<jats:title>Abstract</jats:title><jats:p>Proteins are essential to life, and understanding their structure can facilitate a mechanistic understanding of their function.</jats:p>",
+    "link": [
+      {
+        "URL": "https://www.nature.com/articles/s41586-021-03819-2.pdf",
+        "content-type": "application/pdf",
+        "content-version": "vor",
+        "intended-application": "text-mining"
+      },
+      {
+        "URL": "https://www.nature.com/articles/s41586-021-03819-2",
+        "content-type": "text/html",
+        "content-version": "vor",
+        "intended-application": "text-mining"
+      },
+      {
+        "URL": "https://www.nature.com/articles/s41586-021-03819-2.pdf",
+        "content-type": "unspecified",
+        "content-version": "vor",
+        "intended-application": "similarity-checking"
+      },
+      {
+        "URL": "https://api.elsevier.com/content/article/PII:S0000000000000000?httpAccept=text/xml",
+        "content-type": "text/xml",
+        "content-version": "vor",
+        "intended-application": "text-mining"
+      },
+      {
+        "URL": "https://api.wiley.com/onlinelibrary/tdm/v1/articles/10.1002%2Fexample",
+        "content-type": "unspecified",
+        "content-version": "vor",
+        "intended-application": "text-mining"
+      },
+      {
+        "URL": "https://www.nature.com/articles/s41586-021-03819-2/syndication",
+        "content-type": "unspecified",
+        "content-version": "vor",
+        "intended-application": "syndication"
+      }
+    ]
+  }
+}

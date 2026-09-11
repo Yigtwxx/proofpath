@@ -67,9 +67,9 @@ never sees a source document and cannot change a verdict. Default provider is Gr
 alternatives.
 
 ```bash
-cp .env.example .env             # then paste GROQ_API_KEY=gsk_... into .env
-proofpath judge check            # one tiny request to prove the key works
-proofpath judge set provider gemini
+cp .env.example .env                      # then paste GROQ_API_KEY=gsk_... into .env
+proofpath config check                    # one tiny request to prove the key works
+proofpath config set judge.provider gemini
 ```
 
 The key is read from the environment or a `.env` file, never stored in config, and

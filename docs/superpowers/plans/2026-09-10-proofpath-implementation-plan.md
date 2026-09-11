@@ -151,6 +151,17 @@ installs.
 - Content type comes from headers, verified by a test serving a PDF from a
   `.html` URL.
 
+**Status (2026-09-11): done, all three gates passed.** `polite.py` (shared UA /
+throttle / backoff), `fetch.py` (ladder, robots via `protego`, header-based content
+type, Wayback, cache), `browser.py` (§7.1 consent gate, pip→uv install, prompt once
+per run, never without a TTY), `oa.py` (S2 → Crossref → Unpaywall → Europe PMC →
+arXiv → landing → abstract, OpenAlex last), `proofpath fetch`. Step 2 uses
+`curl_cffi` directly — scrapling's fetchers import playwright. Live: Science.org
+403 → step 2 → 200 (6,674 words). Coverage on 50 DOIs: 72 % full text, 18 %
+abstract only, 10 % none, every miss with an honesty state
+(`docs/eval/2026-09-11-coverage.md`). The CLI surface was redesigned alongside
+(spec §13.3: `config` group, `ui.py`, `--format json`, `-q`, exit 0/1/2).
+
 ---
 
 ## Phase 5 — Document ingest and claim extraction

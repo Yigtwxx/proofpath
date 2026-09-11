@@ -373,6 +373,20 @@ def test_find_arxiv_id() -> None:
     assert rs.find_arxiv_id(ALPHAFOLD) is None
 
 
+def test_find_arxiv_id_accepts_a_bare_id_with_no_prefix() -> None:
+    assert rs.find_arxiv_id("2103.00020") == "2103.00020"
+    assert rs.find_arxiv_id("2103.00020v2") == "2103.00020"
+    assert rs.find_arxiv_id("hep-th/9901001") == "hep-th/9901001"
+    assert rs.find_arxiv_id("  2103.00020  ") == "2103.00020"  # CLI args may carry whitespace
+
+
+def test_find_arxiv_id_does_not_match_a_bare_number_inside_a_longer_reference() -> None:
+    # A bare id is only accepted when it is the *entire* string; the same shape
+    # inside a real reference must still require the "arxiv" marker to match.
+    assert rs.find_arxiv_id("results for sample 2103.00020 were inconclusive") is None
+    assert rs.find_arxiv_id(f"{ALPHAFOLD} 2103.00020") is None
+
+
 def test_arxiv_entries_become_candidates() -> None:
     xml = (FIX / "arxiv_title_roberta.xml").read_text(encoding="utf-8")
     (cand,) = rs.candidates_from_arxiv(xml)

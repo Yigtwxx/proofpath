@@ -7,17 +7,23 @@ call. Neither holds logic of its own; see the design spec, section 13.
 from __future__ import annotations
 
 import sys
+from contextlib import ExitStack
+from enum import Enum
 from pathlib import Path
 from typing import Annotated
 
 import typer
 
-from proofpath import __version__
+from proofpath import __version__, ui
 from proofpath import config as cfg
+from proofpath import fetch as fetch_mod
 from proofpath import judge as judge_mod
+from proofpath import oa as oa_mod
 from proofpath import resolve as resolve_mod
+from proofpath.browser import ConsentGate
 from proofpath.cache import Cache
 from proofpath.paths import config_path
+from proofpath.polite import PoliteClient
 
 app = typer.Typer(
     name="proofpath",
@@ -53,136 +59,131 @@ def main(
         bool,
         typer.Option("--version", callback=_version_callback, is_eager=True, help="Show version."),
     ] = False,
+    no_color: Annotated[
+        bool, typer.Option("--no-color", help="Plain text, no colour (NO_COLOR also works).")
+    ] = False,
+    quiet: Annotated[
+        bool, typer.Option("--quiet", "-q", help="Drop stage and note lines; findings remain.")
+    ] = False,
 ) -> None:
     """Launch the interactive TUI when called with no subcommand."""
+    ctx.obj = ui.build(no_color=no_color, quiet=quiet)
     if ctx.invoked_subcommand is not None:
         return
     typer.echo(_NOT_BUILT_YET)
     raise typer.Exit(EXIT_CLEAN)
 
 
-permissions_app = typer.Typer(
-    name="permissions",
-    help="Show or change what proofpath is allowed to do on this machine.",
+def _ui(ctx: typer.Context) -> ui.Ui:
+    found = ctx.find_object(ui.Ui)
+    assert found is not None, "Ui not built by the app callback"
+    return found
+
+
+def _fail(out: ui.Ui, exc: Exception) -> typer.Exit:
+    ui.error(out, str(exc))
+    return typer.Exit(EXIT_ERROR)
+
+
+def _load_config(out: ui.Ui) -> cfg.Config:
+    try:
+        return cfg.load_config()
+    except cfg.ConfigError as exc:
+        raise _fail(out, exc) from exc
+
+
+config_app = typer.Typer(
+    name="config",
+    help="Show or change settings: permissions, contact address, judge provider.",
     invoke_without_command=True,
     no_args_is_help=False,
 )
-app.add_typer(permissions_app)
+app.add_typer(config_app)
 
 
-@permissions_app.callback()
-def permissions(ctx: typer.Context) -> None:
-    """Print the current permissions and where they are stored."""
-    if ctx.invoked_subcommand is not None:
-        return
-    try:
-        current = cfg.load_config()
-    except cfg.ConfigError as exc:
-        typer.echo(str(exc), err=True)
-        raise typer.Exit(EXIT_ERROR) from exc
+@config_app.callback()
+def config(ctx: typer.Context) -> None:
+    """Print the config path and every section as TOML (same as ``config show``)."""
+    if ctx.invoked_subcommand is None:
+        config_show(ctx)
+
+
+@config_app.command("show")
+def config_show(ctx: typer.Context) -> None:
+    """Print the config path and every section as TOML."""
+    out = _ui(ctx)
+    current = _load_config(out)
     path = config_path()
     state = "" if path.exists() else "  (not written yet, showing defaults)"
-    typer.echo(f"config  {path}{state}")
-    typer.echo("")
-    typer.echo("[permissions]")
-    typer.echo(f"install_browser = {current.permissions.install_browser}")
-    typer.echo(f"network         = {current.permissions.network}")
-    typer.echo("")
-    typer.echo("[fetch]")
-    typer.echo(f"respect_robots  = {str(current.fetch.respect_robots).lower()}")
-    typer.echo("")
-    typer.echo("[contact]")
-    typer.echo(f"email           = {current.contact.email!r}")
+    ui.kv(out, "config", f"{path}{state}")
+    ui.blank(out)
+    out.out.print(cfg.render_config(current))
 
 
-@permissions_app.command("set")
-def permissions_set(
-    key: Annotated[str, typer.Argument(help="Permission name, e.g. install_browser.")],
-    value: Annotated[str, typer.Argument(help="ask | allow | deny")],
+@config_app.command("path")
+def config_path_cmd(ctx: typer.Context) -> None:
+    """Print the config file path, nothing else (pipeable)."""
+    _ui(ctx).out.print(str(config_path()))
+
+
+_JUDGE_PRESET_FIELDS = ("provider", "model", "base_url", "api_key_env")
+
+
+@config_app.command("set")
+def config_set(
+    ctx: typer.Context,
+    key: Annotated[str, typer.Argument(help="SECTION.KEY, e.g. permissions.install_browser")],
+    value: Annotated[str, typer.Argument(help="New value, as it would appear in the file.")],
 ) -> None:
-    """Change one permission without opening the config file."""
-    try:
-        cfg.set_value(f"permissions.{key}", value)
-    except cfg.ConfigError as exc:
-        typer.echo(str(exc), err=True)
-        raise typer.Exit(EXIT_ERROR) from exc
-    typer.echo(f"permissions.{key} = {value}  ({config_path()})")
+    """Change one setting without opening the config file.
 
-
-judge_app = typer.Typer(
-    name="judge",
-    help="Optional LLM second opinion: show settings, change provider, test the key.",
-    invoke_without_command=True,
-    no_args_is_help=False,
-)
-app.add_typer(judge_app)
-
-
-def _judge_settings() -> tuple[cfg.JudgeConfig, judge_mod.ApiKey | None]:
-    try:
-        current = cfg.load_config().judge
-    except cfg.ConfigError as exc:
-        typer.echo(str(exc), err=True)
-        raise typer.Exit(EXIT_ERROR) from exc
-    return current, judge_mod.resolve_api_key(current.api_key_env)
-
-
-@judge_app.callback()
-def judge(ctx: typer.Context) -> None:
-    """Print the judge provider, model and where the API key is looked for."""
-    if ctx.invoked_subcommand is not None:
+    ``judge.provider`` is special: it also applies that provider's model,
+    base URL and API key env var, so switching provider does not leave a
+    stale model/base_url pointed at the old one.
+    """
+    out = _ui(ctx)
+    if key == "judge.provider":
+        try:
+            preset = judge_mod.provider_defaults(value)
+        except judge_mod.JudgeError as exc:
+            raise _fail(out, exc) from exc
+        try:
+            for name in _JUDGE_PRESET_FIELDS:
+                cfg.set_value(f"judge.{name}", getattr(preset, name))
+        except cfg.ConfigError as exc:
+            raise _fail(out, exc) from exc
+        for name in _JUDGE_PRESET_FIELDS:
+            out.out.print(f"judge.{name} = {getattr(preset, name)}  ({config_path()})")
         return
-    current, key = _judge_settings()
-    typer.echo(f"provider    {current.provider}")
-    typer.echo(f"model       {current.model}")
-    typer.echo(f"base_url    {current.base_url}")
-    typer.echo(f"api_key     {current.api_key_env or '(none needed)'}")
-    typer.echo(f"key found   {key.source if key else 'no'}")
-    typer.echo("")
-    typer.echo("The key is read from the environment variable, then from:")
-    for path in judge_mod.default_dotenv_paths():
-        typer.echo(f"  {path}")
+    try:
+        cfg.set_value(key, value)
+    except cfg.ConfigError as exc:
+        raise _fail(out, exc) from exc
+    out.out.print(f"{key} = {value}  ({config_path()})")
 
 
-@judge_app.command("check")
-def judge_check() -> None:
-    """Send one tiny request to prove the provider, model and key work."""
-    current, key = _judge_settings()
+@config_app.command("check")
+def config_check(ctx: typer.Context) -> None:
+    """Send one tiny request to prove the judge provider, model and key work."""
+    out = _ui(ctx)
+    current = _load_config(out).judge
+    key = judge_mod.resolve_api_key(current.api_key_env)
     if current.api_key_env and key is None:
-        typer.echo(f"no API key found for {current.provider}.", err=True)
-        typer.echo(f"Put a line like  {current.api_key_env}=...  in one of:", err=True)
+        ui.error(out, f"no API key found for {current.provider}.")
+        out.err.print(f"Put a line like  {current.api_key_env}=...  in one of:")
         for path in judge_mod.default_dotenv_paths():
-            typer.echo(f"  {path}", err=True)
-        typer.echo(f"or export {current.api_key_env} in your shell.", err=True)
+            out.err.print(f"  {path}")
+        out.err.print(f"or export {current.api_key_env} in your shell.")
         raise typer.Exit(EXIT_ERROR)
     result = judge_mod.check(current, key)
-    typer.echo(f"provider    {current.provider}")
-    typer.echo(f"model       {result.model}")
-    typer.echo(f"key from    {key.source if key else '(none needed)'}")
+    ui.kv(out, "provider", current.provider)
+    ui.kv(out, "model", result.model)
+    ui.kv(out, "key from", key.source if key else "(none needed)")
     if result.ok:
-        typer.echo(f"status      ok  {result.latency_ms} ms")
+        ui.state_line(out, "status", "ok", f"{result.latency_ms} ms")
         return
-    typer.echo(f"status      FAILED  {result.detail}", err=True)
+    ui.state_line(out, "status", "FAILED", result.detail)
     raise typer.Exit(EXIT_ERROR)
-
-
-@judge_app.command("set")
-def judge_set(
-    key: Annotated[str, typer.Argument(help="provider | model | base_url | api_key_env")],
-    value: Annotated[str, typer.Argument()],
-) -> None:
-    """Change one judge setting. Setting the provider also applies its defaults."""
-    try:
-        if key == "provider":
-            defaults = judge_mod.provider_defaults(value)
-            for name in ("provider", "model", "base_url", "api_key_env"):
-                cfg.set_value(f"judge.{name}", getattr(defaults, name))
-        else:
-            cfg.set_value(f"judge.{key}", value)
-    except (cfg.ConfigError, judge_mod.JudgeError) as exc:
-        typer.echo(str(exc), err=True)
-        raise typer.Exit(EXIT_ERROR) from exc
-    typer.echo(f"judge.{key} = {value}  ({config_path()})")
 
 
 cache_app = typer.Typer(
@@ -199,33 +200,37 @@ def cache(ctx: typer.Context) -> None:
     """Show where the cache lives and how much it holds."""
     if ctx.invoked_subcommand is not None:
         return
+    out = _ui(ctx)
     with Cache() as db:
         entries = db.summary()
-        typer.echo(f"cache     {db.path}")
-        typer.echo(
-            f"holds     {len(entries)} sources, {sum(e.chunks for e in entries)} chunks, "
-            f"{sum(e.verdicts for e in entries)} verdicts"
+        ui.kv(out, "cache", str(db.path))
+        ui.kv(
+            out,
+            "holds",
+            f"{len(entries)} sources, {sum(e.chunks for e in entries)} chunks, "
+            f"{sum(e.verdicts for e in entries)} verdicts",
         )
-        typer.echo("open it with DB Browser for SQLite, TablePlus or DBeaver — plain tables.")
+        ui.hint(out, "open it with DB Browser for SQLite, TablePlus or DBeaver — plain tables.")
 
 
 @cache_app.command("path")
-def cache_path() -> None:
+def cache_path(ctx: typer.Context) -> None:
     """Print the SQLite file path, nothing else (pipeable)."""
     with Cache() as db:
-        typer.echo(str(db.path))
+        _ui(ctx).out.print(str(db.path))
 
 
 @cache_app.command("ls")
-def cache_ls() -> None:
+def cache_ls(ctx: typer.Context) -> None:
     """List cached sources with chunk and verdict counts and text expiry."""
     from datetime import datetime, timezone
 
+    out = _ui(ctx).out
     now = datetime.now(timezone.utc).isoformat()
     with Cache() as db:
         entries = db.summary()
     if not entries:
-        typer.echo("cache is empty")
+        out.print("cache is empty")
         return
     for e in entries:
         if e.expires_at is None:
@@ -234,7 +239,7 @@ def cache_ls() -> None:
             expiry = "raw text expired"
         else:
             expiry = f"raw text until {e.expires_at[:10]}"
-        typer.echo(
+        out.print(
             f"{e.source_id}  {e.title or '(untitled)'}  [{e.scheme}/{e.text_kind}]  "
             f"{e.chunks} chunk(s), {e.verdicts} verdict(s), {expiry}"
         )
@@ -242,40 +247,43 @@ def cache_ls() -> None:
 
 @cache_app.command("show")
 def cache_show(
+    ctx: typer.Context,
     source_id: Annotated[str, typer.Argument(help="Source id, as listed by ls.")],
 ) -> None:
     """Print a source's chunks and verdicts."""
     with Cache() as db:
         detail = db.detail(source_id)
     if detail is None:
-        typer.echo(f"no cached source {source_id!r}", err=True)
+        ui.error(_ui(ctx), f"no cached source {source_id!r}")
         raise typer.Exit(EXIT_ERROR)
+    out = _ui(ctx).out
     s = detail.summary
-    typer.echo(
+    out.print(
         f"{s.source_id}  {s.title or '(untitled)'}  [{s.scheme}/{s.text_kind}]  "
         f"fetched {s.fetched_at[:19]}"
     )
     if detail.embed_models:
-        typer.echo(f"embeddings  {', '.join(detail.embed_models)}  dim={detail.dim}")
-    typer.echo("")
-    typer.echo(f"chunks ({len(detail.chunks)})")
+        out.print(f"embeddings  {', '.join(detail.embed_models)}  dim={detail.dim}")
+    out.print("")
+    out.print(f"chunks ({len(detail.chunks)})")
     for ordinal, text in detail.chunks:
-        typer.echo(f"  [{ordinal}] {text if text is not None else '(text expired)'}")
-    typer.echo("")
-    typer.echo(f"verdicts ({len(detail.verdicts)})")
+        out.print(f"  [{ordinal}] {text if text is not None else '(text expired)'}")
+    out.print("")
+    out.print(f"verdicts ({len(detail.verdicts)})")
     for v in detail.verdicts:
-        typer.echo(
+        out.print(
             f"  {v.label:<9} {v.tier:<6} {v.score:.2f}  claim {v.claim_hash[:12]}…  "
             f"model {v.model_id}"
         )
         if v.passage_text is not None:
-            typer.echo(f'            "{v.passage_text}"  [{v.passage_index}]')
+            out.print(f'            "{v.passage_text}"  [{v.passage_index}]')
         if v.reason:
-            typer.echo(f"            {v.reason}")
+            out.print(f"            {v.reason}")
 
 
 @cache_app.command("clear")
 def cache_clear(
+    ctx: typer.Context,
     expired: Annotated[
         bool, typer.Option("--expired", help="Only sources whose raw text expired.")
     ] = False,
@@ -283,56 +291,209 @@ def cache_clear(
     """Delete cached sources with their text, chunks and verdicts."""
     with Cache() as db:
         removed = db.clear(expired_only=expired)
-    typer.echo(f"removed {removed} source(s){' (expired only)' if expired else ''}")
+    _ui(ctx).out.print(f"removed {removed} source(s){' (expired only)' if expired else ''}")
+
+
+class Format(str, Enum):
+    TEXT = "text"
+    JSON = "json"
 
 
 @app.command()
 def resolve(
+    ctx: typer.Context,
     reference: Annotated[
         str, typer.Argument(help="One reference string, as it appears in a bibliography.")
     ],
+    fmt: Annotated[Format, typer.Option("--format", help="Output format.")] = Format.TEXT,
 ) -> None:
     """Check whether a cited reference exists (Crossref, Semantic Scholar, arXiv, OpenAlex)."""
-    try:
-        contact = cfg.load_config().contact.email
-    except cfg.ConfigError as exc:
-        typer.echo(str(exc), err=True)
-        raise typer.Exit(EXIT_ERROR) from exc
+    out = _ui(ctx)
+    contact = _load_config(out).contact.email
     resolver = resolve_mod.Resolver(contact_email=contact)
     result = resolver.resolve(reference)
-    typer.echo(f"state      {result.state.value}")
+    best = result.best
+    retraction = resolver.retraction(best.doi) if best is not None and best.doi else None
+
+    if fmt is Format.JSON:
+        ui.emit_json(out, {"result": result, "retraction": retraction})
+    else:
+        _print_resolve(out, result, retraction)
+
+    if result.state is resolve_mod.State.RESOLVED and retraction is None:
+        return
+    # Every other state is a finding, including "provider unavailable" (spec 13.3),
+    # and so is a resolved but retracted source (spec 13.2 ``warning[retracted]``).
+    raise typer.Exit(EXIT_FINDINGS)
+
+
+def _print_resolve(
+    out: ui.Ui, result: resolve_mod.ResolveResult, retraction: resolve_mod.Retraction | None
+) -> None:
+    ui.kv(out, "state", result.state.value, state=True)
     best = result.best
     if best is not None:
-        typer.echo(f"record     {best.title}")
-        typer.echo(
-            f"           {best.first_author} {best.year or '?'} · {best.venue or '—'} "
-            f"· via {best.provider}"
+        ui.kv(out, "record", best.title)
+        ui.kv(
+            out,
+            "",
+            f"{best.first_author} {best.year or '?'} · {best.venue or '—'} · via {best.provider}",
         )
-        typer.echo(f"           {('https://doi.org/' + best.doi) if best.doi else best.url}")
+        ui.kv(out, "", ("https://doi.org/" + best.doi) if best.doi else best.url)
         if result.match is not None:
             m = result.match
-            typer.echo(
-                f"agreement  title {m.title:.2f} · author {'yes' if m.author else 'no'} · "
-                f"year {'yes' if m.year else 'no'}"
+            ui.kv(
+                out,
+                "agreement",
+                f"title {m.title:.2f} · author {'yes' if m.author else 'no'} · "
+                f"year {'yes' if m.year else 'no'}",
             )
         if best.doi:
-            retraction = resolver.retraction(best.doi)
             if retraction is None:
-                typer.echo("retraction not retracted (Crossref/Retraction Watch, OpenAlex)")
+                ui.state_line(
+                    out, "retraction", "not retracted", "(Crossref/Retraction Watch, OpenAlex)"
+                )
             else:
-                typer.echo(f"retraction RETRACTED {retraction.date or ''} — {retraction.source}")
+                ui.state_line(
+                    out,
+                    "retraction",
+                    "RETRACTED",
+                    f"{retraction.date or ''} — {retraction.source}",
+                )
     elif result.candidates:
-        typer.echo(f"checked    {len(result.candidates)} candidate(s), none agrees on the fields:")
+        ui.kv(out, "checked", f"{len(result.candidates)} candidate(s), none agrees on the fields:")
         for c in result.candidates[:5]:
-            typer.echo(
-                f"           - {c.title[:70]} ({c.first_author} {c.year or '?'}, {c.provider})"
-            )
+            ui.kv(out, "", f"- {c.title[:70]} ({c.first_author} {c.year or '?'}, {c.provider})")
     for note in result.notes:
-        typer.echo(f"note       {note}")
-    if result.state in (resolve_mod.State.GHOST, resolve_mod.State.AMBIGUOUS):
-        raise typer.Exit(EXIT_FINDINGS)
-    if result.state is resolve_mod.State.UNAVAILABLE:
+        ui.note(out, note)
+
+
+@app.command()
+def fetch(
+    ctx: typer.Context,
+    target: Annotated[
+        str, typer.Argument(help="An http(s) URL, a DOI, or an arXiv id (arXiv:2103.00020).")
+    ],
+    fmt: Annotated[Format, typer.Option("--format", help="Output format.")] = Format.TEXT,
+    allow_browser: Annotated[
+        bool, typer.Option("--allow-browser", help="Permit the browser step for this run.")
+    ] = False,
+    no_browser: Annotated[
+        bool, typer.Option("--no-browser", help="Refuse the browser step for this run.")
+    ] = False,
+    no_cache: Annotated[
+        bool, typer.Option("--no-cache", help="Neither read nor fill the local cache.")
+    ] = False,
+    show: Annotated[
+        int, typer.Option("--show", help="Print the first N characters of the text.")
+    ] = 0,
+) -> None:
+    """Fetch one source through the ladder (URL) or the open-access chain (DOI, arXiv)."""
+    out = _ui(ctx)
+    config = _load_config(out)
+    if allow_browser and no_browser:
+        ui.error(out, "--allow-browser and --no-browser cannot be combined.")
         raise typer.Exit(EXIT_ERROR)
+    override = True if allow_browser else False if no_browser else None
+
+    is_url = target.startswith(("http://", "https://"))
+    doi = arxiv_id = None
+    if not is_url:
+        doi = resolve_mod.find_doi(target)
+        arxiv_id = None if doi else resolve_mod.find_arxiv_id(target)
+        if doi is None and arxiv_id is None:
+            ui.error(out, f"not a URL, DOI or arXiv id: {target!r}")
+            raise typer.Exit(EXIT_ERROR)
+
+    interactive = cfg.is_interactive()
+    gate = ConsentGate(
+        config.permissions.install_browser, interactive=interactive, override=override
+    )
+    result: fetch_mod.Fetched | oa_mod.Evidence
+    with ExitStack() as stack:
+        cache = None if no_cache else stack.enter_context(Cache())
+        fetcher = fetch_mod.Fetcher(config=config, gate=gate, cache=cache, interactive=interactive)
+        stack.callback(fetcher.close)
+        if is_url:
+            result = fetcher.fetch(target)
+        else:
+            client = PoliteClient(contact_email=config.contact.email)
+            stack.callback(client.client.close)
+            chain = oa_mod.OpenAccess(
+                fetcher, client, contact_email=config.contact.email, cache=cache
+            )
+            result = chain.fetch(doi, arxiv_id)
+        stats = fetcher.summary()
+
+    if fmt is Format.JSON:
+        if show > 0:
+            ui.hint(out, "--show is ignored under --format json", err=True)
+        browser = {
+            "decision": gate.decision,
+            "skipped": gate.skipped,
+            "skipped_urls": gate.skipped_urls,
+            "install_log": gate.install_log,
+        }
+        ui.emit_json(out, {"target": target, "result": result, "stats": stats, "browser": browser})
+    else:
+        if isinstance(result, fetch_mod.Fetched):
+            _print_fetched(out, result)
+        else:
+            _print_evidence(out, result)
+        _print_gate(out, gate)
+        if show > 0:
+            ui.kv(out, "text", result.text[:show])
+
+    if isinstance(result, fetch_mod.Fetched):
+        clean = result.ok and result.words > 0  # reached with nothing to read is not clean
+    else:
+        clean = result.kind == "fulltext"
+    if clean:
+        return
+    # Abstract-only and every UNVERIFIED state are findings (spec 13.3).
+    raise typer.Exit(EXIT_FINDINGS)
+
+
+def _print_fetched(out: ui.Ui, result: fetch_mod.Fetched) -> None:
+    ui.kv(out, "outcome", result.outcome.value, state=True)
+    ui.kv(out, "step", f"{result.step} ({fetch_mod.STEP_NAMES[result.step]})")
+    ui.kv(out, "status", str(result.status) if result.status is not None else "—")
+    ui.kv(out, "type", f"{result.content_type or '—'} · {result.kind}")
+    ui.kv(out, "words", str(result.words))
+    ui.kv(out, "url", result.final_url or "—")
+    ui.kv(out, "cached", "yes" if result.from_cache else "no")
+    for note in result.notes:
+        ui.note(out, note)
+
+
+def _print_evidence(out: ui.Ui, result: oa_mod.Evidence) -> None:
+    if result.state:
+        # abstract / none: the state word is the styled one, not the kind.
+        ui.state_line(out, "evidence", result.state, prefix=f"{result.kind} — ")
+    else:
+        ui.state_line(out, "evidence", result.kind)  # fulltext: kind is the state word.
+    ui.kv(out, "source", result.source or "—")
+    ui.kv(out, "words", str(result.words))
+    ui.kv(out, "url", result.url or "—")
+    for attempt in result.attempts:
+        ui.note(
+            out,
+            f"{attempt.location.label:<13} {attempt.outcome.value:<44} "
+            f"step {attempt.step}   {attempt.words} words",
+            key="attempt",
+        )
+    for note in result.notes:
+        ui.note(out, note)
+
+
+def _print_gate(out: ui.Ui, gate: ConsentGate) -> None:
+    """The section 7.1 permission lines: only when the browser step mattered."""
+    if gate.consulted:
+        ui.kv(out, "browser", gate.decision.reason)
+    if gate.skipped:
+        ui.kv(out, "skipped", f"{gate.skipped} source(s) because the browser was not permitted")
+    for line in gate.install_log:
+        ui.kv(out, "install", line)
 
 
 @app.command()

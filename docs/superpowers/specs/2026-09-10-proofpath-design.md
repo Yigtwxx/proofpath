@@ -120,6 +120,16 @@ Sampled 5 well-known DOIs through OpenAlex:
 Direct full text is available for well under half of citations. The abstract
 fallback is therefore a primary path, not an edge case, and must be labelled.
 
+**Measured again on 2026-09-11 with the real chain (Phase 4, 50 resolved DOIs from
+the ghost set, browser step denied):** full text **72 %** (36/50: Semantic Scholar
+`openAccessPdf` 23, arXiv 9, Crossref TDM links 3, Europe PMC 1), abstract only
+18 %, nothing 10 %. Every non-full-text result carried an honesty state — 12 of them
+`UNVERIFIED (blocked, browser not permitted)`, which is the ceiling the consent
+prompt (§7.1) exists to lift. Step 2 (`curl_cffi`) won 7 fetches that step 1 lost,
+Wayback 3. Two findings changed the code: DataCite arXiv DOIs (`10.48550/arXiv.*`)
+carry their own arXiv id (9 of the 50), and a 200 page with no extractable text is
+a bot wall, not content. Full table: `docs/eval/2026-09-11-coverage.md`.
+
 Raw HTTP fetch results:
 
 | Target | HTTP | Extracted text | Usable |
@@ -155,7 +165,7 @@ Measured install cost per step (2026-09-10, macOS arm64 wheels):
 | Step | Method | Added install cost | Consent |
 |---|---|---|---|
 | 1 | `httpx` + descriptive User-Agent | — (base) | none |
-| 2 | `scrapling` parsing + `curl_cffi` TLS impersonation | **2.7 MB** | none — bundled |
+| 2 | `curl_cffi` TLS impersonation (called directly; `scrapling` is the HTML parser only, its fetchers need playwright) | **2.7 MB** | none — bundled |
 | 3 | `scrapling[fetchers]` browser engine (playwright/patchright) | **~81 MB wheels + ~200 MB browser download** | **explicit, required** |
 | 4 | Wayback Machine API | — | none |
 | 5 | give up → `UNVERIFIED (blocked)` / `(unreachable)` | — | — |
@@ -459,10 +469,16 @@ proofpath check --url https://bsky.app/... # social provider
 proofpath check draft.md --format sarif    # inline problems in VS Code
 proofpath check paper.pdf --judge llm      # opt-in second opinion
 
-proofpath permissions                      # show current permissions + config path
-proofpath permissions set install_browser allow
+proofpath resolve "Jumper J, ... Nature 2021"   # one reference, one stage
+proofpath fetch 10.1038/s41586-021-03819-2 # one source through the OA chain and ladder
+
+proofpath config                           # show every setting + config path
+proofpath config set permissions.install_browser allow
+proofpath config check                     # judge provider, key, reachability
 proofpath cache clear
 ```
+
+The full surface, output language, exit codes and global flags are fixed in §13.3.
 
 `proofpath` with no arguments launches the TUI; `proofpath <subcommand>` runs
 one-shot. Implemented as a Typer callback with `invoke_without_command=True`, so a
@@ -479,9 +495,10 @@ Built with `textual`. Accepts a file path, a URL, or raw pasted text. Streams
 progress, is cancellable mid-run, and writes a report on completion.
 
 ```
-╭─ proofpath ──────────────────────────────────────────── academic · offline ─╮
-│  Paste a file path, a URL, or a claim.        /help  /config  /quit          │
-╰─────────────────────────────────────────────────────────────────────────────╯
+   ,_,
+  (o.o)~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~[PROOF]
+   " "    proofpath v0.1.0                            academic . offline . mps
+          paste a file path, a URL, or a claim.            /help  /config  /quit
 
 › ~/Desktop/paper.pdf
 
@@ -520,6 +537,42 @@ progress, is cancellable mid-run, and writes a report on completion.
 › _
 ```
 
+**The ferret (decided 2026-09-11).** The banner at the top is the tool's pet, in the
+manner of Claude Code's welcome header: shown once at launch, pinned above the log,
+never repeated. A ferret because English *ferrets out* the facts, and because its
+long body becomes the path the name promises — the `~` line runs from the head to a
+red `[PROOF]` stamp at the far right. The stamp is the banner's **only** coloured
+element (the single brand use of red allowed by §13.3); the animal itself is drawn
+in the default foreground, bold.
+
+```
+   ,_,
+  (o.o)~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~[PROOF]
+   " "    proofpath v0.1.0                            academic . offline . mps
+          paste a file path, a URL, or a claim.            /help  /config  /quit
+```
+
+Rules for drawing it:
+
+- Pure ASCII — no box drawing, no emoji — so Windows Terminal at 80 columns
+  (assumption 3.3) renders it identically. The rest of the TUI may use box drawing;
+  the pet may not.
+- The body stretches: `~` count = terminal width − head − stamp − margins, minimum 12.
+  Below 60 columns the stamp is dropped; below 40 the body is dropped and only the
+  head and the two text lines remain. It re-flows on resize.
+- Line 2 carries the version and the run context (provider · online/offline ·
+  device); line 3 the prompt hint and the slash commands. Both are plain text; the
+  version is never coloured.
+- The eyes are the only animated part, and only in the TUI: `(o.o)` idle, with one
+  blink `(-.-)` of ~150 ms every 6–10 s at random; `(>.>)` while a run is fetching or
+  verifying (looking down the path); `(O.O)` for two seconds when a run ends with
+  findings; `(^.^)` for two seconds when a run ends clean. Nothing else moves, and
+  the animation is disabled when the terminal reports no colour support, on
+  `--no-color`, and in `-q`.
+- The one-shot CLI never prints the pet; `proofpath --version` prints one line.
+- Ownership: the banner lives in `tui/banner.py`; `ui.py` supplies the red for the
+  stamp; no other module draws any part of it.
+
 Design rules:
 
 - Each pipeline stage is one collapsible block. The provider or model that produced
@@ -535,6 +588,48 @@ Design rules:
 - The footer always shows coverage. It is not optional and does not scroll away.
 - Permission prompts appear inline at the point of failure with a slash command to
   answer, never as a modal that blocks the log.
+- **Slash commands have an awaiting mode (decided 2026-09-11).** A verb typed without
+  its argument — `/check`, `/resolve`, `/fetch` — does not error: the input bar takes
+  the verb's accent tint and a placeholder (`paste a file path or URL`), and waits.
+  `Esc` cancels and restores the bar. Once the argument is submitted the bar returns
+  to its normal colour and the run starts; typed with the argument on one line
+  (`/check ~/paper.pdf`) the mode is skipped and the run starts at once. In both
+  cases the echoed command line stays in the verb's accent colour in the log, so a
+  session with several runs reads as a sequence of coloured headings — nothing else
+  in the log keeps that colour.
+
+  ```
+  › /check                                   ← bar tinted, waiting
+  ›  paste a file path or URL
+
+  › /check ~/Desktop/paper.pdf               ← stays tinted in the log
+    ⏺ Parse …
+  ```
+- **Several runs per session (decided 2026-09-11).** Every submitted `/check` becomes
+  its own block in the log at once, numbered and coloured from a rotating palette
+  (`#1`, `#2`, `#3` … each with a distinct accent; the block header, its command line
+  and its progress bars carry that colour). Runs are scheduled **by stage, not by
+  kind**: the I/O-bound stages — parse, resolve, fetch — run concurrently for up to
+  three runs at a time (per-host politeness limits are shared across runs), while
+  **verify** (the NLI model) is a single FIFO slot, because one model on one device
+  is the bottleneck. A block therefore shows one of `queued`, `running`, `waiting for
+  verify`, `verifying`, `done`, `cancelled`. `/cancel #n` stops one run; finished
+  blocks keep their findings and coverage line in place, newest run last.
+
+  ```
+  #1  /check https://…/s41586-021-03819-2        done          coverage 62/21/17%
+  #2  /check ~/Desktop/draft.md                  verifying     ████████░░░░  51/118
+  #3  /check ~/Papers/review.pdf                 waiting for verify  ·  fetched 30/34
+  ```
+- **Mouse works everywhere the keyboard does (decided 2026-09-11).** Textual gives
+  clicks, wheel scrolling and hover natively; the rule is that no action is
+  mouse-only and none is keyboard-only. Clickable targets: a run header toggles the
+  block open/closed; a stage line toggles its detail; a finding toggles its full
+  quoted passage; the inline permission prompt renders `[allow once] [always] [no]
+  [never]` as buttons, equal to typing `/allow …`; a `#n` reference or a source URL
+  is a terminal hyperlink (OSC 8) that opens in the browser, and `⧉` next to a
+  passage copies it. Right-click and drag do nothing special. In a terminal without
+  mouse reporting every target keeps its keyboard path, so nothing is lost.
 
 ### 13.2 One-shot output
 
@@ -581,6 +676,73 @@ warning[retracted]: cited source was retracted 2023-06
 Exit codes: `0` clean, `1` findings present, `2` the run itself failed. CI can gate
 on this without parsing the text.
 
+### 13.3 CLI surface and output language (decided 2026-09-11)
+
+**The TUI is the primary surface.** A user types `proofpath` and does everything inside
+it; the README, `--help` and every example lead with that. The one-shot subcommands
+below exist for the places a TUI cannot run — CI, pipes, scripts, `--format sarif >
+file` — and are documented as that path, not as the main one. They share one
+vocabulary. Verbs are flat; settings live under `config`; the cache is data, not a
+setting, and stays its own group.
+
+```
+proofpath                                   bare → TUI
+proofpath [--no-color] [-q|--quiet] <verb|group> ...
+
+proofpath check TARGET      [--format text|json|sarif] [--judge] [--allow-browser|--no-browser] [--no-cache]
+proofpath resolve REF       [--format text|json]
+proofpath fetch TARGET      [--format text|json] [--allow-browser|--no-browser] [--no-cache] [--show N]
+
+proofpath config            = config show: config path, then every section as TOML
+proofpath config show | path
+proofpath config set SECTION.KEY VALUE      permissions.install_browser allow · contact.email … · judge.provider …
+proofpath config check                      judge provider, key presence, reachability (was `judge check`)
+
+proofpath cache path | ls | show ID | clear [--expired]
+```
+
+`permissions` and `judge` as top-level commands are removed before any release
+carries them; `config set permissions.<key>` and `config set judge.<key>` replace them.
+
+**Output language.** All human output goes through one thin module, `ui.py`, built on
+`rich.Console`; commands never format on their own.
+
+| Rule | Decision |
+|---|---|
+| Layout | key/value lines as a borderless grid, key column 10 characters (`state      RESOLVED`); no panels, no boxed tables — output must stay greppable when piped |
+| Colour | only on a TTY and only on state words: `ok`/`RESOLVED`/`SUPPORTED` green · `UNVERIFIED …`/`LOW CONFIDENCE …`/`AMBIGUOUS` yellow · `GHOST REFERENCE`/`REFUTED`/`RETRACTED` red · `NEI` dim. `NO_COLOR`, `--no-color` or a non-TTY stdout → plain text |
+| Progress | bars only on a TTY, one per stage (§13.2); never in piped output |
+| Vocabulary | every verb opens with one state line: `state` (resolve) · `outcome` (fetch URL) · `evidence` (fetch DOI) · `verdict` (check). Then `note` lines (facts), `hint` lines (what the user can do), and the permission lines `browser` / `skipped` (§7.1) |
+| Streams | data on stdout; errors and the §7.1 prompt on stderr |
+| `--format json` | the result dataclass dumped with `orjson` (enums by value, bytes omitted); stdout carries **only** the JSON, human messages go to stderr |
+| `--format sarif` | `check` only |
+| `-q` / `--quiet` | stage lines and `note` lines suppressed; findings, the coverage summary and the exit code remain — a quiet run is never a silent one (rule 6) |
+| Exit codes | `0` clean · `1` findings, including every `UNVERIFIED` and `LOW CONFIDENCE` state · `2` only when the tool itself failed (bad arguments, config error, I/O, uncaught exception). "Provider unavailable" is a reported state, so it is `1`, not `2` |
+
+**Colour system (decided 2026-09-11).** Two layers, both drawn from the terminal's own
+16-colour ANSI palette — no hex values, so light and dark themes both work and
+`NO_COLOR` removes everything cleanly.
+
+| Layer | Colour | Used for |
+|---|---|---|
+| meaning | green | `ok` `RESOLVED` `SUPPORTED` `fulltext` `not retracted` |
+| meaning | yellow | `UNVERIFIED …` `LOW CONFIDENCE …` `AMBIGUOUS` `RESOLVED (low confidence)` `abstract`; the §7.1 permission prompt |
+| meaning | red | `GHOST REFERENCE` `REFUTED` `RETRACTED` `FAILED`; `error:` lines on stderr |
+| meaning | dim | `NEI` `none` `—` |
+| meaning | bold, no colour | the key column (`state`, `outcome`, `evidence`, `verdict`) |
+| accent | cyan · magenta · blue · bright cyan · bright magenta, rotating | one per run in the TUI (§13.1): its header, command line, progress bars, and the input bar's background tint (~15–20 %) while awaiting an argument |
+| — | underline, no colour | hyperlinks |
+
+Red, yellow and green are reserved for meaning and never used as accents; accents
+never use red, yellow or green. The coverage footer colours its three numbers the
+same way (full text green, abstract yellow, unverified red). `ui.py` owns these
+tables; nothing else in the package names a colour.
+
+**TUI mirror rule.** Every CLI verb and group exists in the TUI as the same-named slash
+command: `/check`, `/resolve`, `/fetch`, `/config`, `/cache`. Only `/allow`,
+`/summarize`, `/help` and `/quit` are TUI-specific. Both surfaces call the same
+library functions; neither holds logic.
+
 ## 14. Evaluation
 
 The tool is not shippable without a frozen evaluation set. Metrics are reported per
@@ -621,6 +783,9 @@ presented as evidence of absence.
 | `LOW CONFIDENCE (abstract only)` | full text unavailable, abstract used |
 | `UNVERIFIED (blocked)` | 403/bot protection, Scrapling absent or defeated |
 | `UNVERIFIED (unreachable)` | dead link, Wayback miss |
+| `UNVERIFIED (blocked, browser not permitted)` | steps 1–2 blocked and the §7.1 consent was denied, absent, or impossible without a TTY |
+| `UNVERIFIED (blocked, robots.txt)` | the site's `robots.txt` disallows the fetch; steps 3–4 are not attempted |
+| `UNVERIFIED (network not permitted)` | `permissions.network = deny`; nothing was fetched |
 | `UNVERIFIED (provider unavailable)` | API down or rate limited after backoff |
 | `AMBIGUOUS` | multiple plausible reference candidates — all listed |
 | `NEI` | source read, but it neither supports nor contradicts |

@@ -1,0 +1,18 @@
+{
+  "version": "6.9",
+  "hitCount": 1,
+  "resultList": {
+    "result": [
+      {
+        "id": "12345678",
+        "source": "MED",
+        "pmid": "12345678",
+        "doi": "10.1000/closed",
+        "title": "A closed article.",
+        "inEPMC": "N",
+        "inPMC": "N",
+        "isOpenAccess": "N"
+      }
+    ]
+  }
+}

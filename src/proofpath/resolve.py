@@ -11,7 +11,7 @@ providers to have been consulted, because Crossref alone does not index arXiv.
 from __future__ import annotations
 
 import re
-import time
+import time  # noqa: F401 - re-exported so tests can monkeypatch rs.time.sleep/monotonic
 import unicodedata
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
@@ -20,25 +20,19 @@ from typing import Any
 
 import httpx
 
-from proofpath import __version__
+from proofpath.polite import (  # noqa: F401 - re-exported for existing callers and tests
+    MAX_RETRY_AFTER,
+    MIN_INTERVAL,
+    REPO_URL,
+    PoliteClient,
+    ProviderError,
+)
 
 CROSSREF = "https://api.crossref.org/works"
 OPENALEX = "https://api.openalex.org/works"
 ARXIV = "https://export.arxiv.org/api/query"
 S2 = "https://api.semanticscholar.org/graph/v1/paper/search/match"
 OPENLIBRARY = "https://openlibrary.org/search.json"
-REPO_URL = "https://github.com/Yigtwxx/proofpath"
-
-# Minimum seconds between requests to one host. Crossref and OpenAlex tolerate
-# a few requests per second in the polite pool; arXiv asks for one every 3 s.
-MIN_INTERVAL = {
-    "api.crossref.org": 0.25,
-    "api.openalex.org": 0.25,
-    "api.semanticscholar.org": 1.1,
-    "export.arxiv.org": 3.0,
-    "openlibrary.org": 1.0,
-}
-MAX_RETRY_AFTER = 60.0
 
 STRONG_TITLE = 0.8
 WEAK_TITLE = 0.5
@@ -180,8 +174,20 @@ _ARXIV_ID = re.compile(
     re.I,
 )
 
+# A target that is *entirely* an arXiv id, with no "arxiv" marker at all — e.g. a
+# CLI argument typed as ``2103.00020`` rather than ``arXiv:2103.00020``. Anchored
+# to the whole (stripped) string so a bare id-shaped number inside a longer
+# reference is never mistaken for one (that still requires the marker above).
+_ARXIV_ID_BARE = re.compile(
+    r"^(?:(?P<new>\d{4}\.\d{4,5})|(?P<old>[a-z-]+(?:\.[A-Z]{2})?/\d{7}))(?:v\d+)?$",
+    re.I,
+)
+
 
 def find_arxiv_id(raw: str) -> str | None:
+    bare = _ARXIV_ID_BARE.fullmatch(raw.strip())
+    if bare:
+        return bare.group("new") or bare.group("old")
     match = _ARXIV_ID.search(raw)
     if not match:
         return None
@@ -513,10 +519,6 @@ def dedupe(candidates: Sequence[Candidate], raw: str) -> list[Candidate]:
     return [best[key][1] for key in order]
 
 
-class ProviderError(RuntimeError):
-    pass
-
-
 class Resolver:
     """Crossref + OpenAlex over HTTP, polite and with backoff. No key needed."""
 
@@ -528,48 +530,12 @@ class Resolver:
         retries: int = 2,
         timeout: float = 20.0,
     ) -> None:
-        self._email = contact_email
-        agent = f"proofpath/{__version__} ({REPO_URL}"
-        agent += f"; mailto:{contact_email})" if contact_email else ")"
-        self._client = client or httpx.Client(headers={"User-Agent": agent}, timeout=timeout)
-        self._retries = retries
-        self._last_call: dict[str, float] = {}
-
-    def _throttle(self, url: str) -> None:
-        host = httpx.URL(url).host
-        wait = self._last_call.get(host, -1e9) + MIN_INTERVAL.get(host, 0.0) - time.monotonic()
-        if wait > 0:
-            time.sleep(wait)
-        self._last_call[host] = time.monotonic()
+        self._polite = PoliteClient(
+            contact_email=contact_email, client=client, retries=retries, timeout=timeout
+        )
 
     def _get(self, url: str, params: dict[str, Any]) -> httpx.Response:
-        if self._email:
-            params = {**params, "mailto": self._email}
-        last = ""
-        for attempt in range(self._retries + 1):
-            self._throttle(url)
-            delay = 0.5 * 2**attempt
-            try:
-                response = self._client.get(url, params=params)
-            except httpx.HTTPError as exc:
-                last = type(exc).__name__
-            else:
-                if response.status_code == 404 or response.status_code < 400:
-                    return response
-                last = f"HTTP {response.status_code}"
-                if response.status_code not in (429, 500, 502, 503, 504):
-                    break
-                retry_after = response.headers.get("Retry-After")
-                if retry_after and retry_after.isdigit():
-                    if float(retry_after) > MAX_RETRY_AFTER:
-                        # A daily budget is gone (OpenAlex answers with hours).
-                        raise ProviderError(f"{last}, retry after {retry_after}s")
-                    delay = float(retry_after)
-                elif response.status_code == 429:
-                    delay = max(delay, 2.0 * 2**attempt)
-            if attempt < self._retries:
-                time.sleep(delay)
-        raise ProviderError(last)
+        return self._polite.get(url, params)
 
     def crossref_doi(self, doi: str) -> Candidate | None:
         response = self._get(f"{CROSSREF}/{doi}", {})
