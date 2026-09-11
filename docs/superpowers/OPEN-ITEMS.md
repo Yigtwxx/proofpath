@@ -3,6 +3,10 @@
 Everything left unresolved as of **2026-09-10**, written down so none of it has to be
 reconstructed from memory. Each entry says enough to be picked up cold.
 
+**2026-09-11 update:** every item in §2 and §5 was put to the author and decided; the
+two assumptions that gate packaging (3.1, 3.4) were checked. Outcomes are recorded
+inline and copied into the spec.
+
 Spec: `specs/2026-09-10-proofpath-design.md` · Plan: `plans/2026-09-10-proofpath-implementation-plan.md`
 
 ---
@@ -16,19 +20,17 @@ Spec: `specs/2026-09-10-proofpath-design.md` · Plan: `plans/2026-09-10-proofpat
 
 ---
 
-## 2. Decisions taken but not confirmed by the author
+## 2. Decisions — confirmed by the author 2026-09-11
 
-Recorded with the recommendation that was made, so they can be accepted or reversed
-deliberately rather than by default.
-
-| # | Decision | Recommended | Why it might change |
-|---|---|---|---|
-| 2.1 | `install_browser` default (spec §7.1) | `ask` | `deny` is safer but hides from the user that a blocked source was recoverable |
-| 2.2 | Reddit in v0.4 | include, optional | needs a user-registered OAuth app; Bluesky and HN work without one, so Reddit is never blocking |
-| 2.3 | `spiyweb` keeps its name | yes | the spider-web-as-graph metaphor fits; every clean alternative on PyPI was worse |
-| 2.4 | `reasonhound` keeps its name | yes | already a good name |
-| 2.5 | Turkish sources | after v0.4 | OpenAlex/Crossref coverage is much weaker for Turkish; half-supporting it would damage trust |
-| 2.6 | `--summarize` in the TUI | off by default there too | keeping "offline unless asked" true in both front-ends |
+| # | Decision | Outcome |
+|---|---|---|
+| 2.1 | `install_browser` default (spec §7.1) | **`ask`.** `deny` would hide that a blocked source was recoverable |
+| 2.2 | Reddit in v0.4 | **Included, optional.** User supplies an OAuth app; missing credentials are reported, never silently skipped |
+| 2.3 | `spiyweb` keeps its name | yes (not re-raised) |
+| 2.4 | `reasonhound` keeps its name | yes (not re-raised) |
+| 2.5 | Turkish sources | **After v0.4**, as a separate provider (TR Dizin / DergiPark class) |
+| 2.6 | `--summarize` in the TUI | **Off by default in both front-ends**; TUI enables with `/summarize` |
+| 2.7 | Database | **One local SQLite file** (sqlite-vec vectors, verdict cache, raw-text cache with TTL). No server database |
 
 ---
 
@@ -39,10 +41,10 @@ a phase.
 
 | # | Assumption | How to check | If wrong |
 |---|---|---|---|
-| 3.1 | **A usable NLI cross-encoder exists as ONNX.** The whole "no torch in the base install" decision rests on this and it was never verified. | Search the ONNX model zoo / HF for a DeBERTa-MNLI or similar exported model; measure it on SciFact dev | either export one with `optimum`, or make `[gpu]`/torch the default and accept the install size |
+| 3.1 | **A usable NLI cross-encoder exists as ONNX.** | **Checked 2026-09-11 — true.** `cross-encoder/nli-deberta-v3-base` @ `6c749ce` ships `onnx/` (739 MB fp32, 388 MB O4, 244 MB int8 ×4) plus `tokenizer.json`; `-small`/`-xsmall` likewise. `MoritzLaurer/DeBERTa-v3-base-mnli-fever-anli` has no ONNX. Quality on SciFact is still Phase 1's job | (fallback agreed if quality fails: export a better checkpoint with `optimum` ourselves; torch stays opt-in) |
 | 3.2 | `sqlite-vec` ships working wheels for Windows and macOS arm64 | install on all three in CI during Phase 0 | fall back to numpy brute force; per-document corpora are small enough |
 | 3.3 | `textual` renders the §13.1 layout correctly in Windows Terminal at 80 columns | render a fixture screen in CI on Windows | simplify the box drawing to ASCII |
-| 3.4 | SciFact, AVeriTeC and PubHealth are still downloadable and pinnable | fetch each once, record the revision | substitute a comparable set and note it in the spec |
+| 3.4 | SciFact, AVeriTeC and PubHealth are still downloadable and pinnable | **SciFact checked 2026-09-11:** HF `allenai/scifact` and `bigbio/scifact` are script-based loaders that `datasets ≥ 4` refuses; the AI2 tarball `scifact.s3-us-west-2.amazonaws.com/release/latest/data.tar.gz` returns 200 (Last-Modified 2021-01-26) → download with `httpx`, pin sha256. AVeriTeC / PubHealth still unchecked | substitute a comparable set and note it in the spec |
 | 3.5 | X Community Notes dumps are still published and parseable | download one day's file, inspect the columns | drop the X path entirely; Bluesky and HN already carry the social provider |
 | 3.6 | `fastembed` model quality is sufficient for passage ranking | compare recall@k against a sentence-transformers baseline in Phase 1 | move embeddings to the `[gpu]` extra as well |
 
@@ -64,33 +66,34 @@ precision. Each must end up written into the spec once measured.
 
 ---
 
-## 5. Genuinely unsolved problems
-
-Known gaps with no chosen answer yet. These are the ones worth thinking about away
-from the keyboard.
+## 5. Previously unsolved problems — decided 2026-09-11
 
 **5.1 — A citation that supports a paragraph, not a sentence.**
-Spec §5.1 mentions a paragraph-level fallback but does not define when it triggers.
-Attaching a paragraph-wide claim to one sentence produces confident nonsense. Needs a
-rule, and probably a distinct reported state.
+**Decided:** distinct state `PARAGRAPH-SCOPED`. Triggers when the marker sits at the
+end of a paragraph and its carrying sentence holds no other marker. Every sentence of
+the paragraph is verified separately and grouped under one finding; no single sentence
+gets a confident verdict on the paragraph's behalf. Spec §9, §15.
 
 **5.2 — Author-year citation styles.**
-`(Smith et al., 2020)` is much harder than `[12]`: the marker does not index the
-bibliography directly, several works share an author-year, and `ibid.`/`op. cit.`
-exist. Phase 5 currently treats both styles as one task; they are not.
+**Decided:** v0.1 pairs numeric markers only; an author-year marker is reported as
+`UNSUPPORTED CITATION STYLE`, never guessed. Author-year moves to v0.2 as its own
+task with its own test set (`ibid.`, `op. cit.`, same author-year collisions). Spec
+§9, §17.
 
 **5.3 — Coverage is the real product ceiling.**
-Measured: direct full text for well under half of sampled citations (spec §6.1). Every
-abstract-only verdict is a weak verdict. Worth investigating whether Semantic Scholar,
-CORE, or OpenAIRE meaningfully raise this before accepting the number.
+**Decided:** measure at the **start of Phase 4**, before the fetch ladder is written:
+a 50-DOI sample, OpenAlex-only vs +Semantic Scholar +CORE +OpenAIRE, result written
+into spec §6.1. Still open as a measurement, closed as a decision.
 
 **5.4 — What "confidence" means to a user.**
-A `0.91` is a model score, not a probability of being right. Showing it as-is invites
-misreading, hiding it removes signal. No decision yet on how to present it.
+**Decided:** three calibrated tiers `high` / `medium` / `low`, cut-points derived from
+the Phase 1 threshold sweep on SciFact dev. Raw score only in `--format json`. Spec
+§13.1, §14.
 
 **5.5 — Caching fetched full text.**
-Spec §16 says cached locally, not redistributed, clearable. Retention period and
-whether publisher content should be cached at all are unresolved.
+**Decided:** raw publisher text cached with a 7-day TTL; verdicts and embeddings kept
+until `proofpath cache clear`. One SQLite file under the user cache dir. Spec §5.1,
+§16.
 
 ---
 
@@ -109,11 +112,26 @@ Not problems, just not now. Recorded so they are not rediscovered as new ideas.
 
 ---
 
-## 7. Next session starts here
+## 7. Status 2026-09-11 evening — Phase 0 and Phase 1 done
 
-1. Check assumption **3.1** — if no usable ONNX NLI model exists, the packaging story
-   changes and it is better to know before Phase 1 than during it.
-2. Begin **Phase 1**: pin SciFact, build `scripts/eval.py`, get a first number.
+- Config & permissions module shipped (`paths.py`, `config.py`, `proofpath
+  permissions [set]`), `ask` + no-TTY → `deny` covered by tests.
+- Phase 1 measured: **SciFact dev accuracy 0.606 vs trivial baseline 0.406
+  (+0.200)**, recall@3 0.85, zero verdicts without a passage. Kill criterion
+  passed. Full table and notes: `docs/eval/2026-09-11-scifact-dev.md`.
+- Free-tier survey for the judge: `docs/research/2026-09-11-free-llm-api-tiers.md`.
 
-Phase 1 carries a kill criterion on purpose. Getting to a real number quickly is the
-point of the whole ordering.
+### Decisions — confirmed by the author 2026-09-11 (evening)
+
+| # | Decision | Outcome |
+|---|---|---|
+| 7.1 | Tier cut-points: precision targets 0.85/0.70 leave `high` unreachable on this model | **Deferred to after Phase 2**; the numeric layer changes the numbers. Pipeline default stays `decide=0.5, high=0.9, medium=0.7` |
+| 7.2 | CPU is 3× faster than CoreML for the int8 NLI graph | **Done.** `entailment.providers_for()` skips CoreML for int8 exports; the CUDA → CoreML → CPU rule is unchanged for fp32 |
+| 7.3 | Default judge provider (Phase 9) | **Groq `openai/gpt-oss-120b`** default; Gemini and Ollama selectable with `proofpath judge set provider`; NVIDIA build.nvidia.com is dev-only and not documented. Key lives in env or `.env`, never in config (`judge.py`, `proofpath judge check`) |
+| 7.4 | Second embedding model for assumption 3.6 | compare `all-MiniLM-L6-v2` once, in Phase 4 alongside full text |
+
+### Next session
+
+1. **Phase 2:** numeric claim layer — the 40% vs 4-8% case scored NEI 0.53 /
+   REFUTED 0.39 on the NLI model, which is exactly the failure the layer exists for.
+2. Re-run `scripts/eval_scifact.py` after Phase 2; the SciFact numbers must not drop.

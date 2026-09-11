@@ -1,7 +1,7 @@
 # proofpath — Design
 
 **Date:** 2026-09-10
-**Status:** Draft, revised 2026-09-10 after empirical source-access testing
+**Status:** Draft, revised 2026-09-11 — open decisions confirmed, NLI/SciFact assumptions verified
 
 > Don't guess. Show the evidence.
 
@@ -82,6 +82,7 @@ The core is source-agnostic. Everything platform-specific lives behind an
 | `numerics` | numeric/unit claims, checked before NLI (§10) | — |
 | `judge` | optional second opinion on low-confidence verdicts, and an optional plain-language summary of the finished report | LLM adapter (opt-in) |
 | `report` | verdicts + coverage stats → markdown / json / sarif | — |
+| `cache` | one local SQLite file under the platform cache dir: `sqlite-vec` vectors, verdicts keyed `(claim_hash, source_id, model_id)`, raw fetched text with a 7-day TTL (§16). No server database, ever | sqlite-vec, platformdirs |
 | `cli` / `tui` | two front-ends over one `verify()` entry point | all of the above |
 
 No logic lives in `cli` or `tui`.
@@ -187,6 +188,8 @@ settings:
 [permissions]
 # "ask" | "allow" | "deny"
 install_browser = "ask"      # step 3: playwright/patchright + chromium, ~280 MB
+                             # default confirmed 2026-09-11: "deny" would hide that
+                             # a blocked source was recoverable
 network         = "allow"    # outbound HTTP at all
 
 [fetch]
@@ -271,7 +274,17 @@ Retraction Watch is queried independently of this, keyed on the resolved DOI.
 
 1. `ingest` parses the document, keeping page and line numbers per sentence.
 2. `claims` pairs each in-text citation marker with the sentence carrying it, and
-   extracts numeric spans (§10).
+   extracts numeric spans (§10). v0.1 handles **numeric markers only** (`[12]`,
+   `[12,15]`, `[12-15]`); an author-year marker such as `(Smith et al., 2020)` is
+   reported as `UNSUPPORTED CITATION STYLE` and skipped, never guessed. Author-year
+   pairing is a v0.2 task with its own test set (§17).
+
+   **Paragraph-scoped citations.** When the marker sits at the end of a paragraph
+   and its carrying sentence holds no other marker, the citation is treated as
+   supporting the whole paragraph: every sentence of that paragraph is verified
+   separately against the source, and the report groups them under one
+   `PARAGRAPH-SCOPED` finding. A single sentence is never given a confident verdict
+   on behalf of the paragraph it sits in.
 3. `resolve` sends the **raw reference string** to Crossref — no local bibliography
    parsing — then applies field-level verification (§8).
 4. Retraction Watch check on the resolved DOI → `RETRACTED` if hit.
@@ -333,12 +346,23 @@ Constraints that make this safe rather than a second guessing layer:
 - It runs **after** the report is final and **cannot change a single verdict**.
 - Its only input is the report the deterministic pipeline produced. It never sees a
   source document, so it cannot introduce a claim of its own.
-- It is off by default. `proofpath` stays fully offline unless asked otherwise.
+- It is off by default in **both** the CLI and the TUI. `proofpath` stays fully
+  offline unless asked otherwise; the TUI enables it with `/summarize`.
 - The summary is labelled as model-written in the output, so it is never mistaken
   for a computed result.
 
 Even a 1 request/minute free tier finishes a 118-citation paper in ~4 minutes with
 the judge enabled. With Ollama there is no wait at all.
+
+**Provider (decided 2026-09-11).** Default is Groq `openai/gpt-oss-120b`: free
+without a card, no training on submitted data, strict JSON schema output, but an
+8K tokens-per-minute cap that forces batches under ~7k tokens and roughly one call
+per minute. Gemini 3.8 Flash is selectable but Google trains on free-tier prompts
+outside the EEA/UK/CH, so choosing it prints a data-use warning. Ollama is the
+offline option. All three speak the OpenAI ``chat/completions`` shape, so one
+adapter covers them. The API key is read from an environment variable or a
+``.env`` file, never written to config and never printed. Survey:
+``docs/research/2026-09-11-free-llm-api-tiers.md``.
 
 ## 12. Cross-platform constraints
 
@@ -350,6 +374,9 @@ the judge enabled. With Ollama there is no wait at all.
 | Scrapling | browser engines are heavy | core + `curl_cffi` bundled (2.7 MB); browser engine installed on demand with explicit consent (§7.1) |
 | **Inference runtime** | **`torch` + `sentence-transformers` is ~800 MB — larger than the browser engine we ask consent for** | **ONNX runtime by default (base install stays small). `torch` moves to an opt-in `[gpu]` extra.** |
 | Compute device | CUDA on Windows, MPS on Mac | preference order is always CUDA → MPS → CPU; under ONNX the equivalent is CUDA → CoreML → CPU |
+| **NLI model** | a ready-made ONNX cross-encoder had to exist for the "no torch" decision to hold | **verified 2026-09-11:** `cross-encoder/nli-deberta-v3-base` @ `6c749ce3425cd33b46d187e45b92bbf96ee12ec7` ships ONNX (`onnx/model.onnx` 739 MB, `model_O4` 388 MB, int8 variants 244 MB) and `tokenizer.json`. The int8 file is chosen by `platform.machine()` (`qint8_arm64` / `quint8_avx2`). `-small` / `-xsmall` ship the same layout as lighter fallbacks. No `optimum` export, no `transformers` |
+| Embedding model | must run under ONNX too | `fastembed` with a pinned model; first candidate `BAAI/bge-small-en-v1.5`, compared against one alternative in the Phase 1 results table |
+| Evaluation data | `allenai/scifact` on Hugging Face is a script-based loader that `datasets ≥ 4` refuses | the original AI2 tarball (`scifact.s3-us-west-2.amazonaws.com/release/latest/data.tar.gz`, verified live 2026-09-11) is downloaded with `httpx` and its sha256 pinned in the loader. No `datasets` dependency |
 | Model cache | different cache roots per OS | `platformdirs` |
 | Install | global pip pollution | `uv tool install proofpath` / `pipx install proofpath` |
 | Paths & encoding | `\` separators, cp1252 | `pathlib` everywhere, explicit `encoding="utf-8"` |
@@ -415,7 +442,7 @@ progress, is cancellable mid-run, and writes a report on completion.
   ⚠  p.7  L203   [28] Lee 2019                             RETRACTED  2023-06
          "Concerns about data integrity" — Retraction Watch
 
-  ✗  p.9  L260   [31] Kumar 2022                        NOT SUPPORTED    0.91
+  ✗  p.9  L260   [31] Kumar 2022                        NOT SUPPORTED    high
          you     "the method yields a 40% speedup"
          source  "we observed a 4-8% improvement in throughput"
          → numeric mismatch, not an entailment call
@@ -431,8 +458,13 @@ Design rules:
 - Each pipeline stage is one collapsible block. The provider or model that produced
   a result is named on its right, so no number is unattributable.
 - Findings appear below a rule, after the stages, newest run last.
-- Every finding carries page and line, the verdict, the confidence, and the quoted
-  passage. A finding without a passage is a bug, not a display choice.
+- Every finding carries page and line, the verdict, the confidence tier, and the
+  quoted passage. A finding without a passage is a bug, not a display choice.
+- Confidence is shown as one of three calibrated tiers — `high`, `medium`, `low` —
+  never as a raw model score. A `0.91` is a softmax output, not a probability of
+  being right, and showing it invites exactly that misreading. The cut-points come
+  from the Phase 1 calibration on SciFact dev (§14). The raw score is kept in
+  `--format json` for anyone who wants it.
 - The footer always shows coverage. It is not optional and does not scroll away.
 - Permission prompts appear inline at the point of failure with a slash command to
   answer, never as a modal that blocks the log.
@@ -489,7 +521,7 @@ stage so a regression can be located.
 
 | Dataset | Stage measured | Metric |
 |---|---|---|
-| SciFact | retrieval + entailment on scientific claims | label accuracy, rationale F1 |
+| SciFact (AI2 tarball, sha256 pinned; not the HF loader) | retrieval + entailment on scientific claims | label accuracy, macro-F1, rationale F1 |
 | FEVER | retrieval + entailment baseline | label accuracy |
 | AVeriTeC | real-world web claim verification | AVeriTeC score |
 | PubHealth | high-harm domain behaviour | label accuracy |
@@ -506,6 +538,12 @@ SciFact, and never emit `SUPPORTED` without an attached passage.
 
 Secondary gate: **false-ghost rate near zero** on the hand-built set.
 
+**Confidence tiers.** The `high` / `medium` / `low` cut-points shown in every report
+(§13.1) are chosen on the SciFact dev split, not by hand: the threshold sweep in
+Phase 1 records precision per score band, and the tiers are the bands. They are
+written into the repo with the results table and re-derived whenever the NLI
+model or its revision changes.
+
 ## 15. Error handling and honesty states
 
 Every non-verdict is an explicit, reported state. Absence of evidence is never
@@ -519,6 +557,8 @@ presented as evidence of absence.
 | `UNVERIFIED (provider unavailable)` | API down or rate limited after backoff |
 | `AMBIGUOUS` | multiple plausible reference candidates — all listed |
 | `NEI` | source read, but it neither supports nor contradicts |
+| `PARAGRAPH-SCOPED` | the citation supports a paragraph, not one sentence (§9); every sentence is verified separately and grouped |
+| `UNSUPPORTED CITATION STYLE` | author-year marker found; v0.1 pairs numeric markers only, so the claim is listed but not judged |
 
 Unparseable pages fail loudly with the page number and processing continues.
 
@@ -540,28 +580,33 @@ told so directly.
 - Descriptive User-Agent identifying the tool and its repository.
 - `robots.txt` respected on step 1 and step 2 of the fetch ladder.
 - Exponential backoff on 429/5xx, then an explicit `UNVERIFIED` state.
-- Fetched full text is cached locally for the run and not redistributed. Cache lives
-  under the user cache dir and is clearable with `proofpath cache clear`.
+- Fetched full text is cached locally and not redistributed. Raw publisher text
+  expires after **7 days**; verdicts and embeddings are kept until cleared, since they
+  contain only short quoted passages. Everything lives in one SQLite file under the
+  user cache dir and `proofpath cache clear` removes all of it.
 
 ## 17. Milestones
 
-**v0.1 — academic provider.** Ingest PDF/MD, reference resolution with field-level
-verification (§8), retraction check, fetch ladder steps 1 and 3, local retrieval and
-entailment, numeric checker, markdown report with coverage summary, CLI only.
-Measured on SciFact plus the hand-built ghost set.
+**v0.1 — academic provider.** Ingest PDF/MD, **numeric citation markers only**,
+reference resolution with field-level verification (§8), retraction check, fetch
+ladder steps 1 and 3, local retrieval and entailment, numeric checker, markdown
+report with coverage summary, CLI only. Measured on SciFact plus the hand-built
+ghost set.
 
-**v0.2 — TUI, SARIF, fetch ladder.** `textual` REPL with cancellation, SARIF output,
-verdict cache, fetch ladder steps 2-4 including the permission prompt and config file
-(§7.1).
+**v0.2 — TUI, SARIF, fetch ladder, author-year.** `textual` REPL with cancellation,
+SARIF output, verdict cache, fetch ladder steps 2-4 including the permission prompt
+and config file (§7.1), and author-year citation pairing (`(Smith et al., 2020)`,
+`ibid.`, same author-year collisions) with its own test set.
 
 **v0.3 — judge layer.** Opt-in LLM second opinion, Ollama default, OpenRouter and
 Gemini adapters, batching and cost reporting.
 
 **v0.4 — social provider.** Bluesky and Hacker News first, Reddit via user-supplied
-OAuth app, Mastodon best-effort, Community Notes dumps for X. Measured on AVeriTeC.
+OAuth app (missing credentials are reported, never silently skipped), Mastodon
+best-effort, Community Notes dumps for X. Measured on AVeriTeC.
 
-**Later.** Turkish sources, `spiyweb` graph retrieval as an alternative backend,
-GROBID parser.
+**Later.** Turkish sources as a separate provider (TR Dizin / DergiPark class),
+`spiyweb` graph retrieval as an alternative backend, GROBID parser.
 
 ## 18. Risks
 

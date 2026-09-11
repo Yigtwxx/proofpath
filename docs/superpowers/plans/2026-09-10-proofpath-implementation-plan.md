@@ -36,8 +36,9 @@ Each phase states what "done" means as a check that can be run, not as a feeling
 **Done when:** `proofpath --version` works on all three platforms in CI, and
 `proofpath permissions` prints the config path and current values.
 
-**Status:** repository, spec, tooling and packaging complete. CI workflow pending a
-token scope refresh. Config module not started.
+**Status (2026-09-11): done.** Repository, spec, tooling, packaging, CI (7 jobs
+green), the 0.0.1 PyPI release, and the config & permissions module
+(`proofpath permissions`, `ask` + no-TTY → `deny`).
 
 ---
 
@@ -50,12 +51,12 @@ No network. No PDF. Input is a SciFact claim plus its gold abstract.
 
 | Task | How |
 |---|---|
-| Load SciFact | HuggingFace datasets, frozen to a pinned revision, cached locally |
+| Load SciFact | the AI2 tarball via `httpx`, sha256 pinned, cached under the platform cache dir — the HF loader is script-based and unusable with `datasets ≥ 4` |
 | Chunk & embed | ONNX embeddings via `fastembed`; abstracts are short, so sentence-level chunks |
 | Rank passages | cosine similarity in `sqlite-vec`; top-k with k tuned on dev split |
-| Entailment | ONNX cross-encoder NLI → `SUPPORTED / REFUTED / NEI` + score |
-| Calibration | pick the confidence threshold that separates "trust it" from "escalate" |
-| Harness | `scripts/eval.py` printing per-stage metrics, committed results table |
+| Entailment | `cross-encoder/nli-deberta-v3-base` @ `6c749ce`, int8 ONNX chosen by CPU arch, run with `onnxruntime` + `tokenizers` → `SUPPORTED / REFUTED / NEI` + score |
+| Calibration | threshold sweep on dev → the `NEI` cut-off, the judge escalation threshold, and the `high / medium / low` tier cut-points shown in reports |
+| Harness | `scripts/eval_scifact.py` printing per-stage metrics against two baselines (majority label, "source exists → SUPPORTED"); results table committed under `docs/eval/` |
 
 **Done when:**
 - Label accuracy and rationale selection are measured and written into the repo.
@@ -65,6 +66,11 @@ No network. No PDF. Input is a SciFact claim plus its gold abstract.
 **Kill criterion:** if accuracy lands near the trivial baseline even after threshold
 tuning, stop and reconsider the approach before Phase 2. This is the phase that is
 allowed to end the project cheaply.
+
+**Status (2026-09-11): done, passed.** Accuracy 0.606 vs 0.406 baseline on 340 dev
+pairs, recall@3 0.85, 0 verdicts without a passage. See
+`docs/eval/2026-09-11-scifact-dev.md`. Tier cut-points still need a decision
+(OPEN-ITEMS 7.1).
 
 ---
 
@@ -142,8 +148,8 @@ installs.
 |---|---|
 | Parse | `pymupdf` for PDF, `python-docx`, plain md/txt |
 | Locators | keep page and line numbers per sentence, needed for SARIF later |
-| Citation markers | numeric `[12]`, `[12,15]`, and author-year `(Smith et al., 2020)` |
-| Pairing | marker → carrying sentence; paragraph-level fallback when a citation supports a passage rather than a sentence |
+| Citation markers | **v0.1:** numeric `[12]`, `[12,15]`, `[12-15]` only. Author-year `(Smith et al., 2020)` is detected and reported as `UNSUPPORTED CITATION STYLE`; pairing it is a **v0.2** task (Phase 8) with its own test set |
+| Pairing | marker → carrying sentence; when the marker ends a paragraph and the sentence has no other marker, every sentence of the paragraph is verified and grouped as `PARAGRAPH-SCOPED` |
 | Bibliography | extracted as **raw strings only**, handed to Phase 3 unparsed |
 
 **Done when:** on a corpus of real open-access PDFs, citation markers are paired with
@@ -188,6 +194,7 @@ Publish to PyPI, tag `v0.1.0`, write the CHANGELOG entry.
 | Task | How |
 |---|---|
 | TUI | `textual`, streaming-prompt layout per spec §13.1; paste a path, URL or raw text; **cancellable mid-run**; permission prompts inline |
+| Author-year citations | `(Smith et al., 2020)`, `ibid.`, `op. cit.`, same author-year collisions → bibliography entry; own hand-built test set with a measured pairing rate |
 | SARIF output | maps findings to page/line so VS Code shows them inline without an extension |
 | Shared core | TUI and CLI both call one `verify()`; no logic in either front-end |
 
@@ -221,7 +228,7 @@ Built **Bluesky-first**, because measurement says so (spec §6.2).
 |---|---|
 | Bluesky | `public.api.bsky.app`, no auth — first-class |
 | Hacker News | official Firebase API, no auth — first-class |
-| Reddit | free OAuth app, user supplies their own credentials |
+| Reddit | free OAuth app, user supplies their own credentials; absent credentials are reported in the coverage summary, never silently skipped |
 | Mastodon | per-instance, best effort |
 | X / Twitter | not readable; Community Notes bulk dumps only |
 
