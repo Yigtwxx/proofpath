@@ -4,7 +4,9 @@ from collections.abc import Sequence
 from typing import ClassVar
 
 import numpy as np
+import pytest
 
+from proofpath import retrieval
 from proofpath.models import Passage
 from proofpath.retrieval import PassageIndex, rank, split_sentences
 
@@ -40,18 +42,50 @@ def test_split_sentences_drops_blank_fragments() -> None:
     assert split_sentences("  One.   \n\n Two.  ") == ["One.", "Two."]
 
 
-def test_index_returns_nearest_passage_first() -> None:
+BACKENDS = ["numpy", "sqlite-vec"]
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_index_returns_nearest_passage_first(backend: str) -> None:
     passages = [
         Passage("cats purr", "d", 0),
         Passage("dogs bark", "d", 1),
         Passage("fish swim", "d", 2),
     ]
     embedder = FakeEmbedder()
-    index = PassageIndex(dim=embedder.dim)
+    index = PassageIndex(dim=embedder.dim, backend=backend)  # type: ignore[arg-type]
+    if index.backend != backend:
+        pytest.skip(f"{backend} unavailable on this Python build")
     index.add(passages, embedder.embed([p.text for p in passages]))
     hits = index.search(embedder.embed(["a cat purring"])[0], k=2)
     assert [hit.passage.text for hit in hits] == ["cats purr", "dogs bark"]
     assert hits[0].similarity > hits[1].similarity
+
+
+def test_index_falls_back_to_numpy_when_sqlite_vec_cannot_load(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(retrieval, "_open_vec_connection", lambda path: None)
+    index = PassageIndex(dim=3)
+    assert index.backend == "numpy"
+    index.add([Passage("cats purr", "d", 0)], FakeEmbedder().embed(["cats purr"]))
+    assert (
+        index.search(FakeEmbedder().embed(["a cat purring"])[0], k=1)[0].passage.text == "cats purr"
+    )
+
+
+def test_both_backends_agree_on_similarity() -> None:
+    embedder = FakeEmbedder()
+    passages = [Passage("cats purr", "d", 0), Passage("dogs bark", "d", 1)]
+    results = []
+    for backend in BACKENDS:
+        index = PassageIndex(dim=3, backend=backend)  # type: ignore[arg-type]
+        if index.backend != backend:
+            pytest.skip("sqlite-vec unavailable")
+        index.add(passages, embedder.embed([p.text for p in passages]))
+        hits = index.search(embedder.embed(["a cat purring"])[0], k=2)
+        results.append([(h.passage.text, round(h.similarity, 4)) for h in hits])
+    assert results[0] == results[1]
 
 
 def test_rank_wraps_index_and_respects_k() -> None:
