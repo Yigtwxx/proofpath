@@ -261,3 +261,43 @@ Findings from inspecting the installed base environment, and the decisions they 
    sha256, verdict rows), `report.py`, `proofpath check`. Briefs in
    `.superpowers/sdd/phase6/`.
 
+---
+
+## 10. Phase 6 — done 2026-09-12
+
+- `verify()` (prepare / decide_all), `report.py`, `proofpath check`, cache schema v2.
+  All offline tests; the CLI runs end to end on a real DOI (20 s first run, full text on
+  the second).
+- Decisions taken while building: `Finding.state` is validated against `STATE_WORDS`
+  (an `UNVERIFIED (…)` string is the only free form); `Coverage.weak()` is derived from
+  the denominator so an under-counted producer cannot flatter a run; verdict rows are
+  deleted inside `Cache.put_chunks`' transaction when a source's text digest changes
+  (spec §16 keeps verdicts across a TTL expiry, never across different text);
+  `permissions.network = deny` skips resolve and retraction stages too, each summarised
+  as `not attempted (network not permitted)`; a cancelled `decide_all` raises
+  `Cancelled(report=partial)` and the CLI renders it and exits 2; the caret under a
+  numeric claim is dropped when the figure occurs twice in the sentence (never point at
+  the wrong number); layout characters of a diagnostic are ASCII, content is verbatim.
+- New state: `UNVERIFIED (reached, no text extracted)` (spec §15).
+
+### New open items
+
+| # | Item | Note |
+|---|---|---|
+| 10.1 | `oa._worst_outcome` labels "reached but no text" `UNVERIFIED (unreachable)` | `verify` uses `UNVERIFIED (reached, no text extracted)` for the same fact on URL sources; align `oa.py` in Phase 8 |
+| 10.2 | A fully cached re-run still loads both ONNX models | `model_id` needs the model names; expose names without loading (Phase 8, with the TUI's multi-run scheduler) |
+| 10.3 | `Cache` schema versions compare as strings | fine below v10; Phase 9 bumps to "3" |
+| 10.4 | `cache ls` counts stale chunk rows after a digest change until the next write | cosmetic |
+| 10.5 | Exit code 1 for a document whose only finding is a `PARAGRAPH-SCOPED` note | spec §13.3 says every state counts; a `--fail-on` flag is the escape hatch if users object |
+| 10.6 | Unexpected non-`ProviderError` exceptions abort `prepare` | a per-unit guard turning them into `PROVIDER_UNAVAILABLE` would match rule 6 better |
+| 10.7 | Terminal and markdown word the weak-coverage warning differently | one voice, Phase 7 README pass |
+| 10.8 | Reference resolution and the retraction check are not cached | every run re-queries Crossref/S2/Retraction Watch, so a re-run is not offline however warm the cache is; a `resolutions` table (Phase 8) would make it truly offline |
+| 10.9 | For one run after the v1→v2 migration a changed source keeps its old verdicts | the digest set `put_chunks` reads is empty right after the migration, so it has nothing to compare the new text against and drops nothing; the run after that is correct |
+| 10.10 | Three concurrent TUI runs get three independent politeness limiters | `PoliteClient._last_call` is per instance; spec §13.1 wants one shared across the runs a single user has open |
+| 10.11 | `Cache` connections are thread-bound (`sqlite3.connect` is left at `check_same_thread=True`) | `prepare` and `decide_all` on different pool threads would fail; Phase 8's scheduler must give each run one dedicated thread, or `Cache` must become lock-protected |
+
+### Next session
+
+1. **Phase 7:** calibrated tiers (7.1), live user-like runs, README, CHANGELOG `[0.1.0]`,
+   tag `v0.1.0` (briefs in `.superpowers/sdd/phase7/`).
+

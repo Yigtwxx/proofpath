@@ -18,7 +18,15 @@ import orjson
 from rich.console import Console
 from rich.text import Text
 
+from proofpath.report import Diagnostic, Footer, Level
+
 KEY_WIDTH = 10
+
+# Spec section 13.2: the stage table's three columns and the width the elapsed
+# column is right-aligned to. Measured off the spec's own example, not guessed.
+STAGE_WIDTH = 76
+STAGE_NAME_WIDTH = 13
+STAGE_BY_WIDTH = 34
 
 # Colour tables are fixed by spec section 13.3 "Colour system": ANSI-16 names only,
 # no hex, so light and dark themes both work and NO_COLOR removes everything.
@@ -31,10 +39,20 @@ YELLOW_PREFIXES = (
     "AMBIGUOUS",
     "RESOLVED (low confidence)",
     "abstract",
+    "PARAGRAPH-SCOPED",
+    "UNSUPPORTED CITATION STYLE",
+    "UNRESOLVED MARKER",
 )
-RED = ("GHOST REFERENCE", "REFUTED", "RETRACTED", "FAILED")
-DIM = ("NEI", "none", "—")
+RED = ("GHOST REFERENCE", "REFUTED", "RETRACTED", "FAILED", "NOT SUPPORTED", "PARSE ERROR")
+DIM = ("NEI", "none", "—", "cancelled")
 _EXACT = {**dict.fromkeys(GREEN, "green"), **dict.fromkeys(RED, "red"), **dict.fromkeys(DIM, "dim")}
+# The one place a diagnostic's severity becomes a colour (spec section 13.3). Level
+# words are not state words: they say how loud a finding is, not what was found.
+LEVEL_STYLES: dict[Level, str] = {"error": "red", "warning": "yellow", "note": "dim"}
+# The coverage footer is the one place a number, not a word, carries meaning.
+COVERAGE_KEYS = ("fulltext", "abstract", "unverified")
+COVERAGE_STYLES = ("green", "yellow", "red")
+WEAK_COVERAGE = "coverage is weak: unread sources may hold more, so this is a lower bound"
 
 
 @dataclass
@@ -135,6 +153,66 @@ def rule(ui: Ui) -> None:
         ui.out.rule(style="dim")  # rich's default rule colour is green, reserved for meaning
     else:
         ui.out.print("─" * 60)
+
+
+def diagnostic(ui: Ui, item: Diagnostic) -> None:
+    """One compiler-style diagnostic (spec section 13.2).
+
+    Colour lands on the level word and, when the header happens to repeat it, the
+    state word; the body is printed exactly as ``report.render_diagnostics`` laid it
+    out. Never suppressed: ``-q`` drops progress, never findings (rule 6).
+    """
+    pad = " " * item.indent
+    rest = f"[{item.code}]: {item.title}"
+    header = Text.assemble((item.level, LEVEL_STYLES[item.level] if ui.color else ""))
+    at = rest.find(item.state) if item.state else -1
+    if ui.color and at >= 0:
+        header = Text.assemble(
+            header, rest[:at], style_state(ui, item.state), rest[at + len(item.state) :]
+        )
+    else:
+        header = Text.assemble(header, rest)
+    ui.out.print(Text.assemble(pad, header))
+    ui.out.print(f"{pad}  --> {item.location}")
+    for line in item.lines:
+        ui.out.print(pad + line)
+
+
+def coverage(ui: Ui, full: int, abstract: int, unverified: int, *, weak: bool) -> None:
+    """The section 15 coverage block. Never suppressed, never abbreviated (rule 6)."""
+    for key, style, share in zip(
+        COVERAGE_KEYS, COVERAGE_STYLES, (full, abstract, unverified), strict=True
+    ):
+        number = Text(f"{share}%")
+        if ui.color:
+            number.stylize(style)
+        kv(ui, key, number)
+    if weak:
+        hint(ui, WEAK_COVERAGE)
+
+
+def stage_row(ui: Ui, name: str, by: str, summary: str, elapsed: float) -> None:
+    """One row of the stage table; dropped under ``-q``.
+
+    A field wider than its column pushes the next one right rather than being cut —
+    an attribution is never truncated — but the elapsed column stays at the right
+    edge, so the table still reads as a table.
+    """
+    if ui.quiet:
+        return
+    row = f"  {name:<{STAGE_NAME_WIDTH}}{by:<{STAGE_BY_WIDTH}}{summary}".rstrip()
+    tail = f"{elapsed:.1f}s"
+    ui.out.print(f"{row}{' ' * max(1, STAGE_WIDTH - len(row) - len(tail))}{tail}")
+
+
+def footer(ui: Ui, item: Footer) -> None:
+    """The closing lines of a run: counts, coverage, and what the run cost."""
+    if item.cancelled:
+        state_line(ui, "run", "cancelled")
+    ui.out.print(item.counts)
+    coverage(ui, *item.coverage, weak=item.weak)
+    written = f"{item.written} written" if item.written else "no report written"
+    ui.out.print(f"{written}  ·  {item.api_calls} API calls  ·  {item.elapsed:.1f}s")
 
 
 def error(ui: Ui, text: str) -> None:

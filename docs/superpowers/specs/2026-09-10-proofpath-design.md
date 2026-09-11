@@ -783,6 +783,7 @@ presented as evidence of absence.
 | `LOW CONFIDENCE (abstract only)` | full text unavailable, abstract used |
 | `UNVERIFIED (blocked)` | 403/bot protection, Scrapling absent or defeated |
 | `UNVERIFIED (unreachable)` | dead link, Wayback miss |
+| `UNVERIFIED (reached, no text extracted)` | the page answered 200 but no text could be extracted (bot wall, image-only page) |
 | `UNVERIFIED (blocked, browser not permitted)` | steps 1–2 blocked and the §7.1 consent was denied, absent, or impossible without a TTY |
 | `UNVERIFIED (blocked, robots.txt)` | the site's `robots.txt` disallows the fetch; steps 3–4 are not attempted |
 | `UNVERIFIED (network not permitted)` | `permissions.network = deny`; nothing was fetched |

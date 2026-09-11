@@ -1,30 +1,19 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import ClassVar
 
 import numpy as np
 import pytest
 
 from proofpath.models import Passage
-from proofpath.retrieval import PassageIndex, rank, sentence_spans, split_sentences
-
-
-class FakeEmbedder:
-    """Three fixed axes so nearest-neighbour results are predictable."""
-
-    name = "fake"
-    dim = 3
-
-    _table: ClassVar[dict[str, tuple[float, float, float]]] = {
-        "cats purr": (1.0, 0.0, 0.0),
-        "dogs bark": (0.0, 1.0, 0.0),
-        "fish swim": (0.0, 0.0, 1.0),
-        "a cat purring": (0.9, 0.1, 0.0),
-    }
-
-    def embed(self, texts: Sequence[str]) -> np.ndarray:
-        return np.array([self._table[t] for t in texts], dtype=np.float32)
+from proofpath.retrieval import (
+    PassageIndex,
+    rank,
+    rank_indexed,
+    sentence_spans,
+    split_sentences,
+)
+from tests.fakes import FakeEmbedder
 
 
 def test_split_sentences_keeps_abbreviations_and_decimals() -> None:
@@ -148,3 +137,25 @@ def test_rank_wraps_index_and_respects_k() -> None:
 def test_rank_with_more_k_than_passages_returns_all() -> None:
     passages = [Passage("dogs bark", "d", 0)]
     assert len(rank("cats purr", passages, FakeEmbedder(), k=5)) == 1
+
+
+def test_rank_indexed_matches_rank_without_re_embedding_the_passages() -> None:
+    class CountingEmbedder(FakeEmbedder):
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, ...]] = []
+
+        def embed(self, texts: Sequence[str]) -> np.ndarray:
+            self.calls.append(tuple(texts))
+            return super().embed(texts)
+
+    passages = [Passage("dogs bark", "d", 0), Passage("cats purr", "d", 1)]
+    embedder = CountingEmbedder()
+    index = PassageIndex.from_vectors(passages, embedder.embed([p.text for p in passages]))
+    embedder.calls.clear()
+    ranked = rank_indexed("a cat purring", index, embedder, k=1)
+    assert [hit.passage.text for hit in ranked] == ["cats purr"]
+    assert embedder.calls == [("a cat purring",)]
+
+
+def test_rank_indexed_on_an_empty_index_is_empty() -> None:
+    assert rank_indexed("a cat purring", PassageIndex(dim=3), FakeEmbedder(), k=3) == []

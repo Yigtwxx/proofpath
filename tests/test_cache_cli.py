@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 from typer.testing import CliRunner
 
-from proofpath.cache import Cache
+from proofpath.cache import Cache, sha256_text
 from proofpath.cli import app
 from proofpath.models import Label, Passage, Verdict
 
@@ -33,6 +33,7 @@ def cache_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
             "bge@rev",
             [Passage("cats purr.", "doi:10.1/x", 0)],
             np.ones((1, 3), dtype=np.float32),
+            text_sha256=sha256_text("cats purr."),
         )
         db.put_verdict(
             "h",

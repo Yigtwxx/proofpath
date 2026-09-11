@@ -23,6 +23,13 @@ def isolated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("PROOFPATH_CONFIG_DIR", str(tmp_path))
 
 
+def test_format_sarif_is_refused_rather_than_rendered_as_text() -> None:
+    """The value parses everywhere the enum does; only Phase 8 makes it mean something."""
+    result = runner.invoke(app, ["resolve", "--format", "sarif", ALPHAFOLD])
+    assert result.exit_code == 2
+    assert "error: --format sarif arrives in v0.2" in result.output
+
+
 @respx.mock
 def test_resolve_prints_state_record_and_field_agreement() -> None:
     respx.get("https://api.crossref.org/works").mock(

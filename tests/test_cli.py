@@ -15,9 +15,6 @@ def test_version_flag_reports_the_package_version() -> None:
 def test_bare_invocation_is_an_entry_point_not_a_help_screen() -> None:
     result = runner.invoke(app, [])
     assert result.exit_code == 0
-    assert "design stage" in result.stdout
-
-
-def test_check_signals_failure_while_unimplemented() -> None:
-    result = runner.invoke(app, ["check", "paper.pdf"])
-    assert result.exit_code == 2
+    assert f"proofpath {__version__}" in result.stdout
+    assert "the interactive TUI arrives in v0.2" in result.stdout
+    assert "proofpath check paper.pdf" in result.stdout

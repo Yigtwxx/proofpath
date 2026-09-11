@@ -168,6 +168,22 @@ def find_doi(raw: str) -> str | None:
     return doi
 
 
+_HTTP_URL = re.compile(r"https?://\S+")
+
+
+def find_url(raw: str) -> str | None:
+    """The first http(s) URL in a reference string, or ``None``.
+
+    Bibliography entries end their URL with the sentence's own punctuation
+    ("... https://who.int/report.html. Accessed 2024.") and wrap it in brackets in
+    some styles, so trailing ``.,;)`` is dropped. A source that no index covers is
+    still fetchable by its URL, which is what keeps ``NOT_INDEXED`` from becoming
+    an unverified state whenever the document printed the address (product rule 2).
+    """
+    match = _HTTP_URL.search(raw)
+    return match.group(0).rstrip(".,;)") if match else None
+
+
 _ARXIV_ID = re.compile(
     r"(?:arxiv[:\s]*|arxiv\.org/(?:abs|pdf)/)"
     r"((?:\d{4}\.?\d{4,5})|(?:[a-z-]+(?:\.[A-Z]{2})?/\d{7}))(?:v\d+)?",

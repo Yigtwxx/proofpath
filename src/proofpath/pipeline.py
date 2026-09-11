@@ -16,7 +16,7 @@ import numpy as np
 from proofpath import numerics
 from proofpath.entailment import LABEL_ORDER, Scorer
 from proofpath.models import Label, Passage, Tier, Verdict
-from proofpath.retrieval import Embedder, Hit, rank
+from proofpath.retrieval import Embedder, Hit, PassageIndex, rank_indexed
 
 
 @dataclass(frozen=True)
@@ -71,17 +71,21 @@ def aggregate(
     return Verdict(best_label, best_score, thresholds.tier(best_score), best_passage)
 
 
-def judge(
+def decide_indexed(
     claim: str,
-    passages: Sequence[Passage],
+    index: PassageIndex,
     embedder: Embedder,
     scorer: Scorer,
     *,
     k: int,
     thresholds: Thresholds = DEFAULT_THRESHOLDS,
 ) -> Verdict:
-    """Decide one claim against the passages of one source."""
-    hits = rank(claim, passages, embedder, k=k)
+    """Decide one claim against an already-embedded source.
+
+    The index is built once per source and reused for every claim that cites it, so
+    a document's passages are embedded once per run, not once per claim.
+    """
+    hits = rank_indexed(claim, index, embedder, k=k)
     if not hits:
         return Verdict(Label.NEI, 0.0, "low", None)
 
@@ -97,3 +101,24 @@ def judge(
     # NLI convention: premise is the source passage, hypothesis is the claim.
     probs = scorer.score([(hit.passage.text, claim) for hit in hits])
     return aggregate(hits, probs, thresholds=thresholds)
+
+
+def decide(
+    claim: str,
+    passages: Sequence[Passage],
+    embedder: Embedder,
+    scorer: Scorer,
+    *,
+    k: int,
+    thresholds: Thresholds = DEFAULT_THRESHOLDS,
+) -> Verdict:
+    """Decide one claim against the passages of one source."""
+    if not passages:
+        return Verdict(Label.NEI, 0.0, "low", None)
+    index = PassageIndex(dim=embedder.dim)
+    index.add(passages, embedder.embed([p.text for p in passages]))
+    return decide_indexed(claim, index, embedder, scorer, k=k, thresholds=thresholds)
+
+
+# Alias for the Phase 1 harness; removed in Phase 9 when the LLM judge lands.
+judge = decide

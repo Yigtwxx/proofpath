@@ -129,13 +129,24 @@ class PassageIndex:
         return [Hit(self._passages[int(i)], float(similarities[i])) for i in order]
 
 
+def rank_indexed(claim: str, index: PassageIndex, embedder: Embedder, *, k: int) -> list[Hit]:
+    """Rank an already-embedded source: only the claim is embedded here.
+
+    A source is embedded once and then asked about every claim that cites it, so the
+    passage vectors must not be recomputed per claim (spec section 12).
+    """
+    if len(index) == 0:
+        return []
+    return index.search(embedder.embed([claim])[0], k=k)
+
+
 def rank(claim: str, passages: Sequence[Passage], embedder: Embedder, *, k: int) -> list[Hit]:
     """Embed the passages and the claim, return the ``k`` closest passages, best first."""
     if not passages:
         return []
     index = PassageIndex(dim=embedder.dim)
     index.add(passages, embedder.embed([p.text for p in passages]))
-    return index.search(embedder.embed([claim])[0], k=k)
+    return rank_indexed(claim, index, embedder, k=k)
 
 
 class FastEmbedder:

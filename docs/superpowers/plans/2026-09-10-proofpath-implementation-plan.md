@@ -207,6 +207,23 @@ one Nature PDF exposes no `References` heading.
 **Done when:** a report with low coverage is visibly different from a clean one at a
 glance, and a second run of the same document makes zero network calls.
 
+**Status (2026-09-12): done.** `verify.py` is built in two halves from the start —
+`prepare()` (parse → claims → resolve → retractions → fetch, every honesty state the
+exact §15 string, `permissions.network = deny` gating every outbound stage) and
+`decide_all()` (chunks and verdicts cached per source/claim, models loaded lazily, a
+cancelled run leaves only complete rows and hands back a partial `Report(cancelled=True)`)
+— so Phase 8 can schedule them under different limits. `report.py` holds the finding
+kinds, coverage, the §13.2 diagnostics, the §15 coverage block and the markdown report;
+`proofpath check` wires them with `--format text|json`, `-q`, `--out`, `check -` and a
+real Ctrl-C. Cache schema v2 (`chunks.text_sha256`, verdicts invalidated when a source's
+text changes). The "Done when" line above asked for zero network calls on a second run
+and that is not what was built: a re-run re-decides nothing — chunks and verdicts come
+from the cache and neither model scores again (tests) — but the models are still loaded
+and reference resolution and the retraction check still go to the network, because
+resolution results are not cached yet (OPEN-ITEMS 10.8, with 10.2 for the model load).
+Low coverage prints a red `unverified` number and a "coverage is weak" line. Calibrated
+tiers are Phase 7 (Task 7.1).
+
 ---
 
 ## Phase 7 — v0.1 release

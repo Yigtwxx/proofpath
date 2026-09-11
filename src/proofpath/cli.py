@@ -6,20 +6,27 @@ call. Neither holds logic of its own; see the design spec, section 13.
 
 from __future__ import annotations
 
+import signal
 import sys
-from contextlib import ExitStack
+import threading
+from collections.abc import Iterator
+from contextlib import ExitStack, contextmanager
+from dataclasses import replace
 from enum import Enum
 from pathlib import Path
+from types import FrameType
 from typing import Annotated
 
 import typer
 
-from proofpath import __version__, ui
+from proofpath import __version__, events, ingest, ui
 from proofpath import config as cfg
 from proofpath import fetch as fetch_mod
 from proofpath import judge as judge_mod
 from proofpath import oa as oa_mod
+from proofpath import report as report_mod
 from proofpath import resolve as resolve_mod
+from proofpath import verify as verify_mod
 from proofpath.browser import ConsentGate
 from proofpath.cache import Cache
 from proofpath.paths import config_path
@@ -37,13 +44,13 @@ EXIT_CLEAN = 0
 EXIT_FINDINGS = 1
 EXIT_ERROR = 2
 
-_NOT_BUILT_YET = (
-    "proofpath is at the design stage — the verification pipeline is not implemented yet.\n"
-    "\n"
-    "  design spec  https://github.com/Yigtwxx/proofpath/blob/main/docs/superpowers/specs/2026-09-10-proofpath-design.md\n"
-    "  plan         https://github.com/Yigtwxx/proofpath/blob/main/docs/superpowers/plans/2026-09-10-proofpath-implementation-plan.md\n"
-    "  open items   https://github.com/Yigtwxx/proofpath/blob/main/docs/superpowers/OPEN-ITEMS.md\n"
+# The bare-invocation line, until Phase 8 opens the TUI here instead.
+_NO_TUI_YET = (
+    f"proofpath {__version__} — the interactive TUI arrives in v0.2; try: proofpath check paper.pdf"
 )
+
+# Where ``check`` writes its markdown when ``--out`` is not given (text mode only).
+DEFAULT_REPORT = Path("report.md")
 
 
 def _version_callback(value: bool) -> None:
@@ -70,7 +77,7 @@ def main(
     ctx.obj = ui.build(no_color=no_color, quiet=quiet)
     if ctx.invoked_subcommand is not None:
         return
-    typer.echo(_NOT_BUILT_YET)
+    typer.echo(_NO_TUI_YET)
     raise typer.Exit(EXIT_CLEAN)
 
 
@@ -83,6 +90,14 @@ def _ui(ctx: typer.Context) -> ui.Ui:
 def _fail(out: ui.Ui, exc: Exception) -> typer.Exit:
     ui.error(out, str(exc))
     return typer.Exit(EXIT_ERROR)
+
+
+def _reject_sarif(out: ui.Ui, fmt: Format) -> None:
+    """``sarif`` parses wherever ``Format`` does, but only ``check`` will ever emit it,
+    and not before Phase 8. Every command says so rather than quietly printing text."""
+    if fmt is Format.SARIF:
+        ui.error(out, "--format sarif arrives in v0.2")
+        raise typer.Exit(EXIT_ERROR)
 
 
 def _load_config(out: ui.Ui) -> cfg.Config:
@@ -297,6 +312,7 @@ def cache_clear(
 class Format(str, Enum):
     TEXT = "text"
     JSON = "json"
+    SARIF = "sarif"  # ``check`` only, and Phase 8 fills it in (spec section 13.2)
 
 
 @app.command()
@@ -309,6 +325,7 @@ def resolve(
 ) -> None:
     """Check whether a cited reference exists (Crossref, Semantic Scholar, arXiv, OpenAlex)."""
     out = _ui(ctx)
+    _reject_sarif(out, fmt)
     contact = _load_config(out).contact.email
     resolver = resolve_mod.Resolver(contact_email=contact)
     result = resolver.resolve(reference)
@@ -390,6 +407,7 @@ def fetch(
 ) -> None:
     """Fetch one source through the ladder (URL) or the open-access chain (DOI, arXiv)."""
     out = _ui(ctx)
+    _reject_sarif(out, fmt)
     config = _load_config(out)
     if allow_browser and no_browser:
         ui.error(out, "--allow-browser and --no-browser cannot be combined.")
@@ -498,11 +516,175 @@ def _print_gate(out: ui.Ui, gate: ConsentGate) -> None:
 
 @app.command()
 def check(
-    target: Annotated[Path, typer.Argument(help="Document to check.")],
+    ctx: typer.Context,
+    target: Annotated[str, typer.Argument(help="Document to check, or - to read it from stdin.")],
+    fmt: Annotated[Format, typer.Option("--format", help="Output format.")] = Format.TEXT,
+    judge: Annotated[
+        bool, typer.Option("--judge", help="Ask an LLM about the claims the models left open.")
+    ] = False,
+    summarize: Annotated[
+        bool, typer.Option("--summarize", help="Add a model-written summary to the report.")
+    ] = False,
+    allow_browser: Annotated[
+        bool, typer.Option("--allow-browser", help="Permit the browser step for this run.")
+    ] = False,
+    no_browser: Annotated[
+        bool, typer.Option("--no-browser", help="Refuse the browser step for this run.")
+    ] = False,
+    no_cache: Annotated[
+        bool, typer.Option("--no-cache", help="Neither read nor fill the local cache.")
+    ] = False,
+    out_path: Annotated[
+        Path | None,
+        typer.Option("--out", help="Markdown report path (default report.md; text mode)."),
+    ] = None,
 ) -> None:
     """Verify every citation in a document and write a report."""
-    typer.echo(_NOT_BUILT_YET, err=True)
-    raise typer.Exit(EXIT_ERROR)
+    out = _ui(ctx)
+    if allow_browser and no_browser:
+        ui.error(out, "--allow-browser and --no-browser cannot be combined.")
+        raise typer.Exit(EXIT_ERROR)
+    _reject_sarif(out, fmt)
+    for flag, asked in (("--judge", judge), ("--summarize", summarize)):
+        if asked:
+            ui.error(out, f"{flag} arrives in v0.3")
+            raise typer.Exit(EXIT_ERROR)
+
+    source, name = _check_target(out, target)
+    config = _load_config(out)
+    override = True if allow_browser else False if no_browser else None
+    json_out = fmt is Format.JSON
+    # Under --format json stdout carries one document and nothing else, so the run's
+    # human lines are printed against stderr instead (spec section 13.3).
+    human = replace(out, out=out.err) if json_out else out
+
+    def on_event(event: events.Event) -> None:
+        # ``Emitted`` is not printed here: findings are shown at the end, in document
+        # order. ``Progress`` has no bar in v0.1 — the TUI (Phase 8) draws one.
+        if isinstance(event, events.StageEnd):
+            ui.stage_row(human, event.name, event.by, event.summary, event.elapsed)
+        elif isinstance(event, events.Note):
+            ui.note(human, event.text)
+
+    cancel = threading.Event()
+    try:
+        with (
+            verify_mod.Engine.default(
+                config,
+                interactive=cfg.is_interactive(),  # rule 4: never sniffed further down
+                browser=override,
+                no_cache=no_cache,
+            ) as engine,
+            _interruptible(cancel),
+        ):
+            report = verify_mod.verify(source, engine, name=name, on_event=on_event, cancel=cancel)
+    except (KeyboardInterrupt, events.Cancelled) as exc:
+        # A stopped run is incomplete, not wrong (product rule 6): whatever it did
+        # decide is still printed, and the footer says the run was cancelled. A Ctrl-C
+        # the handler below could not turn into a cancel, or one taken in the I/O half,
+        # leaves nothing to print, and then the line is all there is.
+        cancel.set()
+        partial = exc.report if isinstance(exc, events.Cancelled) else None
+        if partial is None:
+            ui.error(out, "cancelled")
+            raise typer.Exit(EXIT_ERROR) from None
+        report = partial
+    except (ingest.IngestError, cfg.ConfigError, OSError) as exc:
+        raise _fail(out, exc) from exc
+    except typer.Exit:
+        raise  # a deliberate exit from inside the run keeps its own code
+    except Exception as exc:
+        # Exit 1 is a statement about the document: it has findings. A provider, a
+        # model or a parser failing in a way nobody foresaw must not be able to make
+        # that statement, so anything unforeseen is reported as the tool failing (2).
+        raise _fail(out, exc) from exc
+
+    written = _write_report(out, report, out_path, default=not json_out)
+    if json_out:
+        ui.emit_json(out, report)
+    else:
+        ui.blank(out)
+        for item in report_mod.render_diagnostics(report):
+            ui.diagnostic(out, item)
+        ui.blank(out)
+        ui.footer(out, report_mod.render_footer(report, written=written))
+    # A cancelled run is not a verdict on the document: 2 says the tool stopped early.
+    raise typer.Exit(EXIT_ERROR if report.cancelled else report.exit_code())
+
+
+def _check_target(out: ui.Ui, target: str) -> tuple[Path | str, str | None]:
+    """The document and the name its locations carry.
+
+    ``-`` is the document itself, arriving on stdin and named for where it came from;
+    anything else is a file that has to exist, and a file names itself.
+    """
+    if target == "-":
+        # Decoded here rather than by ``sys.stdin``, whose encoding is the locale's:
+        # on Windows that is the ANSI code page, which turns a UTF-8 paper into
+        # mojibake. Undecodable bytes become U+FFFD instead of ending the run.
+        return sys.stdin.buffer.read().decode("utf-8", errors="replace"), "stdin"
+    path = Path(target)
+    if not path.exists():
+        ui.error(out, f"no such file: {path}")
+        raise typer.Exit(EXIT_ERROR)
+    if not path.is_file():
+        ui.error(out, f"not a file: {path}")
+        raise typer.Exit(EXIT_ERROR)
+    return path, None
+
+
+@contextmanager
+def _interruptible(cancel: threading.Event) -> Iterator[None]:
+    """Turn Ctrl-C into the run's cancel event for the duration of the block.
+
+    The pipeline checks ``cancel`` between units of work, so a run stopped this way
+    finishes the claim it is on, keeps the verdicts it reached and hands them over in
+    the report the ``Cancelled`` carries -- where a bare ``KeyboardInterrupt`` would
+    have dropped all of it. ``signal.signal`` only works on the main thread; anywhere
+    else (a TUI worker, an embedding host) the handler is skipped and the
+    ``KeyboardInterrupt`` the caller sees is handled as before.
+
+    A second Ctrl-C is the user saying the wait is over: the previous handler goes
+    back and the ``KeyboardInterrupt`` is let through, so a stage stuck in a socket
+    read cannot hold the terminal hostage. Whatever the run had decided is gone with
+    it, which is the trade the second press asks for.
+    """
+    previous = signal.getsignal(signal.SIGINT)
+
+    def stop(signum: int, frame: FrameType | None) -> None:
+        if cancel.is_set():
+            signal.signal(signal.SIGINT, previous)
+            raise KeyboardInterrupt
+        cancel.set()
+
+    try:
+        signal.signal(signal.SIGINT, stop)
+    except ValueError:  # not the main thread
+        yield
+        return
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGINT, previous)
+
+
+def _write_report(
+    out: ui.Ui, report: report_mod.Report, path: Path | None, *, default: bool
+) -> str | None:
+    """Write the markdown report and return the path the footer should name.
+
+    ``--format json`` already puts the whole report on stdout, so it writes a file
+    only when asked for one; text mode always leaves one behind.
+    """
+    if path is None:
+        if not default:
+            return None
+        path = DEFAULT_REPORT
+    try:
+        path.write_text(report_mod.render_markdown(report), encoding="utf-8")
+    except OSError as exc:
+        raise _fail(out, exc) from exc
+    return str(path)
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -74,6 +74,14 @@ def test_find_doi_in_raw_string() -> None:
     assert rs.find_doi(ALPHAFOLD) is None
 
 
+def test_find_url_takes_the_first_one_without_its_sentence_punctuation() -> None:
+    entry = "WHO. Air quality guidelines. https://who.int/report.html. Accessed 2024."
+    assert rs.find_url(entry) == "https://who.int/report.html"
+    assert rs.find_url("Report (http://example.org/a/b), 2019.") == "http://example.org/a/b"
+    assert rs.find_url("see http://one.test and http://two.test") == "http://one.test"
+    assert rs.find_url(ALPHAFOLD) is None
+
+
 ENTRY = 'A. Vaswani, N. Shazeer, "Attention is all you need," NeurIPS, 2017.'
 
 

@@ -65,6 +65,20 @@ All notable changes to this project are documented here. The format follows
   (61 passages, rate 0.98) and `scripts/eval_pairing.py`; four real documents (three
   PDFs and one extracted text) measured in `docs/eval/2026-09-11-pairing.md`.
 
+- `proofpath check` (spec §9, §13.2, §15): one `verify()` entry point built as
+  `prepare()` (parse, claims, resolve, retractions, fetch) and `decide_all()` (retrieval,
+  numeric rule, NLI, cached per source and claim); compiler-style diagnostics with the
+  quoted passage, the confidence tier and the exact honesty state; a coverage block in
+  every run and a "coverage is weak" line when a quarter or more of the sources could
+  not be read; `report.md` written by default, `--format json`, `-q`, `--out`, `check -`
+  for stdin, a real Ctrl-C that keeps what was decided (exit 2). A second run of the
+  same document re-decides nothing: chunks and verdicts come from the cache and neither
+  model scores again, although the models are still loaded and reference resolution and
+  the retraction check still go to the network. Cache schema v2: chunks carry the text
+  digest they were cut from and a source's verdicts are dropped when its text changes.
+  `permissions.network = deny` now also skips reference resolution and the retraction
+  check, each reported as not attempted.
+
 ### Changed
 - CLI surface (spec §13.3): `permissions` and `judge` groups replaced by `config`
   (`config` / `show` / `path` / `set SECTION.KEY VALUE` / `check`); global
