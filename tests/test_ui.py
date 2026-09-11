@@ -182,7 +182,7 @@ class Outer:
 
 def test_emit_json_round_trips_nested_dataclasses_on_stdout_only() -> None:
     instance, out, err = _build()
-    inner = Inner(Kind.A, b"\x00\x01", Path("/tmp/x"))
+    inner = Inner(Kind.A, b"\x00\x01", Path("tmp") / "x")
     ui.emit_json(instance, {"result": Outer("n", inner, [inner]), "retraction": None})
     assert err.getvalue() == ""
     payload = json.loads(out.getvalue())
@@ -190,7 +190,7 @@ def test_emit_json_round_trips_nested_dataclasses_on_stdout_only() -> None:
     result = payload["result"]
     assert result["name"] == "n"
     assert result["missing"] is None
-    assert result["inner"] == {"kind": "alpha", "blob": None, "where": "/tmp/x"}
+    assert result["inner"] == {"kind": "alpha", "blob": None, "where": "tmp/x"}
     assert result["items"] == [result["inner"]]
     assert out.getvalue().startswith("{\n  ")  # indented, one document
 

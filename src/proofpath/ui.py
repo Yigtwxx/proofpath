@@ -163,7 +163,7 @@ def _json_default(obj: Any) -> Any:
     if isinstance(obj, bytes):
         return None  # embeddings and raw payloads are not part of a report
     if isinstance(obj, Path):
-        return str(obj)
+        return obj.as_posix()  # one spelling on every platform
     if isinstance(obj, datetime):
         return obj.isoformat()
     raise TypeError(f"cannot serialise {type(obj).__name__}")
