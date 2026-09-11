@@ -1,0 +1,51 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<feed xmlns:opensearch="http://a9.com/-/spec/opensearch/1.1/" xmlns:arxiv="http://arxiv.org/schemas/atom" xmlns="http://www.w3.org/2005/Atom">
+  <id>https://arxiv.org/api/jLFaoMbxX0IxHikh0DyVjtnsDEE</id>
+  <title>arXiv Query: search_query=ti:"RoBERTa A robustly optimized BERT pretraining approach"&amp;id_list=&amp;start=0&amp;max_results=3</title>
+  <updated>2026-09-11T08:28:38Z</updated>
+  <link href="https://arxiv.org/api/query?search_query=ti:%22RoBERTa+A+robustly+optimized+BERT+pretraining+approach%22&amp;start=0&amp;max_results=3&amp;id_list=" type="application/atom+xml"/>
+  <opensearch:itemsPerPage>3</opensearch:itemsPerPage>
+  <opensearch:totalResults>1</opensearch:totalResults>
+  <opensearch:startIndex>0</opensearch:startIndex>
+  <entry>
+    <id>http://arxiv.org/abs/1907.11692v1</id>
+    <title>RoBERTa: A Robustly Optimized BERT Pretraining Approach</title>
+    <updated>2019-07-26T17:48:29Z</updated>
+    <link href="https://arxiv.org/abs/1907.11692v1" rel="alternate" type="text/html"/>
+    <link href="https://arxiv.org/pdf/1907.11692v1" rel="related" type="application/pdf" title="pdf"/>
+    <summary>Language model pretraining has led to significant performance gains but careful comparison between different approaches is challenging. Training is computationally expensive, often done on private datasets of different sizes, and, as we will show, hyperparameter choices have significant impact on the final results. We present a replication study of BERT pretraining (Devlin et al., 2019) that carefully measures the impact of many key hyperparameters and training data size. We find that BERT was significantly undertrained, and can match or exceed the performance of every model published after it. Our best model achieves state-of-the-art results on GLUE, RACE and SQuAD. These results highlight the importance of previously overlooked design choices, and raise questions about the source of recently reported improvements. We release our models and code.</summary>
+    <category term="cs.CL" scheme="http://arxiv.org/schemas/atom"/>
+    <published>2019-07-26T17:48:29Z</published>
+    <arxiv:primary_category term="cs.CL"/>
+    <author>
+      <name>Yinhan Liu</name>
+    </author>
+    <author>
+      <name>Myle Ott</name>
+    </author>
+    <author>
+      <name>Naman Goyal</name>
+    </author>
+    <author>
+      <name>Jingfei Du</name>
+    </author>
+    <author>
+      <name>Mandar Joshi</name>
+    </author>
+    <author>
+      <name>Danqi Chen</name>
+    </author>
+    <author>
+      <name>Omer Levy</name>
+    </author>
+    <author>
+      <name>Mike Lewis</name>
+    </author>
+    <author>
+      <name>Luke Zettlemoyer</name>
+    </author>
+    <author>
+      <name>Veselin Stoyanov</name>
+    </author>
+  </entry>
+</feed>

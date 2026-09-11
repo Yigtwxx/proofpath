@@ -57,8 +57,8 @@ precision. Each must end up written into the spec once measured.
 
 | # | Detail | Set during |
 |---|---|---|
-| 4.1 | Title token-set Jaccard threshold for reference matching (spec §8) | Phase 3, tuned on the ghost test set |
-| 4.2 | Year tolerance beyond ±1 for online-first publications | Phase 3 |
+| 4.1 | Title token-set Jaccard threshold for reference matching (spec §8) | **Set 2026-09-11:** coverage × length-ratio, strong ≥ 0.8, weak ≥ 0.5; measured on the ghost set (`docs/eval/2026-09-11-ghosts.md`) |
+| 4.2 | Year tolerance beyond ±1 for online-first publications | **Kept at ±1** (2026-09-11); no real reference in the ghost set failed on year alone |
 | 4.3 | Numeric comparison tolerance, and how to treat ranges vs point values (spec §10) | **Set 2026-09-11:** relative 10 % on the source side; point-in-stretched-range; overlapping ranges; single-figure attribution rule; change ≠ level. Spec §10 |
 | 4.4 | Confidence threshold that routes a verdict to the judge | Phase 1 calibration |
 | 4.5 | Chunk size and `k` for retrieval. Abstracts are trivial; a 12,000-word full text is not, and the two may need different settings | Phase 1, re-checked in Phase 4 |
@@ -133,8 +133,25 @@ Not problems, just not now. Recorded so they are not rediscovered as new ideas.
 | 7.6 | Full-text chunk text after the 7-day TTL | **NULLed** with the raw text; embeddings kept; the verdict keeps its own quoted passage |
 | 7.7 | `verdicts.model_id` contents | **NLI + embedder + k + thresholds**, so a threshold change never serves a stale verdict |
 
+### Phase 2 and Phase 3 — done 2026-09-11 (evening)
+
+- Numeric layer: `numerics.py`, SciFact unchanged-or-better, spec §10.
+- Reference resolution: `resolve.py`, ghost set measured, spec §8.1. Findings that
+  changed the design: OpenAlex free tier is now a daily budget (~100 searches);
+  RoBERTa missing from Crossref and OpenAlex; books and web pages need their own
+  state. `proofpath resolve` available on the CLI.
+- Cache: plain SQLite (`cache.py`), sqlite-vec removed, `proofpath cache` commands.
+
+### New open items
+
+| # | Item | Note |
+|---|---|---|
+| 7.8 | `proofpath config set <section.key> <value>` | `permissions set` only covers permissions; `contact.email` had to be set from Python |
+| 7.9 | Semantic Scholar API key | free key lifts the shared 1 req/s pool; optional, same pattern as the judge key |
+| 7.10 | Ghost recall ceiling | fabricated references written like blogs/reports/org authors resolve to `NOT_INDEXED`, not `GHOST` — by design; Phase 4 fetches URLs and reports what it finds |
+
 ### Next session
 
-1. **Phase 2:** numeric claim layer — the 40% vs 4-8% case scored NEI 0.53 /
-   REFUTED 0.39 on the NLI model, which is exactly the failure the layer exists for.
-2. Re-run `scripts/eval_scifact.py` after Phase 2; the SciFact numbers must not drop.
+1. **Phase 4:** fetch ladder and permissions (spec §7) — start with the 50-DOI
+   coverage sample (5.3), then steps 1, 2 and 4; step 3 behind the consent prompt.
+2. Wire `cache.py` into fetching (raw text + TTL) as it lands.

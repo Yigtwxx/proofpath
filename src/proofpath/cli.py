@@ -15,6 +15,7 @@ import typer
 from proofpath import __version__
 from proofpath import config as cfg
 from proofpath import judge as judge_mod
+from proofpath import resolve as resolve_mod
 from proofpath.cache import Cache
 from proofpath.paths import config_path
 
@@ -283,6 +284,55 @@ def cache_clear(
     with Cache() as db:
         removed = db.clear(expired_only=expired)
     typer.echo(f"removed {removed} source(s){' (expired only)' if expired else ''}")
+
+
+@app.command()
+def resolve(
+    reference: Annotated[
+        str, typer.Argument(help="One reference string, as it appears in a bibliography.")
+    ],
+) -> None:
+    """Check whether a cited reference exists (Crossref, Semantic Scholar, arXiv, OpenAlex)."""
+    try:
+        contact = cfg.load_config().contact.email
+    except cfg.ConfigError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(EXIT_ERROR) from exc
+    resolver = resolve_mod.Resolver(contact_email=contact)
+    result = resolver.resolve(reference)
+    typer.echo(f"state      {result.state.value}")
+    best = result.best
+    if best is not None:
+        typer.echo(f"record     {best.title}")
+        typer.echo(
+            f"           {best.first_author} {best.year or '?'} · {best.venue or '—'} "
+            f"· via {best.provider}"
+        )
+        typer.echo(f"           {('https://doi.org/' + best.doi) if best.doi else best.url}")
+        if result.match is not None:
+            m = result.match
+            typer.echo(
+                f"agreement  title {m.title:.2f} · author {'yes' if m.author else 'no'} · "
+                f"year {'yes' if m.year else 'no'}"
+            )
+        if best.doi:
+            retraction = resolver.retraction(best.doi)
+            if retraction is None:
+                typer.echo("retraction not retracted (Crossref/Retraction Watch, OpenAlex)")
+            else:
+                typer.echo(f"retraction RETRACTED {retraction.date or ''} — {retraction.source}")
+    elif result.candidates:
+        typer.echo(f"checked    {len(result.candidates)} candidate(s), none agrees on the fields:")
+        for c in result.candidates[:5]:
+            typer.echo(
+                f"           - {c.title[:70]} ({c.first_author} {c.year or '?'}, {c.provider})"
+            )
+    for note in result.notes:
+        typer.echo(f"note       {note}")
+    if result.state in (resolve_mod.State.GHOST, resolve_mod.State.AMBIGUOUS):
+        raise typer.Exit(EXIT_FINDINGS)
+    if result.state is resolve_mod.State.UNAVAILABLE:
+        raise typer.Exit(EXIT_ERROR)
 
 
 @app.command()

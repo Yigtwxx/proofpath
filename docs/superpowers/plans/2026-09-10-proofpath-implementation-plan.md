@@ -117,6 +117,15 @@ score as evidence (spec §8).
 - The fabricated reference from spec §8 that scored 38.5 is correctly rejected.
 - Unit tests use recorded fixtures, not live API calls.
 
+**Status (2026-09-11): done, gate passed.** Providers ended up as Crossref +
+Semantic Scholar first, arXiv + Open Library (+ OpenAlex best-effort) before any
+ghost call — OpenAlex's free tier turned into a ~100-searches/day budget during
+this phase. Ghost set: 106 real / 100 fabricated / 20 mutated. Final numbers in
+`docs/eval/2026-09-11-ghosts.md`; the first run had a 20.8 % false-ghost rate and
+every failure became a regression test in `tests/test_resolve.py`. New state
+`UNVERIFIED (not in bibliographic indexes)` for web pages, reports and books that
+indexes never held. `proofpath resolve "<reference>"` exposes it on the CLI.
+
 ---
 
 ## Phase 4 — Fetch ladder and permissions

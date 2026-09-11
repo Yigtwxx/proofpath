@@ -30,6 +30,19 @@ proofpath check paper.pdf        # one-shot report
 proofpath check draft.md --format sarif
 ```
 
+## Try it today: does a citation exist?
+
+```bash
+proofpath resolve "Jumper J, et al. Highly accurate protein structure prediction with AlphaFold. Nature. 2021;596:583-589."
+```
+
+Prints `RESOLVED`, `RESOLVED (low confidence)`, `AMBIGUOUS` (candidates listed) or
+`GHOST REFERENCE`, with the record it matched, how each field agreed, and whether
+the paper was retracted. Crossref and Semantic Scholar are asked first; arXiv and
+OpenAlex only before a ghost call. Exit code `1` when something is wrong with the
+reference, `2` when a provider was unreachable — never a ghost call on missing
+evidence.
+
 ## Looking inside the cache
 
 Everything proofpath fetches, embeds and decides lands in one plain SQLite file:

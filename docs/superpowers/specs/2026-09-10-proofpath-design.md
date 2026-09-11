@@ -270,6 +270,51 @@ never to `GHOST`.
 
 Retraction Watch is queried independently of this, keyed on the resolved DOI.
 
+### 8.1 Implementation notes (2026-09-11)
+
+- **Providers, in two rounds.** Round one asks Crossref (`query.bibliographic`,
+  the only true bibliographic matcher) and Semantic Scholar (`paper/search/match`
+  on a title-like segment). Both are free without a daily budget. If that round
+  ends in `GHOST` or `AMBIGUOUS`, round two asks arXiv (title search) and Open
+  Library (title + first-author hint, for books), and OpenAlex as best effort.
+  A ghost call needs Crossref, Semantic Scholar, arXiv and Open Library to have
+  all answered; if any of them was unavailable the state is
+  `UNVERIFIED (provider unavailable)` instead.
+- **Why not OpenAlex first.** Its free tier became a daily budget (measured
+  2026-09-11: 1000 credits, a search costs 10 → ~100 searches per day), and it
+  answers `429` with a `Retry-After` of hours once spent. Such responses are
+  treated as "unavailable now", never slept on. RoBERTa (arXiv 1907.11692) was
+  also missing from it that day.
+- **Identifiers first.** A DOI or arXiv id in the string (including the dotless
+  `arXiv:160706450` form) is resolved directly; agreement on the fields means
+  `RESOLVED` at once, a different work is noted and the search continues.
+- **Candidate generation only.** Title-like segments come from the raw string
+  after the leading author list is stripped (ACM `Authors. 2010. Title`, APA
+  `(2019).`, or initials-based lists), quoted spans first, trailing
+  `(Publisher, Year)` removed, two words minimum. Segments and the first-author
+  hint are used to *find* candidates; identity is still decided by the field
+  checks against the raw string.
+- **Title agreement** is token coverage (share of the candidate title's tokens
+  present in the raw string) times a length ratio against the segment it
+  overlaps with, so a short candidate title inside a longer cited one cannot
+  score as strong. Cut-points: strong ≥ 0.8, weak ≥ 0.5 (OPEN-ITEMS 4.1); year
+  ±1 (4.2). When two providers return the same identifier the record that agrees
+  best is kept — Crossref titles the Numba paper "Numba", Semantic Scholar has
+  the full title.
+- **Not everything is a paper.** Web pages, blogs, dashboards, manuals, reports,
+  organisation-authored documents and preprint servers no provider searches
+  (PsyArXiv, OSF, Zenodo) get `UNVERIFIED (not in bibliographic indexes)` rather
+  than `GHOST`: their absence from indexes says nothing. Strings with fewer than
+  six content tokens are `AMBIGUOUS`.
+- **Politeness.** One client, descriptive User-Agent, optional `mailto` from config
+  or `PROOFPATH_CONTACT_EMAIL`, per-host minimum intervals (0.25 s Crossref and
+  OpenAlex, 1.1 s Semantic Scholar, 1 s Open Library, 3 s arXiv), `Retry-After`
+  honoured up to 60 s, exponential backoff on 5xx.
+- **Measured** on the hand-built ghost set (`tests/data/ghost_set.jsonl`: 106 real
+  reference strings taken verbatim from five real papers' reference lists, 100
+  fabricated ones in five citation styles, 20 real ones with author and year
+  mutated). Results and the release gate are in `docs/eval/2026-09-11-ghosts.md`.
+
 ## 9. Data flow (academic path)
 
 1. `ingest` parses the document, keeping page and line numbers per sentence.
@@ -579,6 +624,7 @@ presented as evidence of absence.
 | `UNVERIFIED (provider unavailable)` | API down or rate limited after backoff |
 | `AMBIGUOUS` | multiple plausible reference candidates — all listed |
 | `NEI` | source read, but it neither supports nor contradicts |
+| `UNVERIFIED (not in bibliographic indexes)` | web page, blog, report, manual or organisation-authored document; indexes do not cover it, so absence proves nothing (§8.1) |
 | `PARAGRAPH-SCOPED` | the citation supports a paragraph, not one sentence (§9); every sentence is verified separately and grouped |
 | `UNSUPPORTED CITATION STYLE` | author-year marker found; v0.1 pairs numeric markers only, so the claim is listed but not judged |
 

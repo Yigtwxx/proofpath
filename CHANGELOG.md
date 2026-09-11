@@ -14,6 +14,14 @@ All notable changes to this project are documented here. The format follows
   selection (CUDA → CoreML → CPU), sentence retrieval over `fastembed` + `sqlite-vec`,
   ONNX NLI entailment on `cross-encoder/nli-deberta-v3-base`, and the aggregation
   pipeline.
+- Reference resolution (spec §8): Crossref + Semantic Scholar first, then arXiv,
+  Open Library and OpenAlex before any ghost call; identity decided only by
+  field agreement against the raw string; DOI / arXiv id resolved directly;
+  retraction check via Crossref's Retraction Watch data and OpenAlex; new state
+  `UNVERIFIED (not in bibliographic indexes)`; per-host throttling, `Retry-After`,
+  OpenAlex daily-budget handling. `proofpath resolve "<reference>"` on the CLI.
+  Hand-built ghost set (106 real, 100 fabricated, 20 mutated) and
+  `scripts/eval_ghosts.py`: false-ghost rate 0 %.
 - Persistent cache: one plain SQLite file (`sources`, `raw_text` with 7-day TTL,
   `chunks` with float32 embeddings, `verdicts`), a schema `CHECK` that refuses an
   asserted verdict without a passage, and `proofpath cache` / `cache path` / `ls` /
