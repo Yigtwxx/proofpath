@@ -39,9 +39,16 @@ dependencies = [
     "pymupdf>=1.25",
     "python-docx>=1.1",
     "fastembed>=0.5",
+    # Pulled in by fastembed already; declared because entailment.py and
+    # retrieval.py import them directly.
+    "onnxruntime>=1.20",
+    "huggingface_hub>=0.30",
+    "tokenizers>=0.20",
+    "numpy>=1.26",
     "sqlite-vec>=0.1.6",
     "platformdirs>=4.3",
     "orjson>=3.11",
+    "tomli>=2.0; python_version < '3.11'",
 ]
 
 [project.optional-dependencies]
@@ -90,6 +97,12 @@ testpaths = ["tests"]
 addopts = "-q"
 
 [tool.mypy]
-python_version = "3.10"
+# No python_version pin: numpy's stubs use the 3.12 `type` statement, and the
+# 3.10 floor is enforced by ruff's target-version and the CI matrix instead.
 strict = true
 files = ["src"]
+
+[[tool.mypy.overrides]]
+# Ship no stubs or no py.typed marker.
+module = ["onnxruntime.*", "sqlite_vec", "torch", "torch.*", "fastembed.*", "tokenizers.*"]
+ignore_missing_imports = true
