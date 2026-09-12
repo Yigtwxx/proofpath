@@ -7,6 +7,7 @@ import pytest
 
 from proofpath.models import Passage
 from proofpath.retrieval import (
+    FastEmbedder,
     PassageIndex,
     rank,
     rank_indexed,
@@ -159,3 +160,13 @@ def test_rank_indexed_matches_rank_without_re_embedding_the_passages() -> None:
 
 def test_rank_indexed_on_an_empty_index_is_empty() -> None:
     assert rank_indexed("a cat purring", PassageIndex(dim=3), FakeEmbedder(), k=3) == []
+
+
+def test_fast_embedder_close_drops_the_model_and_is_idempotent() -> None:
+    """Same reason as ``OnnxNli.close``: fastembed holds an ONNX session too."""
+    embedder = object.__new__(FastEmbedder)
+    embedder._model = object()
+
+    embedder.close()
+    assert embedder._model is None
+    assert embedder.close() is None

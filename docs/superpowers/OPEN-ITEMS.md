@@ -126,7 +126,7 @@ Not problems, just not now. Recorded so they are not rediscovered as new ideas.
 
 | # | Decision | Outcome |
 |---|---|---|
-| 7.1 | Tier cut-points: precision targets 0.85/0.70 leave `high` unreachable on this model | **Deferred to after Phase 2**; the numeric layer changes the numbers. Pipeline default stays `decide=0.5, high=0.9, medium=0.7` |
+| 7.1 | Tier cut-points: precision targets 0.85/0.70 leave `high` unreachable on this model | **Decided 2026-09-12 (Phase 7).** `high` was never unreachable — the harness printed cut-points to two decimals and a real cut of 0.99933 showed as `1.00`. Calibrated on SciFact dev at k=1: `decide=0.45, high=0.99933, medium=0.457948` (85% / 70% precision targets); `Report.tier_note` stays empty because a high tier exists. `docs/eval/2026-09-12-tiers.md` |
 | 7.2 | CPU is 3× faster than CoreML for the int8 NLI graph | **Done.** `entailment.providers_for()` skips CoreML for int8 exports; the CUDA → CoreML → CPU rule is unchanged for fp32 |
 | 7.3 | Default judge provider (Phase 9) | **Groq `openai/gpt-oss-120b`** default; Gemini and Ollama selectable with `proofpath judge set provider`; NVIDIA build.nvidia.com is dev-only and not documented. Key lives in env or `.env`, never in config (`judge.py`, `proofpath judge check`) |
 | 7.4 | Second embedding model for assumption 3.6 | compare `all-MiniLM-L6-v2` once, in Phase 4 alongside full text |
@@ -211,7 +211,7 @@ Findings from inspecting the installed base environment, and the decisions they 
 
 | # | Item | Note |
 |---|---|---|
-| 8.20 | Browser step never exercised live | `--allow-browser` path (pip/uv install + `StealthyFetcher`) is unit-tested with mocks only. Run once by hand before v0.1: `proofpath fetch <blocked url> --allow-browser` on a machine where the ~280 MB download is acceptable |
+| 8.20 | ~~Browser step never exercised live~~ **Closed 2026-09-12 (Task 7.4)** | Run live: `proofpath fetch 10.1016/j.tibs.2014.10.005 --allow-browser` installed the engine through scrapling's CLI and read the paywalled Cell landing page at step 3 (3,632 words); log in `docs/eval/2026-09-12-v0.1-live.md` §8b |
 | 8.21 | Semantic Scholar is the single biggest full-text source (23/36) | Its shared 1 req/s pool and occasional 429s make it the fragile link; 7.9 (free S2 API key) moves up in priority |
 | 8.22 | `install_log` is now a general gate log | Rename to `gate.log`/`events` when the report layer (Phase 6) consumes it |
 | 8.23 | Deferred polish from the Phase 4 reviews | `resolve.py` blanket `noqa: F401` on the re-export block; `fetch.py` `retry_after` float↔str round trip and no 3xx→`final_url` test; `polite.py` assert-based narrowing; `oa.py` `_JATS_BIBR_XREF` needs `ref-type` as first attribute; six `ui` tests pin exact ANSI sequences; `_json_default` dead branches; `evidence` line does not dim `none`; `Cache()` OSError → traceback instead of exit 2; OA and Fetcher hold separate `PoliteClient` throttles (Europe PMC search + fullTextXML not spaced); `_browser` loses redirects in `final_url`; `install()` is silent for minutes; a cached `doi:` abstract short-circuits a later `--allow-browser` run (use `--no-cache`) |
@@ -300,4 +300,46 @@ Findings from inspecting the installed base environment, and the decisions they 
 
 1. **Phase 7:** calibrated tiers (7.1), live user-like runs, README, CHANGELOG `[0.1.0]`,
    tag `v0.1.0` (briefs in `.superpowers/sdd/phase7/`).
+
+---
+
+## 11. Phase 7 — v0.1.0, 2026-09-12
+
+- Tiers calibrated on SciFact dev (7.1): `decide 0.45`, `medium 0.457948`, `high 0.99933`
+  — `high` is reachable (the Phase 1 "unreachable" was a two-decimal display artefact);
+  the 85 % figure is an in-sample estimate on 21 verdicts and `low` is practically
+  empty, both stated in spec §14 and `docs/eval/2026-09-12-tiers.md`.
+- Live user-like runs (7.2, `docs/eval/2026-09-12-v0.1-live.md`) found what the unit
+  and eval suites could not: a **false ghost** on a real NumPy reference (particle
+  surname `van der Walt`) and a fabricated `[7]` reported as `not in indexes` because
+  `Reference.raw` keeps its printed marker. Both fixed in 7.3; the ghost set grew to
+  258 rows (particles, glued `al-`, marked strings, year-first and numeral-first
+  entries) at 0.0 % false-ghost and 100 % fabricated recall
+  (`docs/eval/2026-09-12-ghosts.md`). A piped markdown draft (`check -`) lost its
+  `## References`; fixed in `ingest.py`.
+- 7.4 fixed three more live findings: the browser step could not install itself
+  (`scrapling` has no `__main__`; the package CLI is now invoked and a paywalled Cell
+  page was read live at step 3 — closes 8.20), an intermittent exit `134` at ONNX
+  teardown after a complete report (models released explicitly, streams flushed; 20/20
+  runs clean), and a clean-looking `0 %` coverage block on a document with markers but
+  no detected bibliography (now a hint naming the unchecked markers).
+
+### New open items
+
+| # | Item | Note |
+|---|---|---|
+| 11.1 | Two-author lists `First Last and First Last` reach `AMBIGUOUS`, not `RESOLVED` | `_strip_authors` does not consume that form; Phase 8 with author-year pairing |
+| 11.2 | The arXiv-id branch has no author+year rescue | the DOI branch resolves `RESOLVED (low confidence)` on author+year agreement; mirror it for arXiv ids |
+| 11.3 | Resolution is the slow path of a cached re-run | 68 refs ≈ 3.7 min, 129 refs ≈ 24 min cold; a `resolutions` cache (10.8) and concurrent resolve in the TUI scheduler are the v0.2 fixes |
+| 11.4 | Nature PDFs expose no `References` heading | AlphaFold: 0 references, 84 unresolved markers, coverage 0/0/0 with the new hint; try "last numbered block" fallback in Phase 8 (9.3) |
+| 11.5 | `stdin` decoding replaces undecodable bytes silently | a `\ufffd` in a claim should be noted (rule 2) |
+| 11.7 | The §7.1 aggregate line `skipped N source(s) because the browser was not permitted` is not printed by `check` | `FetchStats.browser_skipped` is counted but no `Footer` field or `ui` line consumes it; every such source is still named individually. Phase 8, with the footer work |
+| 11.8 | Bibliographies with ≥ 1000 entries lose ghost detection | `_MARKER` bare forms are capped at three digits, so `1024. Smith…` keeps its marker and exits as `NOT_INDEXED` (never a false ghost) |
+| 11.9 | `mypy` covers `src/` only | `scripts/` is ruff-linted and its pure halves are tested, but not type-checked; two pre-existing errors in `scripts/eval_ghosts.py` |
+| 11.6 | `browser.is_installed()` checks imports, not a browser binary | a half-installed venv skips the installer and fails inside `fetch_with_browser` (reported, not a crash); check the binary in Phase 8 |
+
+### Next session
+
+1. **Phase 8:** TUI (briefs 8.1–8.6 in `.superpowers/sdd/phase8/`), author-year pairing,
+   SARIF, `commands.py` shared wiring, resolution cache → v0.2.0.
 

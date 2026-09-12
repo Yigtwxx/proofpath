@@ -65,6 +65,10 @@ Kill criterion: margin near zero after tuning means stop before Phase 2.
   lower the targets, or accept that this model does not earn a `high` tier and say
   so in the report. Decision pending; the pipeline default stays
   `Thresholds(decide=0.5, high=0.9, medium=0.7)` until it is made.
+  **Corrected 2026-09-12:** this note was wrong. `high` *is* reached, at 0.99933 —
+  the two-decimal column above rounded it to the same `1.00` the harness prints when
+  a target is never met. Cut-points now print to six decimals. The calibration that
+  replaced the placeholder is `docs/eval/2026-09-12-tiers.md`.
 - **CPU beats CoreML for this int8 graph.** 64 pairs: CPU 0.40s, CoreML 1.14s.
   CoreML takes only 880 of 2,524 nodes, so the partition overhead dominates. The
   CUDA → CoreML → CPU rule was kept; the eval ran with `--providers cpu`.

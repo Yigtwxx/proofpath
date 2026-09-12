@@ -239,6 +239,15 @@ Academic provider, CLI only, offline by default.
 
 Publish to PyPI, tag `v0.1.0`, write the CHANGELOG entry.
 
+**Status (2026-09-12): released as v0.1.0.** Gates: (1) SciFact 0.609 vs 0.406 in the
+README with calibrated tiers; (2) ghost set 258 rows, 0.0 % false-ghost after the live
+run caught a particle-surname false ghost (fixed in 7.3); (3) no `SUPPORTED`/`REFUTED`
+without a passage — enforced by `Verdict`, the SQL `CHECK` and `Finding`; (4) CI green
+on Linux, macOS, Windows on the tagged commit's own run; (5) README states that most verdicts are `NEI` and why. Live
+user-like runs in `docs/eval/2026-09-12-v0.1-live.md`.
+Three more live findings (browser install, exit 134 at ONNX teardown, silent no-bibliography
+coverage) were fixed before tagging (Task 7.4).
+
 ---
 
 ## Phase 8 — TUI and SARIF (v0.2)

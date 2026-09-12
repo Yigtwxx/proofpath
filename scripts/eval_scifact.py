@@ -12,16 +12,19 @@ dataset tarball and the two models.
 from __future__ import annotations
 
 import argparse
+import itertools
+import math
 import platform
 import sys
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 
 import numpy as np
 
-from proofpath import numerics
+from proofpath import numerics, pipeline
 from proofpath.device import onnx_providers
 from proofpath.entailment import LABEL_ORDER, OnnxNli, pick_onnx_file
 from proofpath.eval import metrics, scifact
@@ -31,6 +34,20 @@ from proofpath.pipeline import Thresholds, aggregate
 from proofpath.retrieval import FastEmbedder, Hit, rank
 
 GRID = [round(x, 2) for x in np.arange(0.30, 0.96, 0.05)]
+# Score bands the tier table reports precision over (spec section 14). The first band
+# starts at the chosen decide threshold — nothing below it is ever asserted — and the
+# last one is closed, so a rule-decided 1.00 has somewhere to land.
+BAND_EDGES: tuple[float, ...] = (0.6, 0.7, 0.8, 0.9)
+# (high, medium) precision targets the cut-points are read at, strictest first.
+TARGETS: tuple[tuple[float, float], ...] = ((0.85, 0.70), (0.80, 0.65))
+# Decimals a cut-point is reported — and shipped — with. The NLI softmax saturates,
+# so the decided scores pile up against 1.0 and two decimals cannot tell a cut of
+# 0.9991 from "never reached"; the Phase 1 doc's "high is unreachable" was exactly
+# that rounding artefact.
+CUT_DECIMALS = pipeline.CUT_DECIMALS
+# How close `medium` may sit to `decide` before the `low` tier stops meaning
+# anything: inside this margin every asserted verdict is medium or better.
+LOW_TIER_MARGIN = 0.01
 PROVIDER_NAMES = {
     "cuda": "CUDAExecutionProvider",
     "coreml": "CoreMLExecutionProvider",
@@ -68,6 +85,127 @@ def _row(scored: Scored, k: int, thresholds: Thresholds, *, use_numerics: bool) 
 
 def _md_row(*cells: object) -> str:
     return "| " + " | ".join(str(c) for c in cells) + " |"
+
+
+@dataclass(frozen=True)
+class Band:
+    """One score band of the decided rows: ``[low, high)``, the top band closed.
+
+    ``correct`` counts the rows whose proposed label was the gold one, so
+    ``precision`` is the share of verdicts in this band a reader could trust. An
+    empty band has no precision to report — not a precision of zero.
+    """
+
+    low: float
+    high: float
+    closed: bool
+    n: int
+    correct: int
+
+    @property
+    def precision(self) -> float | None:
+        return self.correct / self.n if self.n else None
+
+    def label(self) -> str:
+        return f"[{self.low:.2f}, {self.high:.2f}{']' if self.closed else ')'}"
+
+
+def ship_cut(value: float, *, decimals: int = CUT_DECIMALS) -> float:
+    """Round a cut-point up to the decimals the report prints.
+
+    Up, never down: the printed number is the one pasted into
+    ``pipeline.Thresholds``, and a cut rounded down would hand a tier to scores the
+    split never showed were that good.
+    """
+    scale = 10**decimals
+    return min(1.0, math.ceil(value * scale) / scale)
+
+
+def tier_bands(
+    rows: Sequence[metrics.Row], *, decide: float, edges: Sequence[float] = BAND_EDGES
+) -> list[Band]:
+    """Bucket the decided rows by score and count how often each bucket was right.
+
+    Rows below ``decide`` belong to no band: they are reported as ``NEI`` and never
+    carry a tier. Edges at or below ``decide`` fall away with them, so the table
+    always starts at the threshold the run actually used.
+    """
+    bounds = [decide, *(edge for edge in edges if edge > decide), 1.0]
+    bands: list[Band] = []
+    for i, (low, high) in enumerate(itertools.pairwise(bounds)):
+        closed = i == len(bounds) - 2
+        inside = [r for r in rows if low <= r[2] < high or (closed and r[2] >= high)]
+        bands.append(
+            Band(low, high, closed, len(inside), sum(gold is label for gold, label, _ in inside))
+        )
+    return bands
+
+
+def render_tiers(
+    rows: Sequence[metrics.Row],
+    *,
+    k: int,
+    decide: float,
+    targets: Sequence[tuple[float, float]] = TARGETS,
+) -> list[str]:
+    """The tier section: where precision actually sits, and the cuts each target buys.
+
+    Cuts are printed at ``CUT_DECIMALS`` and with the number of verdicts that would
+    reach them, because both are load-bearing: a cut is pasted into
+    ``pipeline.Thresholds`` verbatim, and one backed by two rows is a rounding
+    artefact rather than a tier. A cut of exactly 1.0 is ``tier_cutpoints`` saying the
+    target was never met, and is called out in words.
+    """
+    lines = [f"## Confidence tiers (k={k}, decide={decide:.2f})", ""]
+    lines.extend(["| band | n | precision |", "|---|---|---|"])
+    for band in tier_bands(rows, decide=decide):
+        share = "—" if band.precision is None else f"{band.precision:.3f}"
+        lines.append(_md_row(band.label(), band.n, share))
+    lines.append("")
+    lines.extend(
+        [
+            "| high target | medium target | high cut | n ≥ high | medium cut | n ≥ medium |",
+            "|---|---|---|---|---|---|",
+        ]
+    )
+    warnings: list[str] = []
+    for high_target, medium_target in targets:
+        raw_high, raw_medium = metrics.tier_cutpoints(
+            rows, decide=decide, high_precision=high_target, medium_precision=medium_target
+        )
+        high, medium = ship_cut(raw_high), ship_cut(raw_medium)
+        reaching_high = sum(score >= high for _, _, score in rows)
+        reaching_medium = sum(score >= medium for _, _, score in rows)
+        lines.append(
+            _md_row(
+                f"{high_target:.2f}",
+                f"{medium_target:.2f}",
+                f"{high:.{CUT_DECIMALS}f}",
+                reaching_high,
+                f"{medium:.{CUT_DECIMALS}f}",
+                reaching_medium,
+            )
+        )
+        # Unreachable is about the verdicts, not about the number: a rule-decided
+        # verdict scores exactly 1.0 (spec section 10) and does reach a cut of 1.0.
+        if reaching_high == 0:
+            warnings.append(
+                f"`high` is unreachable at precision {high_target:.2f}: no verdict reaches "
+                f"the cut, so nothing is ever shown as high."
+            )
+        if medium <= decide + LOW_TIER_MARGIN:
+            # Worded without the target: the warning is about the cut, and two targets
+            # that land on the same cut have one thing to say, not two.
+            warnings.append(
+                f"`low` is effectively empty: the `medium` cut ({medium:.{CUT_DECIMALS}f}) "
+                f"sits on `decide` ({decide:.2f}), so {reaching_medium} of the decided "
+                "verdicts are medium or better and the display is two tiers, not three."
+            )
+    lines.append("")
+    lines.extend(dict.fromkeys(warnings))  # in order, once each
+    if warnings:
+        lines.append("")
+    return lines
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -171,16 +309,24 @@ def main(argv: list[str] | None = None) -> int:
     lines.append("|---|---|---|---|---|---|---|---|")
     best_overall: tuple[float, int, metrics.SweepResult] | None = None
     numeric_notes: list[str] = []
+    rows_by_k: dict[int, list[metrics.Row]] = {}
     for k in ks:
         loose = Thresholds(decide=0.0, high=1.0, medium=1.0)
         rows: list[metrics.Row] = []
         for s in scored:
             _, strongest, score, _ = _row(s, k, loose, use_numerics=use_numerics)
             rows.append((s.pair.label, strongest, score))
+        rows_by_k[k] = rows
         best = metrics.sweep_decide(rows, grid=GRID)
-        high, medium = metrics.tier_cutpoints(
-            rows, decide=best.threshold, high_precision=0.85, medium_precision=0.70
+        raw_high, raw_medium = metrics.tier_cutpoints(
+            rows,
+            decide=best.threshold,
+            high_precision=TARGETS[0][0],
+            medium_precision=TARGETS[0][1],
         )
+        # Shipped precision, here too: a cut shown as 1.00 in this table and as
+        # 0.999330 in the tier section below would be the same number twice.
+        high, medium = ship_cut(raw_high), ship_cut(raw_medium)
         tuned = Thresholds(decide=best.threshold, high=max(high, medium), medium=medium)
         preds, pred_rationale, missing = [], [], 0
         for s in scored:
@@ -205,8 +351,8 @@ def main(argv: list[str] | None = None) -> int:
                 f"{metrics.accuracy(gold, preds):.3f}",
                 f"{metrics.macro_f1(gold, preds):.3f}",
                 f"{rf1:.3f}",
-                f"{tuned.high:.2f}",
-                f"{tuned.medium:.2f}",
+                f"{tuned.high:.{CUT_DECIMALS}f}",
+                f"{tuned.medium:.{CUT_DECIMALS}f}",
                 missing,
             )
         )
@@ -222,6 +368,12 @@ def main(argv: list[str] | None = None) -> int:
 
     assert best_overall is not None
     _, best_k, best_sweep = best_overall
+    # Tiers are read off the configuration the product would actually ship: the best
+    # k (ties to the smaller one, which is the order ``ks`` is walked in) and its
+    # decide threshold. Reading them off any other row would calibrate a run nobody
+    # makes.
+    lines.extend(render_tiers(rows_by_k[best_k], k=best_k, decide=best_sweep.threshold))
+
     trivial = max(
         metrics.accuracy(gold, [majority] * len(gold)),
         metrics.accuracy(gold, [Label.SUPPORTED] * len(gold)),

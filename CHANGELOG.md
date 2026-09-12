@@ -6,13 +6,27 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-09-12
+
+First working release: `proofpath check` verifies a document's citations end to end
+and writes a report that states its own coverage.
+
 ### Added
+- `proofpath check TARGET` as the v0.1 surface: compiler-style diagnostics, a
+  markdown `report.md`, `--format json`, `-q`, and exit codes `0` / `1` / `2`.
+- Confidence tiers calibrated on SciFact dev rather than chosen by hand
+  (`decide=0.45`, `medium=0.457948`, `high=0.99933`;
+  `docs/eval/2026-09-12-tiers.md`), shipped as `pipeline.DEFAULT_THRESHOLDS`.
+- Nine live user-like runs recorded in `docs/eval/2026-09-12-v0.1-live.md`, and
+  `scripts/zero_network_check.py`, which guards both HTTP clients and re-verifies a
+  document: with the network gone the fetch ladder makes no attempt at all, because
+  resolution produces no identifiers to fetch with.
 - Config and permissions module: `config.toml` under the platform config dir,
   `proofpath config` / `proofpath config set permissions.<key>`, and the rule that an
   `ask` permission without a TTY resolves to `deny` and is reported (spec §7.1).
 - Core types (`Verdict` cannot be `SUPPORTED`/`REFUTED` without a passage), device
-  selection (CUDA → CoreML → CPU), sentence retrieval over `fastembed` + `sqlite-vec`,
-  ONNX NLI entailment on `cross-encoder/nli-deberta-v3-base`, and the aggregation
+  selection (CUDA → CoreML → CPU), sentence retrieval over `fastembed` embeddings
+  scanned with numpy, ONNX NLI entailment on `cross-encoder/nli-deberta-v3-base`, and the aggregation
   pipeline.
 - Reference resolution (spec §8): Crossref + Semantic Scholar first, then arXiv,
   Open Library and OpenAlex before any ghost call; identity decided only by
@@ -95,6 +109,41 @@ All notable changes to this project are documented here. The format follows
 - Spec: `PARAGRAPH-SCOPED` and `UNSUPPORTED CITATION STYLE` states, three-tier
   confidence display, 7-day raw-text cache TTL, v0.1 limited to numeric citation
   markers.
+
+### Fixed (found by the release's own live runs, `docs/eval/2026-09-12-v0.1-live.md`)
+- A real reference whose author list carries a surname particle (`van der Walt`) was
+  called a `GHOST REFERENCE` — product rule 3. Reference resolution now understands
+  particles (including glued `al-`/`el-` forms), scores the title against every
+  title-like segment, and accepts a DOI whose record agrees on first author and year
+  as `RESOLVED (low confidence)` instead of a ghost. The ghost set grew to 258 rows
+  (`docs/eval/2026-09-12-ghosts.md`): false-ghost rate 0.0 %, fabricated recall 100 %.
+- A fabricated reference in a numbered bibliography was reported as
+  `UNVERIFIED (not in bibliographic indexes)` instead of a ghost, because the printed
+  marker (`[7] `) blinded the "is this even a paper" check. The marker is stripped once
+  at the resolver's entry, guarded so it can never remove a year, an identifier or a
+  title that begins with a number.
+- A markdown draft piped through `proofpath -q check -` lost its `## References`.
+- The consent-gated browser step (fetch-ladder step 3) could not install itself
+  (`scrapling` has no `__main__`); it now runs the package's own CLI after `pip`/`uv`,
+  and a paywalled Cell landing page was read through it live (3,632 words).
+- A piped run occasionally aborted with exit `134` from ONNX runtime teardown after
+  printing a complete report; the engine now releases both models explicitly and the
+  CLI flushes its streams before exiting (20 of 20 consecutive runs exit `1`).
+- A document with citation markers but no detected bibliography printed a clean-looking
+  `0 %` coverage block; it now says `no bibliography was found; N citation markers could
+  not be checked`.
+
+### Known issues
+- Reference resolution and the retraction check are not cached, so a warm re-run is
+  still a network run: a 68-reference PDF takes about 13 minutes cold and 3.7 minutes
+  cached, a 129-reference one 24 minutes cold. Concurrent resolution and a resolution
+  cache are v0.2 work.
+- Two-author lists written `First Last and First Last` resolve to `AMBIGUOUS`, not
+  `RESOLVED`; an arXiv id whose record agrees on author and year is not yet rescued the
+  way a DOI is.
+- `browser.is_installed()` checks that the packages import, not that a browser binary
+  exists; a half-installed environment skips the installer and fails inside the browser
+  fetch (reported as an unverified source, never a crash).
 
 ## [0.0.1] - 2026-09-10
 

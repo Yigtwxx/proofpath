@@ -1,0 +1,34 @@
+{
+ "status": "ok",
+ "message-type": "work",
+ "message-version": "1.0.0",
+ "message": {
+  "publisher": "Springer Science and Business Media LLC",
+  "issue": "7825",
+  "short-container-title": ["Nature"],
+  "published-print": {"date-parts": [[2020, 9, 17]]},
+  "DOI": "10.1038/s41586-020-2649-2",
+  "type": "journal-article",
+  "page": "357-362",
+  "source": "Crossref",
+  "is-referenced-by-count": 16042,
+  "title": ["Array programming with NumPy"],
+  "prefix": "10.1038",
+  "volume": "585",
+  "author": [
+   {"ORCID": "https://orcid.org/0000-0003-3926-4508", "given": "Charles R.", "family": "Harris", "sequence": "first", "affiliation": []},
+   {"given": "K. Jarrod", "family": "Millman", "sequence": "additional", "affiliation": []},
+   {"ORCID": "https://orcid.org/0000-0003-1911-9032", "given": "Stefan J.", "family": "van der Walt", "sequence": "additional", "affiliation": []},
+   {"given": "Ralf", "family": "Gommers", "sequence": "additional", "affiliation": []},
+   {"given": "Pauli", "family": "Virtanen", "sequence": "additional", "affiliation": []},
+   {"given": "Travis E.", "family": "Oliphant", "sequence": "additional", "affiliation": []}
+  ],
+  "member": "297",
+  "published-online": {"date-parts": [[2020, 9, 16]]},
+  "container-title": ["Nature"],
+  "language": "en",
+  "URL": "https://doi.org/10.1038/s41586-020-2649-2",
+  "ISSN": ["0028-0836", "1476-4687"],
+  "issued": {"date-parts": [[2020, 9, 16]]}
+ }
+}

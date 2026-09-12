@@ -681,13 +681,16 @@ def test_capitalised_name_lists_look_like_authors() -> None:
     assert not rs._looks_like_authors("Language Models are Few-Shot Learners")
 
 
-def test_a_candidate_matching_only_the_venue_segment_scores_zero() -> None:
+def test_a_candidate_matching_only_the_venue_segment_never_resolves() -> None:
+    # Scored 0.0 until 2026-09-12; zeroing a candidate that misses the first segment
+    # is what turned a real reference into a ghost, so the score is now capped at the
+    # weak band instead. A proceedings-volume record still cannot pass as the paper.
     raw = (
         "Mbeki, G., Bianchi, A. D., & Tanaka, S. M. (2024). Epigenetic turnover in coral "
         "holobionts. Advances in Neural Information Processing Systems, 37, 150-1436."
     )
     proceedings = cand("Advances in Neural Information Processing Systems 37", "", 2024)
-    assert rs.title_score(proceedings.title, raw) == 0.0
+    assert rs.title_score(proceedings.title, raw) <= rs.WEAK_TITLE
     assert rs.classify([proceedings], raw).state is rs.State.GHOST
 
 
@@ -695,3 +698,206 @@ def test_open_library_candidates_need_the_author_to_agree() -> None:
     raw = "World Health Organization. WHO Director-General's opening remarks. 2020."
     book = rs.Candidate("", "World Health Organization", "Lee", 2019, "", "openlibrary", url="u")
     assert rs.classify([book], raw).state is not rs.State.RESOLVED_LOW
+
+
+# --- lessons from the v0.1 live run (2026-09-12) ------------------------------------
+# resolve.py was measured on bare reference strings but is used on `Reference.raw`,
+# which keeps its printed marker and carries surnames with particles.
+
+NUMPY = (
+    "Harris, C. R., Millman, K. J., van der Walt, S. J. et al. Array programming with NumPy. "
+    "Nature 585, 357-362 (2020)."
+)
+NUMPY_DOI = "10.1038/s41586-020-2649-2"
+MARCHETTI = (
+    "Marchetti, L. R., Osei, K. & Lindqvist, P. Cross-domain retrieval collapse under "
+    "distribution shift in citation graphs. Journal of Applied Scientometrics 14, 220-238 (2021)."
+)
+
+
+@pytest.mark.parametrize(
+    "authors",
+    [
+        "Harris, C. R., Millman, K. J., van der Walt, S. J. et al.",
+        "von Neumann, J. & Morgenstern, O.",
+        "de la Torre, F., Di Marco, L. & Ibn Rushd, A.",
+        "dos Santos, C. N. & Gatti, M.",
+        "Le Cun, Y., Bengio, Y. & Hinton, G.",
+        "ten Bosch, L. & St. John, R.",
+        "Van Der Walt, S. J., Mac Namee, B. & O'Neill, S.",
+    ],
+)
+def test_surname_particles_do_not_cut_the_author_list_short(authors: str) -> None:
+    # A lower-case particle used to stop the author-list patterns dead, leaving the
+    # remnant ("van der Walt, S") as the first title-like segment (live run, [3]).
+    raw = f"{authors} Array programming with NumPy. Nature 585, 357-362 (2020)."
+    assert rs.title_segments(raw)[0] == "Array programming with NumPy"
+
+
+def test_the_live_run_numpy_reference_scores_its_own_title() -> None:
+    assert rs.title_segments(NUMPY)[0] == "Array programming with NumPy"
+    assert rs.title_score("Array programming with NumPy", NUMPY) == pytest.approx(1.0)
+    c = cand("Array programming with NumPy", "Harris", 2020, NUMPY_DOI)
+    assert rs.classify([c], NUMPY).state is rs.State.RESOLVED
+
+
+def test_full_name_author_lists_with_particles_still_look_like_authors() -> None:
+    assert rs._looks_like_authors("Sebastiaan van der Walt, Ralf Gommers, Pauli Virtanen")
+    assert rs._looks_like_authors("Charles R. Harris, Stefan van der Walt, K. Jarrod Millman")
+
+
+def test_a_wrong_first_segment_no_longer_zeroes_the_title_score() -> None:
+    # Whatever puts the wrong span first -- an author remnant, an editor line -- the
+    # candidate that agrees with a later segment must keep the agreement it has.
+    raw = "Report of the working group. Array programming with NumPy. Nature 585, 357-362 (2020)."
+    score = rs.title_score("Array programming with NumPy", raw)
+    assert score >= rs.WEAK_TITLE  # never zero: zeroing is how a real reference became a ghost
+    assert score < rs.STRONG_TITLE  # ... and never enough to resolve on the title alone
+
+
+def test_strip_marker_removes_the_printed_marker_and_nothing_else() -> None:
+    assert rs.strip_marker("[3] Harris, C. R. Array programming. 2020.") == (
+        "Harris, C. R. Array programming. 2020."
+    )
+    assert rs.strip_marker("7. Marchetti, L. R. Cross-domain retrieval. 2021.") == (
+        "Marchetti, L. R. Cross-domain retrieval. 2021."
+    )
+    assert rs.strip_marker(NUMPY) == NUMPY
+    # A leading identifier is not a marker: "10." must survive, and so must a bare arXiv id.
+    doi_first = f"{NUMPY_DOI} Harris, C. R. et al. Array programming with NumPy. 2020."
+    assert rs.strip_marker(doi_first) == doi_first
+    assert rs.find_doi(rs.strip_marker(doi_first)) == NUMPY_DOI
+    assert rs.strip_marker("2103.00020") == "2103.00020"
+
+
+@pytest.mark.parametrize("marker", ["[7] ", "7. ", "7) ", "7  "])
+def test_the_printed_marker_does_not_change_looks_unindexed(marker: str) -> None:
+    # `[7] ` blocked every ^-anchored pattern, so a numbered bibliography's
+    # fabrications all took the NOT_INDEXED exit instead of the ghost one.
+    assert rs.looks_unindexed(MARCHETTI) is False
+    assert rs.looks_unindexed(f"{marker}{MARCHETTI}") is False
+    page = "World Health Organization. Air quality guidelines. https://who.int/a.html. 2021."
+    assert rs.looks_unindexed(f"{marker}{page}") is True
+
+
+@respx.mock
+def test_a_marked_fabricated_reference_is_a_ghost_not_unindexed() -> None:
+    routes = _mock()
+    result = rs.Resolver().resolve(f"[7] {MARCHETTI}")
+    assert result.state is rs.State.GHOST
+    assert all(routes[name].called for name in ("crossref", "s2", "arxiv", "openlibrary"))
+
+
+@respx.mock
+def test_a_marked_real_reference_resolves_through_its_doi() -> None:
+    respx.get(f"https://api.crossref.org/works/{NUMPY_DOI}").mock(
+        return_value=httpx.Response(200, json=fixture("crossref_work_numpy.json"))
+    )
+    _mock()
+    result = rs.Resolver().resolve(f"[3] {NUMPY} doi:{NUMPY_DOI}")
+    assert result.state is rs.State.RESOLVED
+    assert result.best is not None and result.best.doi == NUMPY_DOI
+
+
+@respx.mock
+def test_the_same_reference_without_its_doi_still_resolves_by_title() -> None:
+    _mock(crossref="crossref_numpy.json")
+    result = rs.Resolver().resolve(f"[3] {NUMPY}")
+    assert result.state is rs.State.RESOLVED
+    assert result.best is not None and result.best.doi == NUMPY_DOI
+
+
+@respx.mock
+def test_a_doi_agreeing_on_author_and_year_is_never_a_ghost() -> None:
+    # Some styles print no title at all. The identifier is the author's own, and it
+    # resolves to a paper by the same first author in the same year: title
+    # disagreement alone is not evidence of fabrication (spec section 8).
+    respx.get(f"https://api.crossref.org/works/{NUMPY_DOI}").mock(
+        return_value=httpx.Response(200, json=fixture("crossref_work_numpy.json"))
+    )
+    _mock()
+    raw = (
+        "[3] Harris, C. R., Millman, K. J., van der Walt, S. J. et al. "
+        f"Nature 585, 357-362 (2020). doi:{NUMPY_DOI}"
+    )
+    result = rs.Resolver().resolve(raw)
+    assert result.state is rs.State.RESOLVED_LOW
+    assert result.best is not None and result.best.doi == NUMPY_DOI
+    assert any("title could not be matched" in note for note in result.notes)
+
+
+def test_a_two_author_list_no_longer_zeroes_a_correctly_cited_paper() -> None:
+    # Run 2 of the live doc: "First Last and First Last" has one comma too few for
+    # `_looks_like_authors`, so the author pair takes the first segment. It still
+    # does — but the candidate that agrees with the *second* segment is now
+    # AMBIGUOUS, not GHOST (product rule 3: uncertainty never resolves to ghost).
+    raw = (
+        "[7] Christopher Clark and Matt Gardner. Simple and Effective Multi-Paragraph Reading "
+        "Comprehension. In Proceedings of ACL, pages 845-855, 2018. arXiv:1710.10723"
+    )
+    assert rs.title_segments(raw)[0] == "Christopher Clark and Matt Gardner"
+    c = cand("Simple and Effective Multi-Paragraph Reading Comprehension", "Clark", 2018)
+    assert rs.title_score(c.title, raw) > 0.0
+    assert rs.classify([c], raw).state is rs.State.AMBIGUOUS
+
+
+# --- review of task 7.3: what the marker rule and the particles must not do --------
+
+YEAR_FIRST = (
+    "2020. Harris, C. R., Millman, K. J., van der Walt, S. J. et al. Array programming with "
+    "NumPy. Nature 585, 357-362."
+)
+NUMERAL_TITLE = "12 Angry Men. Directed by Sidney Lumet. United Artists, 1957."
+
+
+def test_a_leading_year_is_never_mistaken_for_a_marker() -> None:
+    # `\d+[.)]` used to eat "2020." — and since the stripped string is what
+    # `classify` sees, the reference lost the year it is matched on and dropped
+    # from RESOLVED to GHOST.
+    assert rs.strip_marker(YEAR_FIRST) == YEAR_FIRST
+    assert rs._years(rs.strip_marker(YEAR_FIRST)) == rs._years(YEAR_FIRST) == {2020}
+    c = cand("Array programming with NumPy", "Harris", 2020, "10.1038/s41586-020-2649-2")
+    assert rs.year_matches(2020, rs.strip_marker(YEAR_FIRST)) is True
+    assert rs.classify([c], rs.strip_marker(YEAR_FIRST)).state is rs.State.RESOLVED
+
+
+def test_a_leading_numeral_that_belongs_to_the_title_is_kept() -> None:
+    assert rs.strip_marker(NUMERAL_TITLE) == NUMERAL_TITLE
+    assert rs.title_segments(NUMERAL_TITLE)[0] == "12 Angry Men"
+    # ... while the same shape in front of an author list is the marker ingest emits.
+    entry = "Vaswani, A., Shazeer, N. Attention is all you need. NeurIPS 30, 2017."
+    assert rs.strip_marker(f"11 {entry}") == entry
+
+
+def test_stripping_a_marker_never_strips_a_second_one() -> None:
+    for raw in (
+        f"[3] {NUMERAL_TITLE}",
+        "[12] 2020. Harris, C. R. et al. Array programming with NumPy. Nature 585.",
+        f"[1] {ALPHAFOLD}",
+        "7) Marchetti, L. R. Cross-domain retrieval collapse. J. Appl. Scientometrics 14 (2021).",
+        NUMERAL_TITLE,
+        YEAR_FIRST,
+    ):
+        once = rs.strip_marker(raw)
+        assert rs.strip_marker(once) == once, raw
+        assert rs._years(once) == rs._years(raw), raw
+    assert rs.strip_marker(f"[3] {NUMERAL_TITLE}") == NUMERAL_TITLE
+
+
+@pytest.mark.parametrize(
+    "authors",
+    [
+        "al-Khalili, J.",
+        "el-Sayed, M. A.",
+        "Al-Rfou, R., Choe, D. & Constant, N.",
+        "El-Sayed, M. A. & al-Khalili, J.",
+        "ben-Gurion, D. & ibn-Rushd, A.",
+    ],
+)
+def test_hyphenated_lowercase_particles_are_part_of_the_surname(authors: str) -> None:
+    raw = f"{authors} Array programming with NumPy. Nature 585, 357-362 (2020)."
+    assert rs.title_segments(raw)[0] == "Array programming with NumPy"
+
+
+def test_full_name_lists_with_hyphenated_particles_look_like_authors() -> None:
+    assert rs._looks_like_authors("Jim al-Khalili, Mostafa el-Sayed, Rami Al-Rfou")

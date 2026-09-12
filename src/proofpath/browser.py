@@ -14,6 +14,7 @@ is one skipped source, not four (product rule 6).
 from __future__ import annotations
 
 import importlib.util
+import shlex
 import shutil
 import subprocess
 import sys
@@ -32,6 +33,14 @@ _CHOICE_ANSWERS: dict[str, Answer] = {"y": "once", "a": "always", "n": "no", "ne
 WHEELS_SIZE = "~81 MB"
 BROWSER_SIZE = "~200 MB"
 INSTALL_SPEC = "scrapling[fetchers]>=0.4.15"
+# scrapling 0.4.15 ships no ``scrapling.__main__``: its CLI is the console script
+# ``scrapling`` = ``scrapling.cli:main``, a click group. ``-m scrapling`` therefore
+# aborts before it starts, which is what left every live run of 2026-09-12 with
+# "browser install failed" (docs/eval/2026-09-12-v0.1-live.md, item 8). Importing the
+# group and calling it is the same entry point the console script uses, and click
+# reads ``sys.argv[1:]`` — under ``-c`` that is exactly the arguments after this
+# string, so ``install`` arrives as the subcommand.
+SCRAPLING_CLI = "from scrapling.cli import main; main()"
 
 
 def prompt_text(host: str, status: int | None) -> str:
@@ -82,12 +91,18 @@ def is_installed() -> bool:
 
 
 def install_commands() -> list[list[str]]:
-    """The three commands ``install`` runs, in order. Kept as data so it is testable
-    on its own, without a real subprocess."""
+    """The three commands ``install`` draws on, in order: wheels by pip, wheels by uv
+    when pip is missing, then the browser binary through the scrapling CLI. Kept as
+    data so it is testable on its own, without a real subprocess.
+
+    There is no fourth, console-script step. ``.venv/bin/scrapling`` is this same
+    interpreter running this same import, so it cannot rescue an import that just
+    failed — all it could do is start the ~200 MB download again.
+    """
     return [
         [sys.executable, "-m", "pip", "install", INSTALL_SPEC],
         ["uv", "pip", "install", "--python", sys.executable, INSTALL_SPEC],
-        [sys.executable, "-m", "scrapling", "install"],
+        [sys.executable, "-c", SCRAPLING_CLI, "install"],
     ]
 
 
@@ -96,7 +111,10 @@ def _run_logged(
     log: list[str],
     run: Callable[..., subprocess.CompletedProcess[str]],
 ) -> subprocess.CompletedProcess[str]:
-    log.append(f"$ {' '.join(cmd)}")
+    # Quoted, not merely spaced: the log is what the user is shown when an install
+    # fails, and a line they can paste back into a shell says more than one they
+    # cannot. The -c program and the pip spec are each one argument.
+    log.append(f"$ {shlex.join(cmd)}")
     try:
         result = run(cmd, capture_output=True, text=True, check=False)
     except OSError as exc:
@@ -119,7 +137,7 @@ def install(
     """Install the wheels, then the browser binary. Every command is logged, pass or
     fail. ``pip`` missing in a uv-managed venv falls back to ``uv pip install`` only
     when ``uv`` is on PATH; otherwise the install fails outright."""
-    pip_cmd, uv_cmd, scrapling_cmd = install_commands()
+    pip_cmd, uv_cmd, module_cmd = install_commands()
     result = _run_logged(pip_cmd, log, run)
     if result.returncode != 0:
         if not shutil.which("uv"):
@@ -127,8 +145,9 @@ def install(
         result = _run_logged(uv_cmd, log, run)
         if result.returncode != 0:
             return False
-    result = _run_logged(scrapling_cmd, log, run)
-    return result.returncode == 0
+    # No retry behind this one: see ``install_commands``. A failed browser download
+    # is reported with its log, not paid for twice.
+    return _run_logged(module_cmd, log, run).returncode == 0
 
 
 def fetch_with_browser(url: str, *, timeout: float = 60.0) -> tuple[int, bytes, str]:

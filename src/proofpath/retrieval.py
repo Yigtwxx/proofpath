@@ -11,7 +11,7 @@ import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
 import numpy as np
 
@@ -162,7 +162,9 @@ class FastEmbedder:
         from fastembed import TextEmbedding
 
         self.name = model_name
-        self._model = TextEmbedding(
+        # Typed loosely on purpose: ``close()`` drops it, and it is only ever touched
+        # between construction and that call.
+        self._model: Any = TextEmbedding(
             model_name=model_name,
             cache_dir=str(cache_dir),
             providers=list(providers) if providers else None,
@@ -173,3 +175,12 @@ class FastEmbedder:
         vectors = np.array(list(self._model.embed(list(texts))), dtype=np.float32)
         norms = np.linalg.norm(vectors, axis=1, keepdims=True)
         return vectors / np.clip(norms, 1e-12, None)
+
+    def close(self) -> None:
+        """Release the embedding model. Idempotent.
+
+        fastembed holds an onnxruntime session of its own, and it is freed on the
+        same terms as ``entailment.OnnxNli``'s: while the interpreter is alive,
+        because a session collected during shutdown has aborted the process.
+        """
+        self._model = None

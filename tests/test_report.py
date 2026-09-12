@@ -23,6 +23,7 @@ from proofpath.report import (
     Report,
     SourceStatus,
     Stage,
+    no_bibliography,
     render_diagnostics,
     render_footer,
     render_markdown,
@@ -990,6 +991,17 @@ def test_footer_notes_are_not_counted_against_a_reference() -> None:
     assert render_footer(report).counts == "4 refs: 4 ok"
 
 
+def test_footer_carries_the_tier_note_when_the_model_earns_no_high_tier() -> None:
+    report = dataclasses.replace(covered(4, 4, 0, 0), tier_note="no high tier on this model")
+    assert render_footer(report).note == "no high tier on this model"
+
+
+def test_footer_has_no_note_when_the_high_tier_is_reachable() -> None:
+    # The note belongs to the run, not to the process: a report calibrated with a
+    # reachable high tier carries none, whatever the CLI default happens to be.
+    assert render_footer(covered(4, 4, 0, 0)).note is None
+
+
 def test_footer_carries_weak_and_cancelled_through() -> None:
     report = dataclasses.replace(covered(4, 3, 0, 1), cancelled=True)
     footer = render_footer(report)
@@ -1018,6 +1030,15 @@ def test_markdown_carries_the_model_preamble() -> None:
     assert "- nli: cross-encoder" in text
     assert "- device: mps" in text
     assert "- thresholds: decide=0.5" in text
+
+
+def test_markdown_preamble_states_the_tier_note() -> None:
+    report = dataclasses.replace(report_with(), tier_note="no high tier on this model")
+    assert "- tiers: no high tier on this model" in render_markdown(report, written_at=WHEN)
+
+
+def test_markdown_preamble_omits_an_empty_tier_note() -> None:
+    assert "- tiers:" not in render_markdown(report_with(), written_at=WHEN)
 
 
 def test_markdown_groups_findings_by_level() -> None:
@@ -1110,3 +1131,49 @@ def test_markdown_summary_appears_only_when_the_model_wrote_one() -> None:
 
 def test_markdown_defaults_its_date_to_now() -> None:
     assert "- date: " in render_markdown(report_with())
+
+
+# --- a document with citations but no bibliography (product rule 6) ---------------
+
+
+def test_no_bibliography_hint_counts_the_markers_nothing_could_check() -> None:
+    # 0/0/0 coverage over 118 markers is the AlphaFold PDF of the 2026-09-12 live
+    # runs: a document whose reference list was never found must not read as clean.
+    footer = render_footer(covered(0, 0, 0, 0))
+    assert footer.unchecked_markers == 118
+    assert footer.weak is False
+
+
+def test_no_bibliography_hint_is_silent_when_the_bibliography_was_found() -> None:
+    assert render_footer(covered(42, 26, 9, 7)).unchecked_markers == 0
+
+
+def test_no_bibliography_hint_is_silent_when_the_document_cites_nothing() -> None:
+    # No references and no markers is a document with no citations, not a gap.
+    report = dataclasses.replace(covered(0, 0, 0, 0), markers=0)
+    assert render_footer(report).unchecked_markers == 0
+
+
+def test_markdown_says_a_bibliography_was_never_found() -> None:
+    text = render_markdown(covered(0, 0, 0, 0), written_at=WHEN)
+    # Word for word what the footer prints: one sentence, two surfaces, no drift.
+    assert f"\n{no_bibliography(118)}\n" in text
+    assert "Coverage is weak" not in text
+
+
+def test_one_unchecked_marker_is_not_called_markers() -> None:
+    assert no_bibliography(1) == "no bibliography was found; 1 citation marker could not be checked"
+    assert no_bibliography(2) == (
+        "no bibliography was found; 2 citation markers could not be checked"
+    )
+
+
+def test_markdown_says_nothing_when_a_document_cites_nothing() -> None:
+    report = dataclasses.replace(covered(0, 0, 0, 0), markers=0)
+    assert "no bibliography was found" not in render_markdown(report, written_at=WHEN)
+
+
+def test_markdown_prefers_the_weak_sentence_when_references_were_found() -> None:
+    text = render_markdown(covered(4, 3, 0, 1), written_at=WHEN)
+    assert "no bibliography was found" not in text
+    assert "Coverage is weak" in text

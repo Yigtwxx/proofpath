@@ -32,6 +32,7 @@ from collections import Counter
 from collections.abc import Callable, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
+from functools import partial
 from pathlib import Path
 from typing import Protocol
 
@@ -198,10 +199,20 @@ class Engine:
     gate: ConsentGate
     embedder: Callable[[], Embedder]
     scorer: Callable[[], Scorer]
+    # k=1 and the thresholds beside it are the SciFact dev calibration of 2026-09-12
+    # (spec section 14, docs/eval/2026-09-12-tiers.md): k=2 ties on accuracy and k=3
+    # is worse, so the cheapest of the tied settings is the one that ships.
     k: int = 1
     thresholds: Thresholds = DEFAULT_THRESHOLDS
     device: str = "cpu"
     _closers: list[Callable[[], None]] = field(default_factory=list, repr=False)
+    # The models, once built. They live on the engine and nowhere else, so that
+    # ``close()`` can release their native sessions while the interpreter is still
+    # up: an onnxruntime session torn down at shutdown aborted the process (SIGABRT,
+    # exit 134) once in three live runs on 2026-09-12, which the exit-code contract
+    # of spec section 13.3 does not allow.
+    _embedder: Embedder | None = field(default=None, repr=False)
+    _scorer: Scorer | None = field(default=None, repr=False)
 
     @classmethod
     def default(
@@ -277,16 +288,48 @@ class Engine:
             _closers=closers,
         )
 
+    def get_embedder(self) -> Embedder:
+        """The run's embedder, built at most once and owned by this engine."""
+        if self._embedder is None:
+            self._embedder = self.embedder()
+            self._closers.append(partial(_close_model, self._embedder))
+        return self._embedder
+
+    def get_scorer(self) -> Scorer:
+        """The run's NLI model, built at most once and owned by this engine."""
+        if self._scorer is None:
+            self._scorer = self.scorer()
+            self._closers.append(partial(_close_model, self._scorer))
+        return self._scorer
+
     def close(self) -> None:
-        """Close everything this engine opened, newest first. Safe to call twice."""
+        """Close everything this engine opened, newest first. Safe to call twice.
+
+        The models go with it: their sessions are released here rather than left to
+        whatever order the interpreter tears objects down in at exit.
+        """
         _close_all(self._closers)
         self._closers.clear()
+        self._embedder = None
+        self._scorer = None
 
     def __enter__(self) -> Engine:
         return self
 
     def __exit__(self, *exc: object) -> None:
         self.close()
+
+
+def _close_model(model: object) -> None:
+    """Release one model's native session, if it has one to release.
+
+    ``Embedder`` and ``Scorer`` are protocols about scoring, not about lifetime: a
+    test double is a plain object and stays one. Only the real ONNX-backed models
+    define ``close()``, and only they need it.
+    """
+    closer = getattr(model, "close", None)
+    if callable(closer):
+        closer()
 
 
 def _close_all(closers: list[Callable[[], None]]) -> None:
@@ -678,8 +721,10 @@ def decide_all(
             # A run told to stop before it started must not pay for two ONNX sessions.
             check()
             emit(Note(LOADING_MODELS))
-            embedder = engine.embedder()
-            scorer = engine.scorer()
+            # Built through the engine, not called as factories: the engine keeps
+            # them, so nothing here outlives ``Engine.close()`` holding a session.
+            embedder = engine.get_embedder()
+            scorer = engine.get_scorer()
             # Everything that can change a verdict goes into the key, so a run with
             # other thresholds or another model never reads back an answer it did
             # not give.
@@ -741,6 +786,7 @@ def decide_all(
         models=_models(embedder, scorer, engine),
         api_calls=0,  # the LLM judge is Phase 9; the default path calls nobody
         elapsed=time.monotonic() - prepared.started,
+        tier_note=pipeline.tier_note(engine.thresholds),
         cancelled=cancelled,
     )
     if cancelled:

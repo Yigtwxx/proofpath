@@ -6,6 +6,7 @@ No subprocess, no network, no real browser: ``run``, ``prompt``, ``installer``,
 
 from __future__ import annotations
 
+import shlex
 import subprocess
 from pathlib import Path
 
@@ -205,7 +206,7 @@ def test_install_falls_back_to_uv_when_pip_missing(monkeypatch: pytest.MonkeyPat
     result = bw.install(log, run=run)
     assert result is True
     assert calls == bw.install_commands()
-    assert log[0] == f"$ {' '.join(bw.install_commands()[0])}"
+    assert log[0] == f"$ {shlex.join(bw.install_commands()[0])}"
     assert log[1] == "exit 1"
     assert log[2] == "No module named pip"
     for kwargs in call_kwargs:
@@ -222,7 +223,7 @@ def test_install_fails_without_pip_or_uv(monkeypatch: pytest.MonkeyPatch) -> Non
     result = bw.install(log, run=run)
     assert result is False
     # Only the pip command was attempted: no uv, no scrapling install step.
-    assert log == [f"$ {' '.join(bw.install_commands()[0])}", "exit 1", "No module named pip"]
+    assert log == [f"$ {shlex.join(bw.install_commands()[0])}", "exit 1", "No module named pip"]
 
 
 def test_install_pip_success_skips_uv(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -236,8 +237,8 @@ def test_install_pip_success_skips_uv(monkeypatch: pytest.MonkeyPatch) -> None:
     log: list[str] = []
     result = bw.install(log, run=run)
     assert result is True
-    pip_cmd, uv_cmd, scrapling_cmd = bw.install_commands()
-    assert calls == [pip_cmd, scrapling_cmd]
+    pip_cmd, uv_cmd, module_cmd = bw.install_commands()
+    assert calls == [pip_cmd, module_cmd]
     assert uv_cmd not in calls
 
 
@@ -250,7 +251,7 @@ def test_install_run_raises_oserror_logs_and_fails(monkeypatch: pytest.MonkeyPat
     log: list[str] = []
     result = bw.install(log, run=run)
     assert result is False
-    assert log[0] == f"$ {' '.join(bw.install_commands()[0])}"
+    assert log[0] == f"$ {shlex.join(bw.install_commands()[0])}"
     assert log[1] == "exit ? (FileNotFoundError: no such file or directory: 'pip')"
 
 
@@ -329,3 +330,52 @@ def test_consent_gate_satisfies_browser_gate_protocol() -> None:
     assert result.ok
     assert result.step == 3
     assert "Evidence here" in result.text
+
+
+# --- install_commands: the scrapling CLI is a console script, not a module -----
+
+
+def test_install_commands_never_uses_dash_m_scrapling() -> None:
+    """scrapling 0.4.15 has no ``__main__``; ``-m scrapling`` aborts (live run item 8)."""
+    for cmd in bw.install_commands():
+        assert cmd[:3] != [bw.sys.executable, "-m", "scrapling"]
+
+
+def test_install_commands_runs_the_scrapling_cli_through_dash_c() -> None:
+    pip_cmd, uv_cmd, module_cmd = bw.install_commands()
+    assert pip_cmd[:4] == [bw.sys.executable, "-m", "pip", "install"]
+    assert uv_cmd[:2] == ["uv", "pip"]
+    # click reads sys.argv[1:], which under -c is exactly what follows the code string.
+    assert module_cmd == [bw.sys.executable, "-c", bw.SCRAPLING_CLI, "install"]
+    assert "from scrapling.cli import main" in bw.SCRAPLING_CLI
+
+
+def test_a_failed_browser_install_is_not_attempted_twice() -> None:
+    """There is no second way in: the console script is this same interpreter running
+    this same import, so a retry could only repeat a ~200 MB download."""
+    pip_cmd, _uv_cmd, module_cmd = bw.install_commands()
+    calls: list[list[str]] = []
+
+    def run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0 if cmd == pip_cmd else 1, stdout="", stderr="x")
+
+    log: list[str] = []
+    assert bw.install(log, run=run) is False
+    assert calls == [pip_cmd, module_cmd]
+
+
+def test_the_install_log_can_be_pasted_back_into_a_shell() -> None:
+    """The log is what a user is shown when an install fails; a line they cannot
+    re-run tells them less than one they can."""
+    log: list[str] = []
+    bw.install(
+        log,
+        run=lambda cmd, **kwargs: subprocess.CompletedProcess(cmd, 0, stdout="", stderr=""),
+    )
+    _pip_cmd, _uv_cmd, module_cmd = bw.install_commands()
+    # The -c program holds spaces and a semicolon, and the pip spec holds brackets
+    # and a `>`: both are one argument and both must come back quoted as one.
+    assert log[-2] == f"$ {shlex.join(module_cmd)}"
+    assert f"'{bw.SCRAPLING_CLI}'" in log[-2]
+    assert "'scrapling[fetchers]>=0.4.15'" in log[0]

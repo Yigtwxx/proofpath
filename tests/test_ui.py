@@ -442,6 +442,24 @@ def test_footer_survives_quiet_and_says_when_nothing_was_written() -> None:
     assert f"hint       {ui.WEAK_COVERAGE}" in lines
 
 
+def test_footer_prints_the_tier_note_as_a_hint() -> None:
+    instance, out, _ = _build()
+    ui.footer(
+        instance,
+        Footer(
+            counts="4 refs: 4 ok",
+            coverage=(100, 0, 0),
+            api_calls=0,
+            elapsed=1.0,
+            written=None,
+            weak=False,
+            cancelled=False,
+            note="medium is the strongest confidence shown",
+        ),
+    )
+    assert "hint       medium is the strongest confidence shown" in out.getvalue().splitlines()
+
+
 def test_footer_announces_a_cancelled_run_in_dim() -> None:
     instance, out, _ = _build(force_terminal=True)
     ui.footer(
@@ -482,3 +500,52 @@ def test_every_state_word_a_finding_can_carry_has_a_colour() -> None:
     instance, _, _ = _build(force_terminal=True)
     for word in STATE_WORDS.values():
         assert ui.style_state(instance, word).spans, word
+
+
+# --- a document with citations but no bibliography (product rule 6) --------------------
+
+
+def test_coverage_says_no_bibliography_was_found() -> None:
+    # 0/0/0 over a document full of markers must not read as a clean run.
+    instance, out, _ = _build(quiet=True)
+    ui.coverage(instance, 0, 0, 0, weak=False, unchecked_markers=84)
+    assert out.getvalue().splitlines() == [
+        "fulltext   0%",
+        "abstract   0%",
+        "unverified 0%",
+        "hint       no bibliography was found; 84 citation markers could not be checked",
+    ]
+
+
+def test_coverage_prefers_the_no_bibliography_hint_over_the_weak_line() -> None:
+    instance, out, _ = _build()
+    ui.coverage(instance, 0, 0, 100, weak=True, unchecked_markers=84)
+    lines = out.getvalue().splitlines()
+    assert ui.WEAK_COVERAGE not in out.getvalue()
+    assert lines[-1] == (
+        "hint       no bibliography was found; 84 citation markers could not be checked"
+    )
+
+
+def test_coverage_hint_is_silent_without_unchecked_markers() -> None:
+    instance, out, _ = _build()
+    ui.coverage(instance, 80, 10, 10, weak=False, unchecked_markers=0)
+    assert "hint" not in out.getvalue()
+
+
+def test_footer_passes_the_no_bibliography_hint_through() -> None:
+    instance, out, _ = _build()
+    ui.footer(
+        instance,
+        Footer(
+            counts="0 refs: nothing to check",
+            coverage=(0, 0, 0),
+            api_calls=0,
+            elapsed=1.0,
+            written=None,
+            weak=False,
+            cancelled=False,
+            unchecked_markers=84,
+        ),
+    )
+    assert "hint       no bibliography was found; 84 citation markers" in out.getvalue()

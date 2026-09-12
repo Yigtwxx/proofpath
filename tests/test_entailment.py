@@ -78,3 +78,18 @@ def test_fp32_export_keeps_the_cuda_coreml_cpu_order() -> None:
         "CoreMLExecutionProvider",
         "CPUExecutionProvider",
     ]
+
+
+def test_close_drops_the_session_and_is_idempotent() -> None:
+    """Spec section 13.3: an ONNX session released at interpreter shutdown aborted
+    the process (SIGABRT, exit 134), so the engine releases it itself."""
+    scorer = object.__new__(ent.OnnxNli)
+    scorer._session = object()
+    scorer._tokenizer = object()
+    scorer._input_names = ["input_ids"]
+
+    scorer.close()
+    assert scorer._session is None
+    assert scorer._tokenizer is None
+    assert scorer._input_names == []
+    assert scorer.close() is None

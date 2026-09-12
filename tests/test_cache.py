@@ -249,6 +249,19 @@ def test_model_id_includes_k_and_thresholds() -> None:
         nli="nli@a", embedder="bge@b", k=1, thresholds=Thresholds(0.45, 0.9, 0.7)
     )
     assert a != b and "k=1" in a and "nli@a" in a
+    assert "decide=0.500000" in a  # six decimals, the precision a cut is calibrated at
+
+
+def test_model_id_separates_thresholds_that_differ_far_down_the_decimals() -> None:
+    """Calibrated cuts sit against 1.0 (docs/eval/2026-09-12-tiers.md), so a
+    three-decimal id would serve verdicts decided under a different threshold."""
+    near = cache_mod.model_id(
+        nli="nli@a", embedder="bge@b", k=1, thresholds=Thresholds(0.45, 0.999330, 0.457948)
+    )
+    nearer = cache_mod.model_id(
+        nli="nli@a", embedder="bge@b", k=1, thresholds=Thresholds(0.45, 0.999400, 0.457948)
+    )
+    assert near != nearer
 
 
 def test_chunks_are_a_miss_when_the_source_text_has_changed(db: Cache) -> None:

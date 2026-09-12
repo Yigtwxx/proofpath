@@ -18,6 +18,7 @@ from typing import Any
 import pytest
 from typer.testing import CliRunner
 
+from proofpath import cli as cli_mod
 from proofpath import verify as verify_mod
 from proofpath.browser import ConsentGate
 from proofpath.cli import _interruptible, app
@@ -610,3 +611,94 @@ def test_a_cancelled_run_says_so_and_exits_2(
 
     assert result.exit_code == 2
     assert "cancelled" in result.output
+
+
+# --- the committed live draft ---------------------------------------------------------
+
+
+def test_the_live_draft_parses_and_is_a_finding_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``tests/data/draft-live.md`` is the document the v0.1 live runs used.
+
+    The live runs are in ``docs/eval/2026-09-12-v0.1-live.md`` and needed the network;
+    this keeps the file honest offline. Only its shape is asserted -- the bibliography
+    parses whole and the prose still yields claims -- because the verdicts belong to
+    the real engine, and here every reference but the first is a ghost to the stub.
+    """
+    install(monkeypatch)
+    draft_path = Path(__file__).parent / "data" / "draft-live.md"
+    result = runner.invoke(app, ["check", "--format", "json", str(draft_path)])
+
+    assert result.exit_code == 1, result.output
+    payload = json.loads(result.stdout)
+    assert payload["coverage"]["references"] >= 7
+    assert payload["claims"] >= 2
+
+
+# --- process teardown: exit 134 (spec section 13.3) ----------------------------------
+
+
+def test_check_closes_the_engine_and_flushes_before_it_exits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The ONNX sessions must be released, and every byte written, while the
+    interpreter is still up: a session collected at shutdown aborted the process."""
+    built = built_engine()
+    install(monkeypatch, built)
+    order: list[str] = []
+    closing = built.close
+
+    def close() -> None:
+        order.append("closed")
+        closing()
+
+    monkeypatch.setattr(built, "close", close)
+    monkeypatch.setattr(cli_mod, "_flush_streams", lambda: order.append("flushed"))
+
+    result = runner.invoke(app, ["check", str(write(tmp_path, CLEAN_BODY))])
+
+    assert result.exit_code == 0, result.output
+    assert order == ["closed", "flushed"]
+
+
+def test_flush_streams_flushes_both_standard_streams(monkeypatch: pytest.MonkeyPatch) -> None:
+    flushed: list[str] = []
+
+    class Stream:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def flush(self) -> None:
+            flushed.append(self.name)
+
+    monkeypatch.setattr(cli_mod.sys, "stdout", Stream("stdout"))
+    monkeypatch.setattr(cli_mod.sys, "stderr", Stream("stderr"))
+    cli_mod._flush_streams()
+    assert sorted(flushed) == ["stderr", "stdout"]
+
+
+def test_flush_streams_survives_a_closed_stream(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A closed pipe must not turn a finished run into a traceback."""
+
+    class Broken:
+        def flush(self) -> None:
+            raise ValueError("I/O operation on closed file")
+
+    monkeypatch.setattr(cli_mod.sys, "stdout", Broken())
+    monkeypatch.setattr(cli_mod.sys, "stderr", Broken())
+    assert cli_mod._flush_streams() is None
+
+
+def test_a_document_with_markers_and_no_bibliography_does_not_look_clean(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Rule 6, end to end: the AlphaFold case of the 2026-09-12 live runs."""
+    install(monkeypatch)
+    path = tmp_path / "draft.md"
+    path.write_text("The structures were predicted accurately [1].\n", encoding="utf-8")
+
+    result = runner.invoke(app, ["check", str(path)])
+
+    assert "fulltext   0%" in result.stdout
+    assert "no bibliography was found; 1 citation marker could not be checked" in result.stdout
+    assert "coverage is weak" not in result.stdout
+    assert "no bibliography was found" in (tmp_path / "report.md").read_text(encoding="utf-8")

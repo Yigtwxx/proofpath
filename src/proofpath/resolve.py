@@ -124,17 +124,24 @@ def title_score(title: str, raw: str) -> float:
     title_tokens = set(tokens(title))
     if not segments or not title_tokens:
         return coverage
-    # Compare lengths against the segment the title actually overlaps with, not
-    # the longest one (which is often the venue).
-    cited = max(segments, key=lambda seg: len(title_tokens & set(tokens(seg))))
+    # Take the best agreement over all title-like segments, each with its own length
+    # ratio: whichever span the segmenter put first, a candidate that agrees with a
+    # later one keeps that agreement. Scoring only against segments[0] turned one
+    # bad split into a ghost verdict (live run 2026-09-12).
+    best = 0.0
+    for segment in segments:
+        segment_tokens = set(tokens(segment))
+        if not title_tokens & segment_tokens:
+            continue
+        ratio = min(1.0, len(title_tokens) / len(segment_tokens)) if segment_tokens else 1.0
+        best = max(best, coverage * ratio)
     if not title_tokens & set(tokens(segments[0])):
-        # The candidate title shares nothing with the cited title segment: it may
-        # overlap the venue (a proceedings-volume record) or nothing at all.
-        # Either way it is not the cited work.
-        return 0.0
-    cited_len = len(set(tokens(cited)))
-    ratio = min(1.0, len(title_tokens) / cited_len) if cited_len else 1.0
-    return coverage * ratio
+        # It misses the span every citation style puts the title in, so it may be
+        # matching the venue instead (a proceedings-volume record). Keep what
+        # agreement there is -- never zero, that is the false-ghost mechanism --
+        # but below the strong band, so such a record can never resolve on its own.
+        return min(best, WEAK_TITLE)
+    return best
 
 
 def author_matches(family: str, raw: str) -> bool:
@@ -216,10 +223,34 @@ def find_arxiv_id(raw: str) -> str | None:
 _QUOTED = re.compile(r"[\"“]([^\"”]{10,}?)[,.]?[\"”]")
 _SPLIT = re.compile(r"[.?!]\s+")
 # Every marker form ingest._ENTRY_START accepts: "[12] ", "12. ", "12) " and the
-# wide-space "12  " (already collapsed to one space by ingest; 1-3 digits so a year
-# opening an author-year entry survives).
-_MARKER = re.compile(r"^\s*(\[\d+\]|\d+[.)]|\d{1,3}(?=\s))\s*")
-_NAME = r"[A-Z][\w'\u2019-]+(?:\s[A-Z][\w'\u2019-]+)*"
+# wide-space "12  " (already collapsed to one space by ingest). The bare forms are
+# capped at three digits so that a year opening an author-year entry ("2020. Harris,
+# C. R. …") is not read as a marker: the stripped string is what `classify` matches
+# the year against, and eating it turned a real reference into a ghost.
+_MARKER = re.compile(r"^\s*(\[\d+\]|\d{1,3}[.)]|\d{1,3}(?=\s))\s*")
+# Surname particles, lower-case or capitalised. A surname that opens with one
+# ("van der Walt, S. J.") used to stop every author-list pattern dead, because they
+# all expect a capitalised word: the un-consumed remnant then became the first
+# title-like segment and the reference's own title was never compared (live run
+# 2026-09-12, reference [3]). Longest forms first so "van der" wins over "van".
+_PARTICLE = (
+    r"(?:[Vv]an\s[Dd]er|[Vv]an\s[Dd]en|[Vv]an\s[Dd]e|[Vv]an|[Vv]on\s[Dd]er|[Vv]on|"
+    r"[Dd]e\s[Ll]a|[Dd]e\s[Ll]os|[Dd]ella|[Dd]el|[Dd]e|[Dd]os|[Dd]as|[Dd]i|[Dd]a|[Dd]u|"
+    r"[Ll]e|[Ll]a|[Tt]en|[Tt]er|[Aa]f|[Aa]l|[Bb]in|[Ii]bn|[Mm]ac|[Mm]c|[Ss]t\.)"
+)  # attached forms ("O'Neill", "MacLeod", "McDonald") already match the name pattern
+# Particles glued to the surname with a hyphen ("al-Khalili", "el-Sayed"): the
+# surname then opens with a lower-case letter, which no capitalised-name pattern
+# matches on its own.
+_PARTICLE_GLUED = r"(?:[Aa]l|[Ee]l|[Bb]en|[Bb]in|[Ii]bn|[Aa]bd|[Aa]bu)-"
+# The same particles as single words, for the full-name author-list detector.
+_IS_PARTICLE = re.compile(
+    r"(?:van|von|der|den|de|del|della|di|da|dos|das|du|le|la|los|ten|ter|af|al|bin|ibn|"
+    r"mac|mc|st)\.?",
+    re.I,
+)
+_NAME_WORD = rf"(?:{_PARTICLE_GLUED}[A-Za-z]|[A-Z])[\w'\u2019-]+"
+_GLUED_HEAD = re.compile(_PARTICLE_GLUED)
+_NAME = rf"(?:{_PARTICLE}\s)*{_NAME_WORD}(?:\s{_NAME_WORD})*"
 _INITIALS = r"(?:[A-Z]{1,3}\.?(?![a-z])\s*(?:-\s*)?){1,3}"
 _YEAR = r"(?:19|20)\d{2}[a-z]?"
 # "Robert C. Moore and William Lewis. 2010. Title" (ACM, full first names)
@@ -227,14 +258,51 @@ _AUTHORS_THEN_YEAR = re.compile(rf"^\s*(.*?)(?<![A-Z])\.\s+{_YEAR}\.\s+")
 # "Devlin, J., Chang, M.-W., & Toutanova, K. (2019). Title" (APA)
 _AUTHORS_THEN_PAREN_YEAR = re.compile(rf"^\s*(.*?)\(\s*{_YEAR}\s*\)\.?\s+")
 _AUTHOR_UNIT = rf"(?:{_NAME},?\s*{_INITIALS}|{_INITIALS}{_NAME})"
+# A leading year is part of the author block in styles that print it first
+# ("2020. Harris, C. R. … et al. Title"); it is skipped here for segmentation only,
+# and stays in the raw string the year check reads.
 _AUTHOR_BLOCK = re.compile(
-    rf"^\s*(?:{_AUTHOR_UNIT}[,;]?\s*(?:(?:and|&)\s*)?)+(?:et al\.?,?\s*)?"
+    rf"^\s*(?:\(?{_YEAR}\)?[.,]?\s+)?"
+    rf"(?:{_AUTHOR_UNIT}[,;]?\s*(?:(?:and|&)\s*)?)+(?:et al\.?,?\s*)?"
     rf"(?:\(\d{{4}}[a-z]?\)\.?\s*)?"
 )
 
 
 # A period inside an author list only ever follows an initial or "et al".
 _SENTENCE_PERIOD = re.compile(r"(?<![A-Z])(?<!\bal)(?<!\bJr)(?<!\bSt)\.")
+
+
+def strip_marker(raw: str) -> str:
+    """Drop the printed bibliography marker ``[7] ``/``7. `` a ``Reference.raw`` keeps.
+
+    Everything anchored at the start of the string — the author-list patterns and
+    through them ``looks_unindexed`` — is defeated by the marker, which made every
+    unresolvable entry of a *numbered* bibliography look like a document indexes do
+    not cover (live run 2026-09-12, reference [7]).
+
+    At most one marker is removed, and only when nothing the identity checks read is
+    lost with it: a leading number is not a marker when it is part of an identifier
+    (the ``10.`` of a DOI, a bare arXiv id), when it is a year the year check needs
+    ("2020. Harris, C. R. …"), or — for the bare ``12 `` form, which has no
+    punctuation to give it away — when what follows does not open with an author
+    list, as in the title "12 Angry Men. Directed by …". Those guards are also what
+    makes a second call a no-op: what is left after one strip is an entry that
+    begins with its author list or its title, not with another marker.
+    """
+    match = _MARKER.match(raw)
+    if match is None:
+        return raw
+    stripped = raw[match.end() :]
+    marker = match.group(1)
+    if marker[-1].isdigit() and _strip_authors(stripped) == stripped:
+        return raw  # bare "12 ": a numeral the title itself opens with
+    if (
+        find_doi(stripped) != find_doi(raw)
+        or find_arxiv_id(stripped) != find_arxiv_id(raw)
+        or _years(stripped) != _years(raw)
+    ):
+        return raw
+    return stripped
 
 
 def _strip_authors(text: str) -> str:
@@ -249,7 +317,7 @@ def _strip_authors(text: str) -> str:
 
 def author_hint(raw: str) -> str:
     """Surname of the first author, from the stripped author block. Hint only."""
-    cleaned = _QUOTED.sub(" ", _MARKER.sub("", raw))
+    cleaned = _QUOTED.sub(" ", strip_marker(raw))
     block = cleaned[: len(cleaned) - len(_strip_authors(cleaned))]
     unit = re.split(r",|\band\b|&", block)[0]
     words = [w for w in re.findall(r"[A-Za-z][\w'\u2019-]+", unit) if len(w) > 1]
@@ -269,6 +337,7 @@ _UNINDEXED_WORDS = re.compile(
 
 def looks_unindexed(raw: str) -> bool:
     """Web pages, reports, blogs and organisation-authored documents."""
+    raw = strip_marker(raw)  # "[7] " blocks the author-list test below
     if find_doi(raw) or find_arxiv_id(raw):
         return False
     if _URL.search(raw) or _UNINDEXED_WORDS.search(raw):
@@ -283,8 +352,12 @@ def _looks_like_authors(segment: str) -> bool:
     if initials >= 2 and initials * 3 >= words:
         return True
     # Full-name lists: nearly every word capitalised, several commas, no title-like
-    # lower-case run ("Jeffrey Wu, Clemens Winter, and Dario Amodei").
-    capitalised = sum(w[0].isupper() for w in all_words)
+    # lower-case run ("Jeffrey Wu, Clemens Winter, and Dario Amodei"). A surname
+    # particle is lower-case by convention and belongs to the name, so it is not
+    # counted against the ratio ("Stefan van der Walt").
+    all_words = [w for w in all_words if not _IS_PARTICLE.fullmatch(w)]
+    words = len(all_words)
+    capitalised = sum(w[0].isupper() or bool(_GLUED_HEAD.match(w)) for w in all_words)
     has_digits = bool(re.search(r"\d", segment))
     return words >= 4 and segment.count(",") >= 2 and capitalised >= 0.8 * words and not has_digits
 
@@ -292,7 +365,7 @@ def _looks_like_authors(segment: str) -> bool:
 def title_segments(raw: str) -> list[str]:
     """Title-like spans, quoted spans first, for candidate generation only."""
     found = [m.group(1).strip() for m in _QUOTED.finditer(raw)]
-    rest = _strip_authors(_QUOTED.sub(" ", _MARKER.sub("", raw)))
+    rest = _strip_authors(_QUOTED.sub(" ", strip_marker(raw)))
     for part in _SPLIT.split(rest):
         # "(CreateSpace, 2009)" style trailing parentheticals are not title words.
         segment = re.sub(r"\s*\([^()]*\)\.?\s*$", "", part).strip().strip(",;:").strip()
@@ -617,6 +690,9 @@ class Resolver:
         return candidates_from_arxiv(response.text)
 
     def resolve(self, raw: str) -> ResolveResult:
+        # Once, at the entry: `Reference.raw` keeps the marker the document printed
+        # (a Phase 5 decision), and every helper below anchors patterns at the start.
+        raw = strip_marker(raw)
         notes: list[str] = []
         pool: list[Candidate] = []
         arxiv_id = find_arxiv_id(raw)
@@ -659,6 +735,24 @@ class Resolver:
                             [direct],
                             notes=[f"DOI {doi} resolved"],
                             match=result.match,
+                        )
+                    doi_match = match_fields(direct, raw)
+                    if doi_match.author and doi_match.year:
+                        # The identifier is the author's own and it resolves to a
+                        # paper by the same first author in the same year. Whatever
+                        # the title comparison did — a style that prints no title,
+                        # a record titled differently — that is not evidence of
+                        # fabrication (spec section 8, product rule 3).
+                        return ResolveResult(
+                            State.RESOLVED_LOW,
+                            direct,
+                            [direct],
+                            notes=[
+                                *notes,
+                                f"DOI {doi} resolved",
+                                "title could not be matched in the reference string",
+                            ],
+                            match=doi_match,
                         )
                     notes.append(f"DOI {doi} resolves to a different work")
                     pool.append(direct)

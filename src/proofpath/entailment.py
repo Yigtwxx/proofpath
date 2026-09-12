@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
 import numpy as np
 
@@ -112,19 +112,37 @@ class OnnxNli:
 
         config = json.loads(fetch("config.json").read_text(encoding="utf-8"))
         self._permutation = label_permutation(config["id2label"])
-        self._tokenizer = Tokenizer.from_file(str(fetch("tokenizer.json")))
+        # Typed loosely on purpose: ``close()`` drops both of these, and the session
+        # and the tokenizer are only ever touched between construction and that call.
+        self._tokenizer: Any = Tokenizer.from_file(str(fetch("tokenizer.json")))
         self._tokenizer.enable_truncation(max_length)
         self._tokenizer.enable_padding()
         model_path = fetch(onnx_file)
         # The ONNX export lives in onnx/; its external data file, when present,
         # sits beside it and hf_hub_download resolves it into the same snapshot.
-        self._session = ort.InferenceSession(str(model_path), providers=list(providers))
+        self._session: Any = ort.InferenceSession(str(model_path), providers=list(providers))
         self._input_names = [i.name for i in self._session.get_inputs()]
         self._batch_size = batch_size
 
     @property
     def providers(self) -> list[str]:
         return list(self._session.get_providers())
+
+    def close(self) -> None:
+        """Release the ONNX session and the tokenizer. Idempotent.
+
+        onnxruntime frees the session on the C++ side when the last Python reference
+        goes. Left to the garbage collector that happens during interpreter
+        shutdown, where the teardown order is not ours to choose, and a run that had
+        already printed its whole report died with SIGABRT (exit 134) once in three
+        on 2026-09-12 — a code the exit contract of spec section 13.3 does not have.
+        Dropping the references here makes the release happen while the interpreter
+        is still up. The model is at the end of its life once this is called;
+        ``score()`` after it is a programming error, not a supported state.
+        """
+        self._session = None
+        self._tokenizer = None
+        self._input_names = []
 
     def score(self, pairs: Sequence[tuple[str, str]]) -> np.ndarray:
         if not pairs:

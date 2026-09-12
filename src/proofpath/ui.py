@@ -18,7 +18,7 @@ import orjson
 from rich.console import Console
 from rich.text import Text
 
-from proofpath.report import Diagnostic, Footer, Level
+from proofpath.report import Diagnostic, Footer, Level, no_bibliography
 
 KEY_WIDTH = 10
 
@@ -178,8 +178,21 @@ def diagnostic(ui: Ui, item: Diagnostic) -> None:
         ui.out.print(pad + line)
 
 
-def coverage(ui: Ui, full: int, abstract: int, unverified: int, *, weak: bool) -> None:
-    """The section 15 coverage block. Never suppressed, never abbreviated (rule 6)."""
+def coverage(
+    ui: Ui,
+    full: int,
+    abstract: int,
+    unverified: int,
+    *,
+    weak: bool,
+    unchecked_markers: int = 0,
+) -> None:
+    """The section 15 coverage block. Never suppressed, never abbreviated (rule 6).
+
+    ``unchecked_markers`` wins over ``weak``: a run whose bibliography was never
+    found has 0/0/0 and no weak share to report, and the three zeroes on their own
+    read like a document with nothing to check. The markers say otherwise.
+    """
     for key, style, share in zip(
         COVERAGE_KEYS, COVERAGE_STYLES, (full, abstract, unverified), strict=True
     ):
@@ -187,7 +200,9 @@ def coverage(ui: Ui, full: int, abstract: int, unverified: int, *, weak: bool) -
         if ui.color:
             number.stylize(style)
         kv(ui, key, number)
-    if weak:
+    if unchecked_markers:
+        hint(ui, no_bibliography(unchecked_markers))
+    elif weak:
         hint(ui, WEAK_COVERAGE)
 
 
@@ -210,7 +225,9 @@ def footer(ui: Ui, item: Footer) -> None:
     if item.cancelled:
         state_line(ui, "run", "cancelled")
     ui.out.print(item.counts)
-    coverage(ui, *item.coverage, weak=item.weak)
+    coverage(ui, *item.coverage, weak=item.weak, unchecked_markers=item.unchecked_markers)
+    if item.note:
+        hint(ui, item.note)
     written = f"{item.written} written" if item.written else "no report written"
     ui.out.print(f"{written}  ·  {item.api_calls} API calls  ·  {item.elapsed:.1f}s")
 

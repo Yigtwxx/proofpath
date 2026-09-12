@@ -43,8 +43,37 @@ class Thresholds:
         return "low"
 
 
-# Reasonable starting point until the Phase 1 sweep replaces it.
-DEFAULT_THRESHOLDS = Thresholds(decide=0.5, high=0.9, medium=0.7)
+# Decimals a calibrated cut-point is carried with, everywhere it is written down: the
+# eval harness prints them, ``cache.model_id`` keys on them. The NLI softmax saturates,
+# so the cuts sit against 1.0 and fewer decimals would make 0.999330 and 0.999400 the
+# same number — and make one recalibration serve the other's cached verdicts.
+CUT_DECIMALS = 6
+
+# Calibrated on SciFact dev, 2026-09-12, at k=1 with the numeric layer on:
+# ``decide`` is the sweep's best-accuracy cut, ``high`` and ``medium`` are the lowest
+# scores at which the verdicts at or above them stay 85% / 70% precise. The numbers
+# are read off the run to six decimals rather than rounded to two, because the NLI
+# softmax saturates and 0.99933 is a real cut where 1.00 would mean "never reached".
+# Table and reasoning: docs/eval/2026-09-12-tiers.md.
+DEFAULT_THRESHOLDS = Thresholds(decide=0.45, high=0.99933, medium=0.457948)
+
+# What a report has to admit when the calibration leaves no reachable ``high`` band.
+NO_HIGH_TIER = (
+    "this model earns no high tier on SciFact dev; medium is the strongest confidence shown"
+)
+
+
+def tier_note(thresholds: Thresholds) -> str:
+    """What a run using these thresholds owes its reader about its top tier.
+
+    Derived, never hand-set: a recalibration that loses the high tier starts saying so
+    on its own, and one that keeps it cannot leave a stale apology in every report. A
+    cut of exactly 1.0 is ``eval.metrics.tier_cutpoints`` reporting that no score below
+    1.0 held the precision target — only a rule-decided verdict (spec section 10, which
+    scores exactly 1.0) could reach it, and that is not the model earning a tier.
+    """
+    return NO_HIGH_TIER if thresholds.high >= 1.0 else ""
+
 
 _SUPPORTED = LABEL_ORDER.index(Label.SUPPORTED)
 _REFUTED = LABEL_ORDER.index(Label.REFUTED)

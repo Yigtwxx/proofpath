@@ -61,13 +61,23 @@ def main(argv: list[str] | None = None) -> int:
     store.parent.mkdir(parents=True, exist_ok=True)
     store.write_text(json.dumps(cached, indent=1), encoding="utf-8")
 
+    # A "marked" row is an existing row carrying the bibliography marker the document
+    # printed ("[7] ", "7. "); it counts as whatever it is underneath (task 7.3).
+    def kind_of(row: dict[str, object]) -> str:
+        return str(row.get("base") or row["kind"])
+
     by_kind: dict[str, Counter[str]] = {}
     for row in rows:
-        by_kind.setdefault(row["kind"], Counter())[str(cached[row["raw"]]["state"])] += 1
+        by_kind.setdefault(kind_of(row), Counter())[str(cached[row["raw"]]["state"])] += 1
+    marked = [row for row in rows if row["kind"] == "marked"]
 
     lines = [f"# Ghost set — {date.today().isoformat()}", ""]
     kinds = ", ".join(f"{k} {sum(v.values())}" for k, v in by_kind.items())
     lines.append(f"- references: {len(rows)}  ({kinds})")
+    lines.append(
+        f"- of those, {len(marked)} carry a printed bibliography marker "
+        "(`[7] `, `7. `) and are counted as the kind underneath"
+    )
     lines.append(
         "- providers: Crossref bibliographic → OpenAlex search → arXiv (before any ghost call)"
     )
@@ -115,7 +125,7 @@ def main(argv: list[str] | None = None) -> int:
     lines.append("")
     for row in rows:
         r = cached[row["raw"]]
-        if row["kind"] == "real" and r["state"] not in ("RESOLVED", "RESOLVED_LOW"):
+        if kind_of(row) == "real" and r["state"] not in ("RESOLVED", "RESOLVED_LOW"):
             lines.append(
                 f"- `{r['state']}` {row['raw'][:110]}  \n  notes: {'; '.join(r['notes']) or '—'}"
             )  # type: ignore[arg-type]
@@ -124,7 +134,7 @@ def main(argv: list[str] | None = None) -> int:
     lines.append("")
     for row in rows:
         r = cached[row["raw"]]
-        if row["kind"] == "fabricated" and r["state"] != "GHOST":
+        if kind_of(row) == "fabricated" and r["state"] != "GHOST":
             best = r["best"]
             hit = (
                 f" → {best['title'][:60]} ({best['year']}, {best['first_author']})"
@@ -134,9 +144,10 @@ def main(argv: list[str] | None = None) -> int:
             lines.append(f"- `{r['state']}` {row['raw'][:100]}{hit}")
     report = "\n".join(lines) + "\n"
     print(report)
-    out = (
-        Path(args.out) if args.out else Path("docs/eval") / f"{date.today().isoformat()}-ghosts.md"
-    )
+    name = f"{date.today().isoformat()}-ghosts.md"
+    out = Path(args.out) if args.out else Path("docs/eval") / name
+    if out.is_dir():
+        out = out / name
     out.write_text(report, encoding="utf-8")
     print(f"written   {out}")
     return 0

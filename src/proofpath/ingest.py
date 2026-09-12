@@ -62,8 +62,10 @@ _EMPHASIS = re.compile(r"\*+|`+|~~|(?<!\w)_+|_+(?!\w)")
 # A hyphen that breaks a word across lines is attached to that word.
 _WORD_HYPHEN = re.compile(r"\w-$")
 
+# A markdown heading prefix is accepted in every mode: a draft piped through stdin is
+# read as plain text and must still find its "## References".
 _BIBLIOGRAPHY_HEADING = re.compile(
-    r"^(?:\d+(?:\.\d+)*\.?\s*)?"
+    r"^(?:#{1,6}\s+)?(?:\d+(?:\.\d+)*\.?\s*)?"
     r"(?:references|bibliography|works cited|literature cited|reference list"
     r"|references and notes)\s*:?$",
     re.IGNORECASE,

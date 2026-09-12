@@ -304,6 +304,24 @@ Retraction Watch is queried independently of this, keyed on the resolved DOI.
   `(Publisher, Year)` removed, two words minimum. Segments and the first-author
   hint are used to *find* candidates; identity is still decided by the field
   checks against the raw string.
+- **Marked-up strings and surname particles** (2026-09-12, from the v0.1 live run).
+  `Reference.raw` keeps the marker the document printed (`[7] `, `7. `), which
+  defeats everything anchored at the start of the string, so `Resolver.resolve`
+  strips it once at entry — unless that would eat a leading identifier (`10.` of a
+  DOI, a bare arXiv id) — and `looks_unindexed` strips it too; without this, every
+  unresolvable entry of a numbered bibliography took the `NOT_INDEXED` exit instead
+  of the ghost one. The author-list patterns accept surname particles (`van`,
+  `van der`, `von`, `de`, `de la`, `del`, `della`, `di`, `da`, `dos`, `das`, `du`,
+  `le`, `la`, `ten`, `ter`, `af`, `al`, `bin`, `ibn`, `mac`, `mc`, `St.`, lower-case
+  or capitalised), and title agreement is the best over all title-like segments
+  rather than the first: a stripped-author remnant taking the first segment's place
+  once produced a *false ghost* on a real paper cited with its correct DOI
+  (`docs/eval/2026-09-12-v0.1-live.md`). A candidate that misses the first segment
+  is capped at the weak band instead of scoring zero, so it can never resolve on its
+  own and can never zero a real reference. A DOI whose record agrees on first author
+  and year is `RESOLVED (low confidence)` even when the title cannot be matched in
+  the string: the identifier is the author's own, and title disagreement alone is
+  never evidence of fabrication.
 - **Title agreement** is token coverage (share of the candidate title's tokens
   present in the raw string) times a length ratio against the segment it
   overlaps with, so a short candidate title inside a longer cited one cannot
@@ -320,10 +338,15 @@ Retraction Watch is queried independently of this, keyed on the resolved DOI.
   or `PROOFPATH_CONTACT_EMAIL`, per-host minimum intervals (0.25 s Crossref and
   OpenAlex, 1.1 s Semantic Scholar, 1 s Open Library, 3 s arXiv), `Retry-After`
   honoured up to 60 s, exponential backoff on 5xx.
-- **Measured** on the hand-built ghost set (`tests/data/ghost_set.jsonl`: 106 real
-  reference strings taken verbatim from five real papers' reference lists, 100
-  fabricated ones in five citation styles, 20 real ones with author and year
-  mutated). Results and the release gate are in `docs/eval/2026-09-11-ghosts.md`.
+- **Measured** on the hand-built ghost set (`tests/data/ghost_set.jsonl`: 258 rows —
+  real reference strings taken verbatim from five real papers' reference lists,
+  fabricated ones in five citation styles, real ones with author and year mutated,
+  15 real ones whose author lists carry surname particles, 12 rows carrying the
+  bibliography marker a document prints (counted as the kind underneath), and five
+  review rows that pin what marker stripping must never remove: a year-first entry,
+  two numeral-first titles and two hyphenated `al-`/`el-` surnames). Results
+  and the release gate are in `docs/eval/2026-09-12-ghosts.md`
+  (`2026-09-11-ghosts.md` is the round before the live run's two defects).
 
 ## 9. Data flow (academic path)
 
@@ -768,10 +791,43 @@ SciFact, and never emit `SUPPORTED` without an attached passage.
 Secondary gate: **false-ghost rate near zero** on the hand-built set.
 
 **Confidence tiers.** The `high` / `medium` / `low` cut-points shown in every report
-(§13.1) are chosen on the SciFact dev split, not by hand: the threshold sweep in
-Phase 1 records precision per score band, and the tiers are the bands. They are
-written into the repo with the results table and re-derived whenever the NLI
-model or its revision changes.
+(§13.1) are chosen on the SciFact dev split, not by hand: the harness records
+precision per score band, and a cut-point is the lowest score at which the verdicts
+*at or above it* still meet a precision target. They are written into the repo with
+the results table and re-derived whenever the NLI model or its revision changes.
+
+Calibrated 2026-09-12 on SciFact dev (340 pairs, `bge-small-en-v1.5` +
+`nli-deberta-v3-base` int8, numeric layer on): **k=1, `decide` 0.45, `high` 0.99933
+(85% precision target, 21 of 135 asserted verdicts), `medium` 0.457948 (70% target,
+134 of 135)** — shipped as `pipeline.DEFAULT_THRESHOLDS`. Band table, the looser
+(0.80/0.65) alternative and the reasoning: `docs/eval/2026-09-12-tiers.md`.
+
+**Two things anyone quoting these numbers — the README included — must quote with
+them.** First, the 85% is an in-sample point estimate, not a guarantee: the cut was
+fitted on the same split it is measured on, and it rests on 21 verdicts of which at
+least 18 were right, a 95% Wilson interval of roughly **0.65–0.95**. Held-out
+confirmation is future work; until then the honest phrasing is "calibrated for 85%
+precision on SciFact dev", never "85% accurate". Second, `medium` (0.457948) lands
+almost on `decide` (0.45), so `low` holds **1 of the 135 asserted verdicts** — on this
+model the three tiers are effectively two, `high` and everything else asserted, with
+`low` carrying the `NEI` verdicts instead.
+
+Two things the wording of a report must respect. A tier claims *at or above*: the
+guarantee is "medium-or-better verdicts are ≥70% precise", never "a medium verdict is
+70% precise" — individual bands below 0.90 are far less precise than the cumulative
+figure. And when a calibration leaves `high` unreachable, the run says so in one line
+rather than quietly showing `medium` as its ceiling: `pipeline.tier_note(thresholds)`
+writes that sentence, `Report.tier_note` carries it — a property of the run's own
+calibration, not of the process — and the footer and markdown renderers print it.
+Cut-points are recorded to six decimals (`pipeline.CUT_DECIMALS`, which
+`cache.model_id` also keys on), because the NLI softmax saturates and two decimals
+cannot tell 0.99933 from "never reached".
+
+The two places "unreachable" is decided use deliberately different criteria. The
+harness asks whether **any verdict reaches the cut** (`n ≥ high == 0`), because a
+rule-decided verdict scores exactly 1.0 (§10) and so a cut of 1.0 can be reached;
+`tier_note` asks whether **`high >= 1.0`**, because that is the shipped threshold and
+a tier only the numeric rule can enter is not the model earning one.
 
 ## 15. Error handling and honesty states
 

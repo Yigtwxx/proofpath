@@ -47,6 +47,14 @@ WEAK_UNVERIFIED = 0.25
 UNVERIFIED_PREFIX = "UNVERIFIED"
 
 
+def no_bibliography(markers: int) -> str:
+    """What a run says when it found citations but no reference list to check them
+    against. Built here so the footer, the markdown file and the TUI say it in the
+    same words, down to the full stop they both leave off (rule 6)."""
+    marker_word = "marker" if markers == 1 else "markers"
+    return f"no bibliography was found; {markers} citation {marker_word} could not be checked"
+
+
 class Kind(str, Enum):
     """What a finding is. The value is the diagnostic code: ``error[ghost-reference]``."""
 
@@ -268,6 +276,11 @@ class Report:
     models: dict[str, str]
     api_calls: int
     elapsed: float
+    # What this run's thresholds owe the reader about their top tier (spec section 14),
+    # from ``pipeline.tier_note``. Empty when the calibration earned a `high` band. It
+    # belongs to the run and not to the process: two runs in one session may be
+    # calibrated differently, and each report must say what its own numbers support.
+    tier_note: str = ""
     cancelled: bool = False
     summary: str | None = None  # Phase 9, model-written
 
@@ -376,6 +389,12 @@ class Footer:
     written: str | None  # the report path, or None when nothing was written
     weak: bool
     cancelled: bool
+    # Citation markers left over when no bibliography was found at all: the
+    # denominator is 0, so ``weak`` cannot speak for them (see ``_unchecked``).
+    unchecked_markers: int = 0
+    # ``Report.tier_note`` when the calibration left no reachable ``high`` band, so
+    # a run never shows `medium` as if a stronger tier existed and was withheld.
+    note: str | None = None
 
 
 def render_diagnostics(report: Report) -> list[Diagnostic]:
@@ -420,6 +439,8 @@ def render_footer(report: Report, *, written: str | None = None) -> Footer:
         written=written,
         weak=report.coverage.weak(),
         cancelled=report.cancelled,
+        note=report.tier_note or None,
+        unchecked_markers=_unchecked(report),
     )
 
 
@@ -429,6 +450,8 @@ def render_markdown(report: Report, *, written_at: datetime | None = None) -> st
     lines: list[str] = [f"# proofpath report — {report.document.name}", ""]
     lines.append(f"- date: {when:%Y-%m-%d %H:%M:%S}")
     lines.extend(f"- {key}: {value}" for key, value in report.models.items())
+    if report.tier_note:
+        lines.append(f"- tiers: {report.tier_note}")
     lines.append(f"- elapsed: {report.elapsed:.1f}s")
     lines.append(f"- api calls: {report.api_calls}")
     if report.cancelled:
@@ -636,6 +659,21 @@ def _markdown_sources(report: Report) -> list[str]:
     return lines
 
 
+def _unchecked(report: Report) -> int:
+    """Citation markers the run could not even try, because the document's
+    bibliography was never found.
+
+    ``Coverage`` divides by the references it has, so a run that found none has a
+    coverage block of 0/0/0 and a ``weak()`` of False — an empty report that reads
+    like a clean one, which product rule 6 does not allow. The markers are what that
+    run has to say for itself: they are citations the document makes and nothing
+    answered. A document that simply cites nothing has no markers and no gap.
+    """
+    if report.coverage.references > 0:
+        return 0
+    return max(0, report.markers)
+
+
 def _markdown_coverage(report: Report) -> list[str]:
     coverage = report.coverage
     lines = ["## Coverage", "", "```"]
@@ -644,7 +682,10 @@ def _markdown_coverage(report: Report) -> list[str]:
         for label, share in zip(COVERAGE_LABELS, coverage.pct(), strict=True)
     )
     lines.extend(["```", ""])
-    if coverage.weak():
+    unchecked = _unchecked(report)
+    if unchecked:
+        lines.extend([no_bibliography(unchecked), ""])
+    elif coverage.weak():
         # The count comes from the denominator, like ``Coverage.weak()`` itself, so an
         # under-counted failure cannot shrink the number the reader is warned with.
         unread = max(0, coverage.references - coverage.fulltext - coverage.abstract)

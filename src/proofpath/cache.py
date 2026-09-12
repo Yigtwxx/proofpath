@@ -20,7 +20,7 @@ import numpy as np
 
 from proofpath.models import Label, Passage, Tier, Verdict
 from proofpath.paths import cache_dir
-from proofpath.pipeline import Thresholds
+from proofpath.pipeline import CUT_DECIMALS, Thresholds
 
 SCHEMA_VERSION = "2"
 RAW_TEXT_TTL_DAYS = 7
@@ -138,10 +138,13 @@ def claim_hash(text: str) -> str:
 
 def model_id(*, nli: str, embedder: str, k: int, thresholds: Thresholds) -> str:
     """Everything that can change a verdict, so stale entries never come back."""
+    # ``CUT_DECIMALS``, not three: the calibrated cuts sit against 1.0 (spec section
+    # 14), so a shorter id would hand verdicts decided at high=0.999330 back to a run
+    # calibrated at 0.999400.
     return (
         f"{nli}|{embedder}|k={k}"
-        f"|decide={thresholds.decide:.3f}|high={thresholds.high:.3f}"
-        f"|medium={thresholds.medium:.3f}"
+        f"|decide={thresholds.decide:.{CUT_DECIMALS}f}|high={thresholds.high:.{CUT_DECIMALS}f}"
+        f"|medium={thresholds.medium:.{CUT_DECIMALS}f}"
     )
 
 

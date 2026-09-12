@@ -5,7 +5,15 @@ from collections.abc import Sequence
 import pytest
 
 from proofpath.models import Label, Passage
-from proofpath.pipeline import Thresholds, decide, decide_indexed, judge
+from proofpath.pipeline import (
+    DEFAULT_THRESHOLDS,
+    NO_HIGH_TIER,
+    Thresholds,
+    decide,
+    decide_indexed,
+    judge,
+    tier_note,
+)
 from proofpath.retrieval import PassageIndex
 from tests.fakes import FakeEmbedder, NeverScorer, TableScorer
 
@@ -132,3 +140,26 @@ def test_decide_indexed_on_an_empty_index_is_nei() -> None:
 
 def test_judge_is_still_importable_as_an_alias_of_decide() -> None:
     assert judge is decide
+
+
+# --- the calibrated defaults (spec section 14) -------------------------------------
+
+
+def test_default_thresholds_satisfy_the_threshold_invariant() -> None:
+    shipped = DEFAULT_THRESHOLDS
+    assert 0.0 <= shipped.decide <= shipped.medium <= shipped.high <= 1.0
+    assert shipped.tier(shipped.high) == "high"
+    assert shipped.tier(shipped.medium) == "medium"
+
+
+def test_tier_note_is_written_exactly_when_no_high_tier_can_be_earned() -> None:
+    # Derived from the thresholds a run actually used, so a recalibration can never
+    # leave a report claiming a tier the split did not support — or apologising for
+    # one it did.
+    assert tier_note(Thresholds(decide=0.45, high=1.0, medium=0.5)) == NO_HIGH_TIER
+    assert tier_note(Thresholds(decide=0.45, high=0.99933, medium=0.457948)) == ""
+
+
+def test_a_high_cut_of_one_leaves_medium_as_the_strongest_tier_a_score_can_reach() -> None:
+    unreachable = Thresholds(decide=0.45, high=1.0, medium=0.5)
+    assert unreachable.tier(0.999) == "medium"

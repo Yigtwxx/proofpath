@@ -182,6 +182,14 @@ def test_find_bibliography_matches_a_heading_case_insensitively() -> None:
         assert find_bibliography(paragraphs) == 0, heading
 
 
+def test_a_markdown_heading_is_found_even_when_read_as_plain_text() -> None:
+    # `proofpath check -` reads stdin as text; a piped markdown draft keeps its references.
+    text = "Body cites this [1].\n\n## References\n\n[1] An entry.\n"
+    doc = from_text(text, name="stdin", kind="text")
+    assert [r.number for r in doc.references] == [1]
+    assert len(doc.paragraphs) == 1
+
+
 def test_find_bibliography_accepts_a_section_number() -> None:
     for heading in ("7 References", "7. References", "7.2 References"):
         paragraphs = paragraphs_from_lines([heading, "", "[1] An entry."])

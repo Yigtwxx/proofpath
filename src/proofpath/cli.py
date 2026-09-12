@@ -10,7 +10,7 @@ import signal
 import sys
 import threading
 from collections.abc import Iterator
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, contextmanager, suppress
 from dataclasses import replace
 from enum import Enum
 from pathlib import Path
@@ -608,8 +608,25 @@ def check(
             ui.diagnostic(out, item)
         ui.blank(out)
         ui.footer(out, report_mod.render_footer(report, written=written))
+    # Everything the run had to say is out, and the engine — with the ONNX sessions
+    # it owned — was closed on the way out of the ``with`` block above. Flushing here
+    # means the process has nothing left to do but exit, whatever the interpreter's
+    # own teardown gets up to afterwards (spec section 13.3).
+    _flush_streams()
     # A cancelled run is not a verdict on the document: 2 says the tool stopped early.
     raise typer.Exit(EXIT_ERROR if report.cancelled else report.exit_code())
+
+
+def _flush_streams() -> None:
+    """Push stdout and stderr out before the command exits.
+
+    A run whose report is still sitting in a buffer has not finished reporting, and
+    an exit code is worth nothing beside a half-written page. A stream that is
+    already closed (``… | head``) is not an error at this point: the run is over.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        with suppress(ValueError, OSError):
+            stream.flush()
 
 
 def _check_target(out: ui.Ui, target: str) -> tuple[Path | str, str | None]:

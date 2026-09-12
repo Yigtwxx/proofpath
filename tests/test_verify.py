@@ -17,7 +17,7 @@ from typing import NoReturn
 
 import pytest
 
-from proofpath import oa, retrieval
+from proofpath import oa, pipeline, retrieval
 from proofpath.browser import ConsentGate
 from proofpath.cache import Cache
 from proofpath.config import Config, Permissions
@@ -35,6 +35,7 @@ from proofpath.events import (
 from proofpath.fetch import Fetched, FetchStats, Outcome
 from proofpath.models import Label
 from proofpath.oa import ABSTRACT_ONLY, Attempt, Evidence, Location
+from proofpath.pipeline import Thresholds
 from proofpath.report import Kind
 from proofpath.resolve import Candidate, ResolveResult, Retraction, State
 from proofpath.retrieval import Embedder
@@ -974,8 +975,20 @@ def test_the_verifying_stage_names_the_device_and_counts_the_verdicts() -> None:
         "nli": "table",
         "embedder": "words",
         "device": "cpu",
-        "thresholds": "decide=0.5;high=0.9;medium=0.7",
+        # The calibrated defaults, spelled out rather than derived: a recalibration
+        # has to come past this line and past docs/eval/2026-09-12-tiers.md together.
+        "thresholds": "decide=0.45;high=0.99933;medium=0.457948",
     }
+
+
+def test_a_run_carries_the_tier_note_of_the_thresholds_it_used() -> None:
+    text = draft(ONE_SOURCE_BODY, [REAL])
+    # An unreachable high cut is a property of this run's calibration, so the report
+    # says so itself rather than the renderer asking a module-level default.
+    no_high_tier = paper_engine()
+    no_high_tier.thresholds = Thresholds(decide=0.45, high=1.0, medium=0.5)
+    assert verify(text, no_high_tier).tier_note == pipeline.NO_HIGH_TIER
+    assert verify(text, paper_engine()).tier_note == ""
 
 
 def test_the_verifying_stage_emits_its_own_events() -> None:
@@ -1019,6 +1032,9 @@ def test_a_second_run_over_the_same_document_calls_neither_model(tmp_path: Path)
 
         again_embedder = WordEmbedder()
         again_scorer = TableScorer({})  # any score() call would raise KeyError
+        # The second run is a second process in real life: it releases the models it
+        # built and the next ``decide_all`` asks the factories again.
+        built.close()
         built.embedder = lambda: again_embedder
         built.scorer = lambda: again_scorer
         second = decide_all(ready, built)
@@ -1045,6 +1061,7 @@ def test_changed_source_text_is_chunked_again(tmp_path: Path) -> None:
         grown = f"{PAPER} A new final sentence was added."
         ready.texts[f"doi:{DOI}"] = grown
         after_embedder = WordEmbedder()
+        built.close()  # as above: a fresh run builds a fresh embedder
         built.embedder = lambda: after_embedder
         decide_all(ready, built)
 
@@ -1072,6 +1089,7 @@ def test_a_source_whose_text_changed_is_judged_again_not_quoted_from_the_old_one
         assert was.verdict.passage is not None and was.verdict.passage.text == FIGURE
 
         ready.texts[f"doi:{DOI}"] = f"{SUPPORTING} {REVISED_FIGURE} {FILLER}"
+        built.close()  # as above: a fresh run builds fresh models
         built.embedder = lambda: WordEmbedder()
         built.scorer = lambda: TableScorer({SUPPORTING: SUPPORTED_ROW})
         second = decide_all(ready, built)
@@ -1240,3 +1258,76 @@ def test_findings_come_back_in_document_order() -> None:
         for f in report.findings
     ]
     assert positions == sorted(positions)
+
+
+# --- model lifetime: the engine owns the ONNX sessions (spec section 13.3) -----
+
+
+class ClosingModel:
+    """A model that records its own release, like the ONNX sessions do at runtime."""
+
+    name = "closing"
+    dim = 2
+
+    def __init__(self) -> None:
+        self.closed = 0
+
+    def close(self) -> None:
+        self.closed += 1
+
+    def embed(self, texts):
+        return WordEmbedder().embed(texts)
+
+    def score(self, pairs):
+        return TableScorer({SUPPORTING: SUPPORTED_ROW}).score(pairs)
+
+
+def test_engine_builds_each_model_once_and_keeps_it() -> None:
+    built = 0
+
+    def factory() -> Embedder:
+        nonlocal built
+        built += 1
+        return ClosingModel()
+
+    eng = engine(embedder=None, scorer=None)
+    eng.embedder = factory
+    assert eng.get_embedder() is eng.get_embedder()
+    assert built == 1
+
+
+def test_engine_close_releases_the_models_and_forgets_them() -> None:
+    embedder_model = ClosingModel()
+    scorer_model = ClosingModel()
+    eng = engine(embedder=embedder_model, scorer=scorer_model)
+    assert eng.get_embedder() is embedder_model
+    assert eng.get_scorer() is scorer_model
+
+    eng.close()
+    assert embedder_model.closed == 1
+    assert scorer_model.closed == 1
+    # Closing twice must neither raise nor release a session a second time.
+    eng.close()
+    assert embedder_model.closed == 1
+    assert scorer_model.closed == 1
+
+
+def test_engine_close_survives_a_model_without_close() -> None:
+    # The Embedder/Scorer protocols do not require close(); a stub stays a stub.
+    eng = engine(embedder=WordEmbedder(), scorer=TableScorer({SUPPORTING: SUPPORTED_ROW}))
+    eng.get_embedder()
+    eng.get_scorer()
+    assert eng.close() is None
+
+
+def test_decide_all_leaves_the_models_on_the_engine() -> None:
+    """Nothing may hold an ONNX session after the run: the engine is the only owner."""
+    embedder_model = ClosingModel()
+    scorer_model = ClosingModel()
+    text = draft(ONE_SOURCE_BODY, [REAL])
+    eng = paper_engine(embedder=embedder_model, scorer=scorer_model)
+    report = decide_all(prepare(text, eng), eng)
+    assert report.models["embedder"] == "closing"
+    eng.close()
+    assert embedder_model.closed == 1
+    assert scorer_model.closed == 1
