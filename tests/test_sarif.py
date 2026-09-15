@@ -14,7 +14,7 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import json
-from pathlib import Path, PureWindowsPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 import jsonschema
@@ -84,7 +84,9 @@ def results_by_kind(payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
 
 
 def test_the_vendored_schema_is_the_file_the_header_names() -> None:
-    digest = hashlib.sha256(SCHEMA_PATH.read_bytes()).hexdigest()
+    # Normalise line endings: a Windows checkout with autocrlf must hash the same bytes.
+    raw = SCHEMA_PATH.read_bytes().replace(b"\r\n", b"\n")
+    digest = hashlib.sha256(raw).hexdigest()
     assert digest == SCHEMA_SHA256
 
 
@@ -101,7 +103,7 @@ def test_an_empty_report_validates_too(schema: dict[str, Any]) -> None:
 
 
 def test_an_absolute_artifact_validates(schema: dict[str, Any]) -> None:
-    payload = to_sarif(full_report(), artifact=Path("/srv/papers/draft.md"))
+    payload = to_sarif(full_report(), artifact=PurePosixPath("/srv/papers/draft.md"))
     jsonschema.validate(payload, schema)
 
 
@@ -242,7 +244,7 @@ def test_a_relative_artifact_is_anchored_to_the_source_root() -> None:
 
 def test_an_absolute_artifact_has_no_base_id_to_be_relative_to() -> None:
     payload = to_sarif(
-        report_with(finding(Kind.GHOST, line=1)), artifact=Path("/srv/papers/draft.md")
+        report_with(finding(Kind.GHOST, line=1)), artifact=PurePosixPath("/srv/papers/draft.md")
     )
     location = payload["runs"][0]["results"][0]["locations"][0]["physicalLocation"]
     assert location["artifactLocation"] == {"uri": "file:///srv/papers/draft.md"}
@@ -261,7 +263,7 @@ def test_the_source_root_is_described_only_when_a_relative_uri_needs_it() -> Non
     [
         ("my draft #2.md", "my%20draft%20%232.md"),
         ("docs/my draft #2.md", "docs/my%20draft%20%232.md"),
-        (Path("/srv/my draft #2.md"), "file:///srv/my%20draft%20%232.md"),
+        (PurePosixPath("/srv/my draft #2.md"), "file:///srv/my%20draft%20%232.md"),
         (PureWindowsPath(r"C:\papers\my draft.pdf"), "file:///C:/papers/my%20draft.pdf"),
         ("draft?.md", "draft%3F.md"),
     ],
@@ -280,9 +282,9 @@ def test_a_percent_encoded_artifact_validates(schema: dict[str, Any]) -> None:
 
 
 def test_an_absolute_run_declares_no_source_root() -> None:
-    run = to_sarif(report_with(finding(Kind.GHOST, line=1)), artifact=Path("/srv/draft.md"))[
-        "runs"
-    ][0]
+    run = to_sarif(
+        report_with(finding(Kind.GHOST, line=1)), artifact=PurePosixPath("/srv/draft.md")
+    )["runs"][0]
     assert "originalUriBaseIds" not in run
 
 

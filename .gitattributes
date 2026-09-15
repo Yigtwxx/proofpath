@@ -1,0 +1,3 @@
+# Test fixtures whose bytes are pinned by a digest must not be CRLF-converted.
+tests/data/*.json text eol=lf
+tests/data/*.jsonl text eol=lf
