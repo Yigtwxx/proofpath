@@ -27,8 +27,9 @@ from proofpath.browser import ConsentGate
 from proofpath.config import Config, Permissions
 from proofpath.document import Document, Locator, Reference
 from proofpath.events import Emitted, Event, Note, Progress, Prompted, StageEnd, StageStart
+from proofpath.judge import JudgeCost, JudgeError
 from proofpath.models import Label, Passage, Verdict
-from proofpath.report import Coverage, Finding, Kind, Report
+from proofpath.report import Coverage, Finding, Kind, Report, summary_silence
 from proofpath.resolve import Candidate, ResolveResult
 from proofpath.resolve import State as ResolveState
 from proofpath.tui import banner, commands
@@ -106,6 +107,12 @@ class FakeScheduler:
         self.submitted.append((target, command))
         self.on_state(run)
         return run
+
+    def last_done(self) -> Run | None:
+        return next(
+            (run for run in reversed(self._runs) if run.state == "done" and run.report is not None),
+            None,
+        )
 
     def cancel(self, run_id: int) -> bool:
         self.cancelled.append(run_id)
@@ -515,12 +522,115 @@ async def test_help_lists_every_verb() -> None:
         assert f"/{verb}" in text
 
 
-async def test_summarize_is_the_one_verb_still_owed() -> None:
-    app, _ = build_app()
+class FakeJudge:
+    """``Judge`` without a socket: one paragraph, or a provider that never answered."""
+
+    PARAGRAPH = "Three references do not say this."
+    name = "fake judge-1"
+
+    def __init__(self, *, text: str = PARAGRAPH, detail: str = "") -> None:
+        self._text = text
+        self.detail = detail
+        self.unavailable = not text
+        self.cost = JudgeCost(calls=1 if text else 0, model="judge-1")
+        self.seen = ""
+        self.closed = False
+
+    def summarize(self, report_markdown: str, *, max_tokens: int = 1500) -> str:
+        self.seen = report_markdown
+        return self._text
+
+    def close(self) -> None:
+        self.closed = True
+
+
+async def finished_run(pilot: Any, scheduler: FakeScheduler) -> Run:
+    """One run in the log, done, with a report to summarise."""
+    await submit(pilot, "/check draft.md")
+    run = scheduler.runs[-1]
+    scheduler.move(run, "done", report=a_report())
+    await pilot.pause()
+    return run
+
+
+def _kv_text(app: ProofpathApp) -> str:
+    return "\n".join(line.render().plain for line in app.query(KvLine))
+
+
+def _notes(app: ProofpathApp) -> str:
+    return "\n".join(line.render().plain for line in app.query(NoteLine))
+
+
+async def test_summarize_appends_one_model_written_line_to_the_last_finished_run() -> None:
+    """Spec section 11.1: off until asked, labelled when shown, one call over a report."""
+    judge = FakeJudge()
+    app, schedulers = build_app(judge_factory=lambda: judge)
+    async with app.run_test(size=SIZE) as pilot:
+        await finished_run(pilot, schedulers[0])
+        await submit(pilot, "/summarize")
+        await until(pilot, lambda: judge.closed, "the summary worker")
+        text = _kv_text(app)
+        blocks = len(app.query(CommandBlock))
+
+    assert "summary" in text
+    assert f"(model-written, {FakeJudge.name}) {FakeJudge.PARAGRAPH}" in text
+    # It reads the finished report and nothing else -- never a source, never a draft.
+    assert judge.seen.startswith("# proofpath report")
+    assert blocks == 0  # the line lands in the run's own block, not a new one
+
+
+async def test_summarize_before_any_run_has_finished_says_so() -> None:
+    app, _ = build_app(judge_factory=lambda: FakeJudge())
     async with app.run_test(size=SIZE) as pilot:
         await submit(pilot, "/summarize")
-        text = "\n".join(line.render().plain for line in app.query(NoteLine))
-    assert "v0.3" in text
+        text = _notes(app)
+    assert "/check" in text
+
+
+async def test_summarize_without_a_judge_says_how_to_configure_one() -> None:
+    def no_judge() -> FakeJudge:
+        raise JudgeError("GROQ_API_KEY is not set")
+
+    app, schedulers = build_app(judge_factory=no_judge)
+    async with app.run_test(size=SIZE) as pilot:
+        await finished_run(pilot, schedulers[0])
+        await submit(pilot, "/summarize")
+        text = _notes(app)
+    assert "/config set judge.provider" in text
+    assert ".env" in text
+
+
+async def test_a_summary_the_judge_never_wrote_is_reported_not_left_blank() -> None:
+    """Product rule 2: an empty line would read as a report with nothing to add."""
+    down = "HTTP 401 from https://api.test/chat/completions"
+    judge = FakeJudge(text="", detail=down)
+    app, schedulers = build_app(judge_factory=lambda: judge)
+    async with app.run_test(size=SIZE) as pilot:
+        await finished_run(pilot, schedulers[0])
+        await submit(pilot, "/summarize")
+        await until(pilot, lambda: judge.closed, "the summary worker")
+        text = _kv_text(app)
+
+    # The CLI's builder, not a wording of its own: one silence, one sentence.
+    assert f"summary    {summary_silence(down)}" in text
+    assert "0 calls" not in text  # one request was made; ``calls`` counts answers
+
+
+async def test_summarizing_a_run_twice_adds_one_line_and_says_why() -> None:
+    """One summary per run: a second line would read as a second opinion about it."""
+    judge = FakeJudge()
+    app, schedulers = build_app(judge_factory=lambda: judge)
+    async with app.run_test(size=SIZE) as pilot:
+        await finished_run(pilot, schedulers[0])
+        await submit(pilot, "/summarize")
+        await until(pilot, lambda: judge.closed, "the summary worker")
+        await submit(pilot, "/summarize")
+        await pilot.pause()
+        text = _kv_text(app)
+        notes = _notes(app)
+
+    assert text.count(FakeJudge.PARAGRAPH) == 1
+    assert "already summarised" in notes
 
 
 async def test_an_unknown_verb_is_reported() -> None:

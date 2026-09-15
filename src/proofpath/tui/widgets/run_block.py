@@ -390,6 +390,10 @@ class RunBlock(Vertical):
         self._panelled = False
         #: Whether the block is folded. The header is never part of the fold.
         self.collapsed = False
+        #: True once ``add_summary`` has mounted this run's one summary line. One run
+        #: gets one paragraph (spec section 11.1); a second would read as a second
+        #: opinion about the same finished report.
+        self.summarised = False
 
     @property
     def panelled(self) -> bool:
@@ -556,6 +560,15 @@ class RunBlock(Vertical):
         self._coverage = CoverageLine(self._footer, self._out)
         self._coverage.display = not self.panelled
         self._add(self._findings, self._coverage)
+
+    def add_summary(self, line: Text) -> None:
+        """The model-written summary, at the foot of the run it summarises.
+
+        It belongs to this run and nothing else, so it goes in this run's block rather
+        than in a block of its own -- and last, where the markdown report puts it.
+        """
+        self.summarised = True
+        self._add(self._findings, KvLine(line))
 
     def _add(self, parent: Widget, child: Widget) -> None:
         """Mount ``child``, or queue it when this block is not on screen yet."""

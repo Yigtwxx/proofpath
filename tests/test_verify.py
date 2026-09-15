@@ -9,9 +9,12 @@ cache contract that makes a second run of the same document free (spec section 1
 
 from __future__ import annotations
 
+import json
+import re
 import sqlite3
 import threading
 from collections.abc import Callable, Sequence
+from dataclasses import replace
 from pathlib import Path
 from typing import NoReturn
 
@@ -21,7 +24,7 @@ from proofpath import oa, pipeline, retrieval
 from proofpath.browser import ConsentGate
 from proofpath.cache import Cache
 from proofpath.config import Config, Permissions
-from proofpath.document import Document, PageError
+from proofpath.document import Claim, Document, Locator, PageError
 from proofpath.entailment import Scorer
 from proofpath.events import (
     Cancelled,
@@ -33,17 +36,27 @@ from proofpath.events import (
     StageStart,
 )
 from proofpath.fetch import Fetched, FetchStats, Outcome
-from proofpath.models import Label
+from proofpath.judge import Completion, Judge, JudgeCost, JudgeUnavailable
+from proofpath.models import Label, Passage, Verdict
 from proofpath.oa import ABSTRACT_ONLY, Attempt, Evidence, Location
 from proofpath.pipeline import Thresholds
 from proofpath.polite import ProviderError
-from proofpath.report import Kind
+from proofpath.report import (
+    JUDGE_DETAIL_PREFIX,
+    ClaimResult,
+    Kind,
+    Report,
+    judge_detail,
+    judge_unavailable,
+)
 from proofpath.resolve import Candidate, ResolveResult, Retraction, State
 from proofpath.retrieval import Embedder
+from proofpath.ui import json_text
 from proofpath.verify import (
     CACHE_BY,
     CLAIMS,
     FETCHING,
+    JUDGING,
     LOADING_MODELS,
     NO_IDENTIFIER,
     NO_MODEL,
@@ -55,9 +68,11 @@ from proofpath.verify import (
     RESOLVING,
     RETRACTION_UNAVAILABLE,
     RETRACTIONS,
+    SUMMARISING,
     VERIFYING,
     Engine,
     Prepared,
+    _escalates,
     decide_all,
     prepare,
     target_document,
@@ -1518,3 +1533,548 @@ def test_a_retraction_note_survives_the_fetching_stage(tmp_path: Path) -> None:
     notes = ready.sources[1].notes
     assert any(note.startswith(RETRACTION_UNAVAILABLE) for note in notes)
     assert "no open-access full text" in notes  # the fetch's own note is still there
+
+
+# --- stage 7: judging (spec section 9 step 8, section 11.1) ------------------
+
+
+class FakeJudgeClient:
+    """``JudgeClient`` without a socket: scripted answers, counted calls.
+
+    An answer the script does not cover is an agreeing ``SUPPORTED`` for every id the
+    prompt carries, so a test only writes down the answers it is actually about.
+    """
+
+    provider = "fake"
+    model = "judge-1"
+
+    def __init__(self, answers: Sequence[str | Exception] = ()) -> None:
+        self.cost = JudgeCost(model=self.model)
+        self.prompts: list[str] = []
+        self.answers = list(answers)
+        self.closed = False
+
+    def complete(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        json_schema: dict[str, object] | None = None,
+        max_tokens: int = 1024,
+        temperature: float = 0.0,
+        reasoning_effort: str | None = None,
+    ) -> Completion:
+        user = messages[-1]["content"]
+        self.prompts.append(user)
+        answer = self.answers.pop(0) if self.answers else _agreeing(user)
+        if isinstance(answer, Exception):
+            raise answer
+        self.cost.calls += 1
+        self.cost.prompt_tokens += 100
+        self.cost.completion_tokens += 10
+        return Completion(text=answer, prompt_tokens=100, completion_tokens=10, model=self.model)
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def _agreeing(user: str) -> str:
+    ids = re.findall(r"id: (\S+)", user)
+    agreed = [
+        {"id": ident, "label": "SUPPORTED", "rationale": "the passage says so"} for ident in ids
+    ]
+    return json.dumps({"opinions": agreed})
+
+
+def _opinion(ident: str, label: str, rationale: str = "the passage says so") -> str:
+    return json.dumps({"opinions": [{"id": ident, "label": label, "rationale": rationale}]})
+
+
+# 0.455 sits between ``decide`` (0.45) and ``medium`` (0.457948): decided, but only
+# just -- which is exactly the band the judge exists for (spec section 9 step 8).
+LOW_REFUTED_ROW = (0.02, 0.455, 0.525)
+
+JUDGE_BODY = (
+    "Transformers improved translation quality [1]. The method yields a 40% speedup [1]. "
+    "The rest concerns tokenisers entirely [1]. Nothing further was measured."
+)
+# The three claims above, in order: a low-tier REFUTED, a rule-decided numeric
+# mismatch, and an NEI whose score never cleared ``decide`` (so it has no passage).
+JUDGE_TABLE = {SUPPORTING: LOW_REFUTED_ROW, FILLER: NEI_ROW}
+
+
+def judged(
+    client: FakeJudgeClient,
+    *,
+    body: str = JUDGE_BODY,
+    table: dict[str, tuple[float, float, float]] | None = None,
+    text: str = PAPER,
+    cache: Cache | None = None,
+    batch_size: int = 20,
+    summarize: bool = False,
+    on_event: Callable[[Event], None] | None = None,
+) -> Report:
+    built = paper_engine(table=table or JUDGE_TABLE, text=text, cache=cache)
+    built.judge = Judge(client, batch_size=batch_size)  # type: ignore[arg-type]
+    return verify(draft(body, [REAL]), built, summarize=summarize, on_event=on_event)
+
+
+def test_only_a_low_tier_verdict_with_a_passage_is_escalated() -> None:
+    """Rule-decided and passage-less verdicts are not the judge's business: one has
+    nothing to add to, the other has nothing to judge against (product rule 1)."""
+    client = FakeJudgeClient()
+    report = judged(client)
+
+    assert len(client.prompts) == 1
+    prompt = client.prompts[0]
+    assert "Transformers improved translation quality." in prompt
+    assert "40% speedup" not in prompt  # rule-decided, score 1.0
+    assert "tokenisers entirely" not in prompt  # NEI, no passage
+    tiers = {item.claim.text: item.verdict.tier for item in report.results}
+    assert tiers["Transformers improved translation quality."] == "low"
+
+
+def test_the_judges_opinion_is_attached_and_alters_nothing() -> None:
+    """Spec section 11.1: the judge gives an opinion, never a verdict."""
+    client = FakeJudgeClient(
+        [_opinion("c0", "SUPPORTED", 'it says "improved translation quality"')]
+    )
+    report = judged(client)
+
+    judged_result = next(item for item in report.results if item.verdict.tier == "low")
+    assert judged_result.judge is not None
+    assert judged_result.judge.label is Label.SUPPORTED
+    assert judged_result.judge.model == "fake judge-1"
+    # The local verdict is untouched, and so is the finding built from it.
+    assert judged_result.verdict.label is Label.REFUTED
+    finding = next(f for f in report.findings if f.kind is Kind.NOT_SUPPORTED)
+    assert finding.state == "NOT SUPPORTED"
+    assert finding.verdict is not None and finding.verdict.label is Label.REFUTED
+    assert finding.judge is not None and finding.judge.label is Label.SUPPORTED
+    assert judge_detail(finding.judge) in finding.detail
+
+
+def test_an_agreeing_judge_leaves_the_finding_without_a_judge_line() -> None:
+    """A second opinion worth printing is one that differs; agreement is recorded
+    on the finding but does not add a line saying the same thing twice."""
+    client = FakeJudgeClient([_opinion("c0", "REFUTED", "it contradicts the claim")])
+    report = judged(client)
+
+    finding = next(f for f in report.findings if f.kind is Kind.NOT_SUPPORTED)
+    assert finding.judge is not None and finding.judge.label is Label.REFUTED
+    assert not any(detail.startswith(JUDGE_DETAIL_PREFIX) for detail in finding.detail)
+
+
+def test_the_judging_stage_reports_what_it_reviewed_and_what_it_cost() -> None:
+    client = FakeJudgeClient()
+    events, listen = collected()
+    report = judged(client, on_event=listen)
+
+    stage = report.stages[-1]
+    assert stage.name == JUDGING
+    assert stage.by == "fake judge-1"
+    assert stage.summary == "1 of 3 verdicts reviewed, 1 call, 100 prompt · 10 completion tokens"
+    assert report.api_calls == 1
+    assert report.judge_cost is not None and report.judge_cost.calls == 1
+    assert report.models["judge"] == "fake judge-1"
+    assert any(isinstance(e, StageStart) and e.name == JUDGING for e in events)
+    assert [e for e in events if isinstance(e, Progress) and e.name == JUDGING] == [
+        Progress(name=JUDGING, done=1, total=1, detail="")
+    ]
+
+
+def test_a_run_without_a_judge_says_nothing_about_one() -> None:
+    """The default path makes zero LLM calls and the report shows no judge at all."""
+    built = paper_engine(table=JUDGE_TABLE)
+    report = verify(draft(JUDGE_BODY, [REAL]), built)
+
+    assert report.api_calls == 0
+    assert report.judge_cost is None
+    assert "judge" not in report.models
+    assert all(item.judge is None for item in report.results)
+    assert all(item.judge is None for item in report.findings)
+    assert [stage.name for stage in report.stages][-1] == VERIFYING
+
+
+def test_a_cached_judgement_is_read_back_instead_of_asked_again(tmp_path: Path) -> None:
+    text = draft(JUDGE_BODY, [REAL])
+    with Cache(tmp_path / "c.sqlite3") as cache:
+        first_client = FakeJudgeClient()
+        built = paper_engine(table=JUDGE_TABLE, cache=cache)
+        built.judge = Judge(first_client)  # type: ignore[arg-type]
+        ready = prepare(text, built)
+        source_row(cache, f"doi:{DOI}", PAPER)
+        first = decide_all(ready, built)
+        assert first_client.cost.calls == 1
+
+        again = FakeJudgeClient()
+        built.close()
+        built.embedder = lambda: WordEmbedder()
+        built.scorer = lambda: TableScorer(JUDGE_TABLE)
+        built.judge = Judge(again)  # type: ignore[arg-type]
+        second = decide_all(ready, built)
+
+        assert again.cost.calls == 0
+        assert second.api_calls == 0
+        opinions = [item.judge for item in second.results if item.judge is not None]
+        assert len(opinions) == 1 and opinions[0] == first.results[0].judge
+
+
+def test_a_run_that_asked_nobody_never_reports_the_provider_as_down(tmp_path: Path) -> None:
+    """``unavailable`` describes the calls *this* stage made, and it made none.
+
+    A judge reused for a second document remembers the first one's trouble, and a
+    stage that read every opinion out of the cache would otherwise inherit it --
+    reporting a provider as down on a run that never asked it anything.
+    """
+    text = draft(JUDGE_BODY, [REAL])
+    with Cache(tmp_path / "c.sqlite3") as cache:
+        built = paper_engine(table=JUDGE_TABLE, cache=cache)
+        reviewer = Judge(FakeJudgeClient())  # type: ignore[arg-type]
+        built.judge = reviewer
+        ready = prepare(text, built)
+        source_row(cache, f"doi:{DOI}", PAPER)
+        decide_all(ready, built)
+
+        reviewer.unavailable = True  # as the document before this one left it
+        reviewer.detail = "HTTP 401 from https://api.test/chat/completions"
+        built.close()
+        built.embedder = lambda: WordEmbedder()
+        built.scorer = lambda: TableScorer(JUDGE_TABLE)
+        warm = decide_all(ready, built)
+
+    stage = next(item for item in warm.stages if item.name == JUDGING)
+    assert "unavailable" not in stage.summary
+    assert "1 of 3 verdicts reviewed" in stage.summary
+
+
+def test_toggling_the_judge_never_invalidates_a_cached_verdict(tmp_path: Path) -> None:
+    """``model_id`` says nothing about the judge, so a warm run stays warm."""
+    text = draft(JUDGE_BODY, [REAL])
+    with Cache(tmp_path / "c.sqlite3") as cache:
+        built = paper_engine(table=JUDGE_TABLE, cache=cache)
+        ready = prepare(text, built)
+        source_row(cache, f"doi:{DOI}", PAPER)
+        decide_all(ready, built)
+
+        built.close()
+        built.embedder = lambda: WordEmbedder()
+        built.scorer = lambda: TableScorer({})  # any score() call would raise KeyError
+        built.judge = Judge(FakeJudgeClient())  # type: ignore[arg-type]
+        warm = decide_all(ready, built)
+
+        assert all(item.from_cache for item in warm.results)
+
+
+JUDGE_DOWN = (
+    "judge unavailable after 0 calls "
+    "(HTTP 401 from https://api.test/chat/completions); local verdicts stand"
+)
+
+
+def test_an_unavailable_judge_is_a_note_and_the_local_verdicts_stand() -> None:
+    client = FakeJudgeClient([JudgeUnavailable("HTTP 401 from https://api.test/chat/completions")])
+    events, listen = collected()
+    report = judged(client, on_event=listen)
+
+    notes = [e.text for e in events if isinstance(e, Note)]
+    assert JUDGE_DOWN in notes
+    # The detail says *why*, so a wrong key is visible rather than just "unavailable".
+    assert "HTTP 401" in JUDGE_DOWN
+    # Nothing about the run changed: the findings are the ones the models decided.
+    assert report.counts() == {Kind.NUMERIC_MISMATCH: 1, Kind.NOT_SUPPORTED: 1, Kind.NEI: 1}
+    assert all(item.judge is None for item in report.results)
+    assert report.api_calls == 0
+
+
+def test_an_unavailable_judge_is_carried_by_the_stage_summary_and_the_json() -> None:
+    """A note alone is quiet-suppressed and never stored, so "the provider was down"
+    and "nothing was escalated" would read identically -- the absence-of-evidence
+    collapse product rules 2 and 6 forbid. The stage summary says which it was."""
+    client = FakeJudgeClient([JudgeUnavailable("HTTP 401 from https://api.test/chat/completions")])
+    report = judged(client)
+
+    stage = report.stages[-1]
+    assert stage.name == JUDGING
+    assert stage.summary == JUDGE_DOWN
+    # ``--format json`` goes through the same serialiser, so the durable surface has it.
+    payload = json.loads(json_text(report))
+    assert payload["stages"][-1]["summary"] == JUDGE_DOWN
+
+
+def test_a_judge_that_answered_says_what_it_reviewed_not_that_it_was_unavailable() -> None:
+    report = judged(FakeJudgeClient())
+
+    assert "unavailable" not in report.stages[-1].summary
+
+
+class BrokenJudgementCache(Cache):
+    """A cache whose judgement write always fails -- what a ``sources`` row that is
+    no longer there does under ``PRAGMA foreign_keys=ON``."""
+
+    def put_judgement(self, *args: object, **kwargs: object) -> None:
+        raise sqlite3.IntegrityError("FOREIGN KEY constraint failed")
+
+
+def test_a_judgement_that_cannot_be_cached_is_a_note_and_the_run_finishes(
+    tmp_path: Path,
+) -> None:
+    """The optional judge layer is the last thing in the tool allowed to end a run:
+    a cache that refuses the write costs the *next* run a call, nothing more."""
+    with BrokenJudgementCache(tmp_path / "c.sqlite3") as cache:
+        source_row(cache, f"doi:{DOI}", PAPER)
+        events, listen = collected()
+        report = judged(FakeJudgeClient(), cache=cache, on_event=listen)
+
+    notes = [e.text for e in events if isinstance(e, Note)]
+    assert "judgement not cached: IntegrityError" in notes
+    # The opinion the run already paid for is still attached to this report.
+    assert [item.judge for item in report.results if item.judge is not None]
+    assert report.stages[-1].summary.startswith("1 of 3 verdicts reviewed")
+
+
+def test_a_judge_that_answers_nonsense_is_noted_and_costs_no_verdict() -> None:
+    client = FakeJudgeClient(["I would rather not say."])
+    events, listen = collected()
+    report = judged(client, on_event=listen)
+
+    assert any("not JSON" in e.text for e in events if isinstance(e, Note))
+    assert all(item.judge is None for item in report.results)
+    assert report.api_calls == 1
+
+
+FOUR_LOW = (
+    "Alpha rose sharply [1]. Beta fell slowly [1]. Gamma stayed flat [1]. "
+    "Delta wobbled often [1]. Nothing further was measured."
+)
+
+
+def test_the_judge_is_stopped_between_batches_when_the_run_is_cancelled() -> None:
+    cancel = threading.Event()
+    client = FakeJudgeClient()
+    built = paper_engine(table=dict.fromkeys(FOUR_SENTENCES, LOW_REFUTED_ROW), text=FOUR_SOURCE)
+    built.judge = Judge(client, batch_size=1)  # type: ignore[arg-type]
+    ready = prepare(draft(FOUR_LOW, [REAL]), built)
+
+    seen: list[Event] = []
+
+    def watch(event: Event) -> None:
+        seen.append(event)
+        if isinstance(event, Progress) and event.name == JUDGING:
+            cancel.set()
+
+    with pytest.raises(Cancelled) as stopped:
+        decide_all(ready, built, on_event=watch, cancel=cancel)
+
+    assert client.cost.calls == 1  # one batch, then the cancel was seen
+    partial = stopped.value.report
+    assert partial is not None and partial.cancelled
+    # A stopped run keeps what it learned, judge included (product rule 6).
+    assert sum(1 for item in partial.results if item.judge is not None) == 1
+
+
+# --- --summarize (task 9.3) ---------------------------------------------------------
+
+
+class SummarisingJudgeClient(FakeJudgeClient):
+    """Reviews as ``FakeJudgeClient`` does, then writes a paragraph when asked for one.
+
+    The summary call is the one that carries no JSON schema: prose, not opinions.
+    """
+
+    PARAGRAPH = "42 references were checked and three do not say what the draft says."
+
+    def complete(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        json_schema: dict[str, object] | None = None,
+        max_tokens: int = 1024,
+        temperature: float = 0.0,
+        reasoning_effort: str | None = None,
+    ) -> Completion:
+        if json_schema is None:
+            self.answers.insert(0, self.PARAGRAPH)
+        return super().complete(
+            messages,
+            json_schema=json_schema,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            reasoning_effort=reasoning_effort,
+        )
+
+
+class MuteSummaryClient(FakeJudgeClient):
+    """Reviews, then goes away before the summary: the paragraph is lost, not the run."""
+
+    DOWN = "HTTP 401 from https://api.test/chat/completions"
+
+    def complete(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        json_schema: dict[str, object] | None = None,
+        max_tokens: int = 1024,
+        temperature: float = 0.0,
+        reasoning_effort: str | None = None,
+    ) -> Completion:
+        if json_schema is None:
+            raise JudgeUnavailable(self.DOWN)
+        return super().complete(
+            messages,
+            json_schema=json_schema,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            reasoning_effort=reasoning_effort,
+        )
+
+
+def test_a_run_that_was_not_asked_for_a_summary_has_none() -> None:
+    """Spec section 11.1: off by default, and off means no call and no paragraph."""
+    client = FakeJudgeClient()
+    report = judged(client)
+    assert report.summary is None
+    assert len(client.prompts) == 1  # the review, and nothing after it
+
+
+def test_the_summary_costs_one_call_and_changes_nothing_it_read() -> None:
+    """Spec section 11.1: it runs over a finished report and cannot move a verdict."""
+    plain = judged(FakeJudgeClient())
+    client = SummarisingJudgeClient()
+    summarised = judged(client, summarize=True)
+
+    assert summarised.summary == SummarisingJudgeClient.PARAGRAPH
+    assert summarised.api_calls == plain.api_calls + 1
+    assert len(client.prompts) == 2  # the review, then exactly one summary call
+    assert summarised.results == plain.results
+    assert summarised.findings == plain.findings
+    assert summarised.judge_cost is not None and summarised.judge_cost.calls == 2
+
+
+def test_the_summary_is_shown_the_finished_report_and_nothing_else() -> None:
+    client = SummarisingJudgeClient()
+    judged(client, summarize=True)
+    asked = client.prompts[-1]
+
+    assert "# proofpath report" in asked
+    # It sees the report, never a source: the judge cannot check the draft itself.
+    assert PAPER not in asked
+
+
+def test_a_summary_the_judge_never_wrote_is_reported_not_silently_missing() -> None:
+    """Product rule 2: an absent paragraph must not read as a report with none to give."""
+    events, listen = collected()
+    report = judged(MuteSummaryClient(), summarize=True, on_event=listen)
+
+    assert report.summary == ""  # asked and got nothing, which is not "never asked"
+    stage = report.stages[-1]
+    assert stage.name == SUMMARISING
+    assert stage.summary == (
+        f"summary {judge_unavailable(0, MuteSummaryClient.DOWN, what='summary')}"
+    )
+    # No call count: one request was made, and ``cost.calls`` counts answers, so
+    # "after 0 calls" would read as if the summary had never been attempted.
+    assert "0 calls" not in stage.summary
+    # The stage carries it, and the front ends print their own line from that; a note
+    # beside it would say the same thing twice, as the live run did.
+    assert not [e for e in events if isinstance(e, Note) and "summary" in e.text]
+    # The escalation's own calls are not charged to the summary that never happened.
+    assert report.api_calls == 1
+
+
+def test_the_summarising_stage_says_what_the_paragraph_cost() -> None:
+    seen: list[Event] = []
+    report = judged(SummarisingJudgeClient(), summarize=True, on_event=seen.append)
+
+    stage = report.stages[-1]
+    assert stage.name == SUMMARISING
+    assert stage.by == "fake judge-1"
+    assert "1 call" in stage.summary
+    assert "100 prompt" in stage.summary and "10 completion" in stage.summary
+    ends = [e for e in seen if isinstance(e, StageEnd) and e.name == SUMMARISING]
+    assert [e.summary for e in ends] == [stage.summary]
+
+
+def test_the_json_payload_names_the_model_that_wrote_the_summary() -> None:
+    """Spec section 11.1: model prose is labelled model-written wherever it is shown.
+
+    A consumer rendering ``payload["summary"]`` on its own has nothing else to label
+    it with -- the markdown heading and the terminal's label are not in the JSON --
+    so the paragraph travels with a sibling naming who wrote it.
+    """
+    report = judged(SummarisingJudgeClient(), summarize=True)
+
+    assert report.summary_model == "fake judge-1"
+    payload = json.loads(json_text(report))
+    assert payload["summary"] == SummarisingJudgeClient.PARAGRAPH
+    assert payload["summary_model"] == "fake judge-1"
+
+
+def test_a_report_with_no_summary_names_nobody_as_its_author() -> None:
+    """Never asked and asked-but-unanswered are both "no model wrote this"."""
+    assert judged(FakeJudgeClient()).summary_model is None
+    unanswered = judged(MuteSummaryClient(), summarize=True)
+    assert unanswered.summary == "" and unanswered.summary_model is None
+
+
+def test_the_judging_stages_cost_is_a_snapshot_not_the_live_running_total() -> None:
+    """A finished report is frozen, and ``JudgeCost`` is not: the client keeps adding
+    to the same object for the next document, so aliasing it would let a report's
+    stated cost keep changing after the run that earned it was over."""
+    client = FakeJudgeClient()
+    report = judged(client)
+
+    assert report.judge_cost is not None
+    frozen = replace(report.judge_cost)
+    client.cost.calls += 7
+    client.cost.prompt_tokens += 1_000
+    assert report.judge_cost == frozen
+
+
+def test_the_summarising_stages_cost_is_a_snapshot_too() -> None:
+    client = SummarisingJudgeClient()
+    report = judged(client, summarize=True)
+
+    assert report.judge_cost is not None
+    frozen = replace(report.judge_cost)
+    client.cost.completion_tokens += 500
+    assert report.judge_cost == frozen
+
+
+def test_asking_for_a_summary_without_a_judge_is_a_programming_error() -> None:
+    built = paper_engine(table=JUDGE_TABLE, text=PAPER)
+    with pytest.raises(ValueError, match="summar"):
+        verify(draft(JUDGE_BODY, [REAL]), built, summarize=True)
+
+
+def _result(verdict: Verdict) -> ClaimResult:
+    claim = Claim(
+        text="the method is faster",
+        locator=Locator(line=1),
+        cited_refs=(1,),
+        paragraph=0,
+        sentence=0,
+    )
+    return ClaimResult(claim, 1, "doi:10.1/x", verdict, from_cache=False)
+
+
+PASSAGE = Passage("the method is faster", "doi:10.1/x", 0)
+
+
+@pytest.mark.parametrize(
+    ("verdict", "escalated"),
+    [
+        (Verdict(Label.REFUTED, 0.455, "low", PASSAGE), True),
+        (Verdict(Label.NEI, 0.46, "medium", PASSAGE), True),
+        (Verdict(Label.SUPPORTED, 0.9999, "high", PASSAGE), False),
+        (Verdict(Label.SUPPORTED, 0.46, "medium", PASSAGE), False),
+        (Verdict(Label.NEI, 0.2, "low", None), False),
+        (
+            Verdict(Label.REFUTED, 1.0, "high", PASSAGE, reason="numeric mismatch: claim says 40%"),
+            False,
+        ),
+    ],
+)
+def test_the_escalation_set_is_the_low_band_with_something_to_judge_against(
+    verdict: Verdict, escalated: bool
+) -> None:
+    assert _escalates(_result(verdict)) is escalated

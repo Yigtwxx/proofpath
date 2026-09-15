@@ -238,6 +238,19 @@ class Scheduler:
                 return run
         return None
 
+    def last_done(self) -> Run | None:
+        """The most recently finished run that produced a report, or ``None``.
+
+        What ``/summarize`` means by "the last run": newest first, and only a run that
+        actually decided something -- a cancelled or failed one has no finished report
+        to summarise, and summarising a partial one as though it were whole is the
+        absence-of-evidence collapse product rule 2 forbids.
+        """
+        for run in reversed(self._runs):
+            if run.state == "done" and run.report is not None:
+                return run
+        return None
+
     def submit(self, target: str, *, command: str) -> Run:
         """Queue a run and return it at once; the work happens in its own task."""
         if self._closed:

@@ -183,7 +183,12 @@ runtime teardown); fixed in v0.1 — 20 of 20 piped runs exit `1`
   counted as unreachable.
 - **Coverage is not perfectly reproducible**: two runs minutes apart can read a
   different number of sources, depending on which providers answered.
-- The LLM judge and `--summarize` arrive in **v0.3**.
+- **The judge is a second opinion, not a second verdict.** `--judge` asks the model only
+  about the low-tier verdicts (1 of 10 on the live draft), and its answer is printed
+  beside the local verdict, never in place of it. `--summarize` is one extra call over
+  the finished report, labelled model-written; if the provider does not answer, the
+  markdown report, the JSON and the terminal say so (`judge status` / `summary status`
+  in the header). The SARIF log does not carry it — it is a findings document.
 
 ## Speed
 
@@ -217,13 +222,53 @@ TablePlus or DBeaver — plain tables, no extension. Raw publisher text expires 
 7 days; verdicts keep the passage they quote; a provider outage is never stored.
 `proofpath resolve REF` and `proofpath fetch URL|DOI` run either half on its own.
 
-## Optional LLM judge — arrives in v0.3
+## Optional LLM judge (v0.3)
 
-Everything above runs locally. An LLM is used only at the end, as an opt-in second
-opinion on low-confidence verdicts — it never sees a source document and cannot
-change a verdict. The settings exist today (`proofpath config check` proves a key
-works, default Groq); `check --judge` and `--summarize` are wired in v0.3. The key
-comes from the environment or a `.env` file, never from config, and is never printed.
+Everything above runs locally, and the default run makes **zero** LLM calls. Two flags
+add an LLM at the end, and only there:
+
+```bash
+proofpath check paper.pdf --judge        # a second opinion on the low-confidence verdicts
+proofpath check paper.pdf --summarize    # one model-written paragraph over the finished report
+proofpath config check                   # proves the key works before you spend a run on it
+```
+
+**What `--judge` does.** After the local verdicts are final, the verdicts the models
+were least sure about — the `low` tier, never a numeric mismatch and never a claim
+without a quoted passage — go to the model in batches of up to 20 (about 7k tokens),
+each with its claim and the passage it was checked against. The model answers from the
+passage alone, and its label and one-sentence rationale are printed **beside** the local
+verdict: `= judge (groq openai/gpt-oss-120b): NEI — …`. The local verdict, the finding
+kind and the report's states never change. Opinions are cached with the verdict, so a
+re-run asks nothing.
+
+**What it cannot do.** It never sees a source document, so it cannot introduce a claim
+or an evidence passage of its own; it cannot turn `NEI` into `SUPPORTED`; it cannot
+hide a source that could not be read. If the provider is down, rate-limited or the key
+is wrong, the run finishes on the local verdicts and says so in the stage line, the
+report header (`judge status:`) and the JSON — `-q` cannot hide it.
+
+**What `--summarize` does.** One final call turns the finished markdown report into 3–5
+plain sentences a reader can act on. It runs after the report is complete, its only
+input is that report, it is off by default in the CLI and the TUI (`/summarize` there),
+and the output is labelled `(model-written, <provider> <model>)`. `--summarize` alone
+is exactly one call; with `--judge` the escalation runs first.
+
+**Cost.** The footer counts the calls and the stage line the tokens:
+`Judging … 1 of 10 verdicts reviewed, 1 call, 613 prompt · 193 completion tokens` and
+`Summarising … 98 words, 1 call, 1,608 prompt · 343 completion tokens`
+on the live draft ([details](docs/eval/2026-09-15-judge-live.md)). Groq's free tier
+allows roughly one call a minute. Only the low-tier verdicts are sent — 1 of 10 on that
+draft — and up to 20 go in one call, so a long bibliography costs a handful of calls, not
+one per citation.
+
+**Providers.** Default is Groq `openai/gpt-oss-120b` (free without a card, no training
+on submitted data). `proofpath config set judge.provider gemini` switches to Gemini —
+note that Google trains on free-tier prompts outside the EEA/UK/CH, and proofpath prints
+that warning once per run. `judge.provider ollama` runs fully offline. Gemini and Ollama are
+fixture-tested and were not exercised live in v0.3.0. All three speak
+the OpenAI `chat/completions` shape. The key comes from `GROQ_API_KEY` / `GEMINI_API_KEY`
+in the environment or a `.env` file, never from config, and is never printed.
 
 ## Measured
 

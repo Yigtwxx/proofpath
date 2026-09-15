@@ -9,10 +9,12 @@ import pytest
 
 from proofpath.document import Claim, Document, Locator, Reference
 from proofpath.fetch import Outcome
+from proofpath.judge import JudgeCost, JudgeOpinion
 from proofpath.models import Label, Passage, Verdict
 from proofpath.oa import ABSTRACT_ONLY
 from proofpath.report import (
     BROWSER_SKIPPED_REASON,
+    JUDGE_DETAIL_PREFIX,
     LEVELS,
     SNIPPET_LIMIT,
     STATE_WORDS,
@@ -24,10 +26,15 @@ from proofpath.report import (
     Report,
     SourceStatus,
     Stage,
+    judge_detail,
+    judge_unavailable,
+    judge_unavailable_line,
     no_bibliography,
     render_diagnostics,
     render_footer,
     render_markdown,
+    summary_silence,
+    summary_unavailable,
 )
 from proofpath.resolve import State
 
@@ -1102,7 +1109,7 @@ def test_markdown_lists_a_supported_claim_only_under_checked() -> None:
     report = dataclasses.replace(covered(42, 26, 9, 7), results=(result,))
     text = render_markdown(report, written_at=WHEN)
     checked = text.split("## Checked", 1)[1].split("## Sources", 1)[0]
-    assert "| p.9 L260 | [12] | high | we observed a 4-8% improvement |" in checked
+    assert "| p.9 L260 | [12] | high | \u2014 | we observed a 4-8% improvement |" in checked
     assert text.count("we observed a 4-8% improvement") == 1
 
 
@@ -1128,6 +1135,13 @@ def test_markdown_summary_appears_only_when_the_model_wrote_one() -> None:
     text = render_markdown(report, written_at=WHEN)
     assert "## Summary (model-written)" in text
     assert "Three references do not say this." in text
+
+
+def test_markdown_summary_names_the_model_that_wrote_it() -> None:
+    """Spec section 11.1: a model-written paragraph says so, and says by whom."""
+    report = dataclasses.replace(judged_report(), summary="Three references do not say this.")
+    text = render_markdown(report, written_at=WHEN)
+    assert "## Summary (model-written, groq openai/gpt-oss-120b)" in text
 
 
 def test_markdown_defaults_its_date_to_now() -> None:
@@ -1250,3 +1264,216 @@ def test_a_source_nobody_cached_shows_a_dash() -> None:
         line for line in render_markdown(report, written_at=WHEN).splitlines() if "[12]" in line
     )
     assert "| — |" in row
+
+
+# --- the judge's opinion, beside the verdict (spec section 11.1) --------------------
+
+OPINION = JudgeOpinion(
+    label=Label.SUPPORTED,
+    rationale='the passage says "we observed a 4-8% improvement"',
+    model="groq openai/gpt-oss-120b",
+)
+
+
+def judged_report(*findings: Finding, cost: JudgeCost | None = None) -> Report:
+    report = report_with(*findings)
+    return dataclasses.replace(
+        report,
+        results=(
+            ClaimResult(
+                claim=claim_at(112, 4),
+                reference=12,
+                source_id="doi:10.1/x",
+                verdict=SUPPORTED,
+                from_cache=False,
+                judge=OPINION,
+            ),
+        ),
+        api_calls=3,
+        judge_cost=cost,
+        models={"judge": "groq openai/gpt-oss-120b"},
+    )
+
+
+def test_judge_detail_is_one_wording_for_every_surface() -> None:
+    assert judge_detail(OPINION) == (
+        'judge (groq openai/gpt-oss-120b): SUPPORTED — the passage says "we observed a '
+        '4-8% improvement"'
+    )
+    assert judge_detail(OPINION).startswith(JUDGE_DETAIL_PREFIX)
+
+
+def test_a_judged_finding_prints_its_own_judge_line_not_a_note() -> None:
+    item = dataclasses.replace(
+        finding(Kind.NOT_SUPPORTED, line=112, page=4),
+        judge=OPINION,
+        detail=("the source is behind a paywall", judge_detail(OPINION)),
+    )
+    (diagnostic,) = render_diagnostics(judged_report(item))
+    assert "   = note: the source is behind a paywall" in diagnostic.lines
+    assert f"   = {judge_detail(OPINION)}" in diagnostic.lines
+    assert not any(line.startswith("   = note: judge (") for line in diagnostic.lines)
+
+
+def test_the_local_verdict_is_untouched_by_the_opinion_beside_it() -> None:
+    """Product rule: the judge attaches an opinion, it never edits a verdict."""
+    item = dataclasses.replace(
+        finding(Kind.NOT_SUPPORTED, line=112, page=4),
+        judge=OPINION,
+        detail=(judge_detail(OPINION),),
+    )
+    assert item.verdict is REFUTED
+    assert item.state == STATE_WORDS[Kind.NOT_SUPPORTED]
+    assert item.kind is Kind.NOT_SUPPORTED
+
+
+JUDGE_DETAIL = "HTTP 401 from https://api.groq.com/openai/v1/chat/completions"
+
+
+def unavailable_report() -> Report:
+    """A run whose judge never answered, as ``verify`` would leave it."""
+    return dataclasses.replace(
+        judged_report(),
+        stages=(
+            Stage(
+                name="Judging",
+                by="groq openai/gpt-oss-120b",
+                summary=f"judge {judge_unavailable(2, JUDGE_DETAIL)}",
+                elapsed=0.4,
+            ),
+        ),
+    )
+
+
+def test_markdown_header_says_when_the_judge_never_answered() -> None:
+    """A report that cost nothing because the provider was down must not read like a
+    report that had nothing to escalate (product rules 2 and 6)."""
+    text = render_markdown(unavailable_report(), written_at=datetime(2026, 9, 15, 9, 0))
+
+    assert (
+        f"- judge status: unavailable after 2 calls ({JUDGE_DETAIL}); local verdicts stand"
+    ) in text
+    # One ``- judge:`` bullet, and it is the model's name; the state has its own key.
+    assert text.count("- judge: ") == 1
+
+
+def unsummarised_report() -> Report:
+    """A run that asked for a summary and never got one, as ``verify`` leaves it."""
+    return dataclasses.replace(
+        judged_report(),
+        summary="",
+        stages=(
+            Stage(
+                name="Summarising",
+                by="groq openai/gpt-oss-120b",
+                summary=f"summary {judge_unavailable(0, JUDGE_DETAIL, what='summary')}",
+                elapsed=0.4,
+            ),
+        ),
+    )
+
+
+def test_the_summary_sentence_counts_no_calls_at_all() -> None:
+    """``cost.calls`` counts answers, so "after 0 calls" would read as "never tried"
+    for a summary that is one request by construction (spec section 11.1)."""
+    assert judge_unavailable(0, JUDGE_DETAIL, what="summary") == (
+        f"unavailable ({JUDGE_DETAIL}); local verdicts stand"
+    )
+    # The judge's own sentence counts answered calls, and keeps them.
+    assert judge_unavailable(1, JUDGE_DETAIL) == (
+        f"unavailable after 1 call ({JUDGE_DETAIL}); local verdicts stand"
+    )
+
+
+def test_markdown_header_says_when_the_summary_never_came() -> None:
+    """``report.summary == ""`` is falsy, so the missing paragraph leaves no trace in
+    the body at all: without the header line the run reads like one never asked."""
+    text = render_markdown(unsummarised_report(), written_at=WHEN)
+
+    assert f"- summary status: unavailable ({JUDGE_DETAIL}); local verdicts stand" in text
+    assert "## Summary" not in text
+
+
+def test_markdown_header_is_silent_about_a_summary_that_arrived() -> None:
+    report = dataclasses.replace(judged_report(), summary="Three references do not say this.")
+    text = render_markdown(report, written_at=WHEN)
+    assert "- summary status:" not in text
+    assert "## Summary (model-written, groq openai/gpt-oss-120b)" in text
+
+
+def test_markdown_header_is_silent_about_a_summary_nobody_asked_for() -> None:
+    assert "- summary status:" not in render_markdown(judged_report(), written_at=WHEN)
+
+
+def test_the_summary_line_names_the_judge_that_went_quiet() -> None:
+    """The terminal's key already says ``summary``; the value says who was silent."""
+    assert summary_unavailable(unsummarised_report()) == (
+        f"judge unavailable ({JUDGE_DETAIL}); local verdicts stand"
+    )
+    assert summary_unavailable(judged_report()) is None
+
+
+def test_the_live_summary_line_is_the_same_sentence_as_the_finished_one() -> None:
+    """The CLI reads the sentence off a finished report's stage; the TUI summarises a
+    run that has no such stage and holds only the detail. One builder for both, so the
+    two surfaces cannot drift into two wordings for the same silence (spec 13.3) --
+    and no call count, which for a summary is always the dead ``0``."""
+    assert summary_silence(JUDGE_DETAIL) == summary_unavailable(unsummarised_report())
+
+
+def test_the_judge_line_repeats_the_stage_sentence_rather_than_inventing_one() -> None:
+    """``-q`` drops the stage row, so the CLI prints this instead; it must be the same
+    sentence the ``- judge status:`` markdown header carries."""
+    report = unavailable_report()
+    assert judge_unavailable_line(report) == (
+        f"judge unavailable after 2 calls ({JUDGE_DETAIL}); local verdicts stand"
+    )
+    assert f"- judge status: {judge_unavailable(2, JUDGE_DETAIL)}" in render_markdown(
+        report, written_at=WHEN
+    )
+    assert judge_unavailable_line(judged_report()) is None
+
+
+def test_markdown_header_is_silent_about_a_judge_that_answered() -> None:
+    text = render_markdown(judged_report(), written_at=datetime(2026, 9, 15, 9, 0))
+
+    assert "unavailable" not in text
+    assert "- judge: groq openai/gpt-oss-120b" in text
+
+
+def test_markdown_checked_gains_a_judge_column() -> None:
+    text = render_markdown(judged_report(), written_at=datetime(2026, 9, 15, 9, 0))
+    assert "| location | ref | tier | judge | passage |" in text
+    assert "| high | SUPPORTED |" in text
+
+
+def test_markdown_says_a_claim_no_judge_saw_was_not_judged() -> None:
+    report = judged_report()
+    report = dataclasses.replace(
+        report,
+        results=(dataclasses.replace(report.results[0], judge=None),),
+    )
+    text = render_markdown(report, written_at=datetime(2026, 9, 15, 9, 0))
+    assert "| high | — |" in text
+
+
+def test_markdown_puts_the_judge_line_under_the_finding_it_belongs_to() -> None:
+    item = dataclasses.replace(
+        finding(Kind.NOT_SUPPORTED, line=112, page=4),
+        judge=OPINION,
+        detail=(judge_detail(OPINION),),
+    )
+    text = render_markdown(judged_report(item), written_at=datetime(2026, 9, 15, 9, 0))
+    assert f"  - {judge_detail(OPINION)}" in text
+    assert "  - note: judge (" not in text
+
+
+def test_the_footer_carries_the_judge_tokens_when_there_are_any() -> None:
+    cost = JudgeCost(calls=3, prompt_tokens=18402, completion_tokens=1210, model="x")
+    footer = render_footer(judged_report(cost=cost))
+    assert footer.api_calls == 3
+    assert footer.judge_tokens == (18402, 1210)
+
+
+def test_the_footer_has_no_judge_tokens_on_a_run_without_a_judge() -> None:
+    assert render_footer(report_with()).judge_tokens is None

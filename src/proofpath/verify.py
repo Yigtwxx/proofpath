@@ -26,6 +26,7 @@ the two halves composed, for a caller that wants neither on its own.
 
 from __future__ import annotations
 
+import sqlite3
 import threading
 import time
 from collections import Counter
@@ -61,6 +62,7 @@ from proofpath.events import (
     StageStart,
 )
 from proofpath.fetch import Fetched, Fetcher, FetchStats, Outcome
+from proofpath.judge import Judge, JudgeCost, JudgeItem, JudgeOpinion
 from proofpath.models import Label, Passage, Verdict
 from proofpath.oa import ABSTRACT_ONLY, Evidence, OpenAccess
 from proofpath.paths import models_dir
@@ -69,6 +71,7 @@ from proofpath.polite import PoliteClient, ProviderError, user_agent
 from proofpath.report import (
     LEVELS,
     STATE_WORDS,
+    SUMMARY,
     UNVERIFIED_PREFIX,
     ClaimResult,
     Coverage,
@@ -78,6 +81,9 @@ from proofpath.report import (
     SourceStatus,
     Stage,
     TextKind,
+    judge_detail,
+    judge_unavailable,
+    render_markdown,
 )
 from proofpath.resolve import Candidate, Resolver, ResolveResult, Retraction, State
 from proofpath.retrieval import Embedder, FastEmbedder, PassageIndex
@@ -89,6 +95,8 @@ RESOLVING = "Resolving"
 RETRACTIONS = "Retractions"
 FETCHING = "Fetching"
 VERIFYING = "Verifying"
+JUDGING = "Judging"
+SUMMARISING = "Summarising"
 
 # Attribution per stage. Parsing's and fetching's depend on the run and are
 # computed; these three are fixed by which providers the stage consults.
@@ -216,6 +224,14 @@ class Engine:
     k: int = 1
     thresholds: Thresholds = DEFAULT_THRESHOLDS
     device: str = "cpu"
+    # The opt-in second opinion. ``None`` is the default path, and the default path
+    # makes zero LLM calls (spec section 11). Nothing downstream branches on it
+    # except the judging stage, which does not run when it is absent.
+    judge: Judge | None = None
+    # Whether the judging stage may spend that judge. ``--summarize`` builds a judge
+    # for the final summary alone, and spec section 11.1 caps the summary at one
+    # call: escalating as well would quietly turn "one call" into several.
+    escalate: bool = True
     _closers: list[Callable[[], None]] = field(default_factory=list, repr=False)
     # The models, once built. They live on the engine and nowhere else, so that
     # ``close()`` can release their native sessions while the interpreter is still
@@ -236,6 +252,8 @@ class Engine:
         prompt: Callable[[str, int | None], Answer] | None = None,
         k: int = 1,
         thresholds: Thresholds = DEFAULT_THRESHOLDS,
+        judge: Judge | None = None,
+        escalate: bool = True,
     ) -> Engine:
         """The real wiring: the same one ``proofpath fetch`` builds, one layer up.
 
@@ -244,6 +262,10 @@ class Engine:
         way through — the gate never prompts without a terminal (product rule 4).
         """
         closers: list[Callable[[], None]] = []
+        if judge is not None:
+            # Wired here, so closed here: the caller builds the judge but this is the
+            # one place that knows when the run is over.
+            closers.append(judge.close)
         try:
             gate = ConsentGate(
                 config.permissions.install_browser,
@@ -296,6 +318,8 @@ class Engine:
             k=k,
             thresholds=thresholds,
             device=device_name,
+            judge=judge,
+            escalate=escalate,
             _closers=closers,
         )
 
@@ -828,6 +852,20 @@ def decide_all(
     stages.append(Stage(name=VERIFYING, by=engine.device, summary=summary, elapsed=elapsed))
     emit(StageEnd(name=VERIFYING, by=engine.device, summary=summary, elapsed=elapsed))
 
+    # Stage 7, and only when asked for: the judge re-reads the verdicts the models
+    # were least sure of and says what it thinks, beside them (spec section 9 step 8).
+    # A run already told to stop is not started on a second round of network calls.
+    judge_cost: JudgeCost | None = None
+    if engine.judge is not None and engine.escalate and not cancelled:
+        judged = _judging(engine, results, findings, emit=emit, check=check)
+        results, findings = judged.results, judged.findings
+        stages.append(judged.stage)
+        # A copy, not the client's own: ``JudgeCost`` is mutable and the judge goes on
+        # spending it -- on the summary, or on the next document -- so an alias here
+        # would let a finished report's stated cost keep changing underneath it.
+        judge_cost = replace(judged.cost)
+        cancelled = judged.cancelled
+
     report = Report(
         document=prepared.document,
         claims=len(prepared.claims.claims),
@@ -838,7 +876,9 @@ def decide_all(
         coverage=_coverage(prepared, engine),
         stages=tuple(stages),
         models=_models(embedder, scorer, engine),
-        api_calls=0,  # the LLM judge is Phase 9; the default path calls nobody
+        # Zero unless a judge ran: the default path calls nobody (spec section 11).
+        api_calls=0 if judge_cost is None else judge_cost.calls,
+        judge_cost=judge_cost,
         elapsed=time.monotonic() - prepared.started,
         tier_note=pipeline.tier_note(engine.thresholds),
         cancelled=cancelled,
@@ -853,6 +893,7 @@ def verify(
     engine: Engine,
     *,
     name: str | None = None,
+    summarize: bool = False,
     on_event: Listener | None = None,
     cancel: threading.Event | None = None,
 ) -> Report:
@@ -861,9 +902,80 @@ def verify(
     The two are still separately callable -- a front end shows what ``prepare()``
     found while ``decide_all()`` is still running -- and this is the composition a
     caller that wants neither half on its own asks for.
+
+    ``summarize`` adds the one optional call of spec section 11.1, and it is here
+    rather than in ``decide_all`` for the reason the spec gives: the summary is
+    written *over a finished report*, so there has to be a finished report first. It
+    needs ``engine.judge``; a caller that asks for it without one is a bug, not a
+    document the tool could not check.
     """
     prepared = prepare(target, engine, name=name, on_event=on_event, cancel=cancel)
-    return decide_all(prepared, engine, on_event=on_event, cancel=cancel)
+    report = decide_all(prepared, engine, on_event=on_event, cancel=cancel)
+    if not summarize:
+        return report
+    return _summarise(report, engine, started=prepared.started, on_event=on_event)
+
+
+def _summarise(
+    report: Report, engine: Engine, *, started: float, on_event: Listener | None
+) -> Report:
+    """The model-written paragraph, and what it cost, on a report that is already done.
+
+    Three things make this safe to add to a finished run (spec section 11.1). The
+    report's own markdown is the only input, so the judge never sees a source and has
+    nothing to re-decide. ``results`` and ``findings`` are handed through untouched,
+    so no wording here can reach a verdict. And it is one call: the stage says how
+    many were made, so a second one could not hide.
+
+    A provider that will not answer costs the paragraph and says so in the stage
+    summary -- the same surface, and the same sentence, the judging stage uses -- so
+    ``-q``, ``--format json`` and the markdown report all still tell a silent
+    provider from a report with nothing to add (product rules 2 and 6). The sentence
+    counts no calls: ``cost.calls`` counts answers, and one request was made.
+    """
+    judge = engine.judge
+    if judge is None:
+        raise ValueError("a summary needs a judge on the engine")
+    emit: Listener = on_event if on_event is not None else _ignore
+    began = time.monotonic()
+    emit(StageStart(name=SUMMARISING, by=judge.name))
+    before = replace(judge.cost)  # the running total, as it stood before this call
+    text = judge.summarize(render_markdown(report))
+    calls = judge.cost.calls - before.calls
+    if text:
+        summary = (
+            f"{len(text.split())} words, {_calls(calls)}, "
+            f"{judge.cost.prompt_tokens - before.prompt_tokens:,} prompt · "
+            f"{judge.cost.completion_tokens - before.completion_tokens:,} completion tokens"
+        )
+    else:
+        # No note beside it: the stage carries the sentence, and each front end prints
+        # its own ``summary`` line from the finished report. A note as well would say
+        # the same thing twice in the same terminal.
+        summary = f"summary {judge_unavailable(calls, judge.detail, what=SUMMARY)}"
+    elapsed = time.monotonic() - began
+    emit(StageEnd(name=SUMMARISING, by=judge.name, summary=summary, elapsed=elapsed))
+    return replace(
+        report,
+        # ``""`` and ``None`` are different answers: nobody asked, and nobody
+        # answered. Only the second one is a state the run has to report.
+        summary=text,
+        # Named only when there is prose to attribute: a paragraph nobody wrote has
+        # no author, and a model named beside an empty summary would read as one.
+        summary_model=judge.name if text else None,
+        stages=(
+            *report.stages,
+            Stage(name=SUMMARISING, by=judge.name, summary=summary, elapsed=elapsed),
+        ),
+        api_calls=judge.cost.calls,
+        # A copy, not the client's own: ``JudgeCost`` is mutable and the client keeps
+        # adding to it for the next document, so an alias here would let a finished
+        # report's stated cost go on changing after the run that earned it was over.
+        judge_cost=replace(judge.cost),
+        # The extra call is part of what the run took; a footer that left it out
+        # would price the summary at nothing.
+        elapsed=time.monotonic() - started,
+    )
 
 
 # --- the verifying stage ----------------------------------------------------------
@@ -1090,7 +1202,7 @@ def _coverage(prepared: Prepared, engine: Engine) -> Coverage:
 def _models(embedder: Embedder | None, scorer: Scorer | None, engine: Engine) -> dict[str, str]:
     """What decided this run. ``NO_MODEL`` where none was loaded, never a name."""
     thresholds = engine.thresholds
-    return {
+    models = {
         "nli": NO_MODEL if scorer is None else scorer.name,
         "embedder": NO_MODEL if embedder is None else embedder.name,
         "device": engine.device,
@@ -1098,6 +1210,185 @@ def _models(embedder: Embedder | None, scorer: Scorer | None, engine: Engine) ->
             f"decide={thresholds.decide:g};high={thresholds.high:g};medium={thresholds.medium:g}"
         ),
     }
+    if engine.judge is not None:
+        # Only when one was asked. A ``NO_MODEL`` dash here would put a judge row in
+        # every report, and a run that consulted nobody has no judge to name.
+        models["judge"] = engine.judge.name
+    return models
+
+
+# --- the judging stage (spec section 9 step 8, section 11.1) ----------------------
+
+
+@dataclass(frozen=True)
+class _Judged:
+    """What the judging stage produced. The lists are new, never edited in place."""
+
+    results: list[ClaimResult]
+    findings: list[Finding]
+    stage: Stage
+    cost: JudgeCost
+    cancelled: bool
+
+
+def _escalates(result: ClaimResult) -> bool:
+    """Whether this verdict is the judge's business (spec section 9 step 8).
+
+    Three exclusions, each with a reason the product cannot do without:
+
+    * No passage, no judging. There is nothing to hold the claim against, and asking
+      a model to decide without one is exactly the assertion-without-evidence product
+      rule 1 forbids -- of the judge as much as of the pipeline.
+    * A numeric mismatch was decided by a rule that named both figures (spec section
+      10). It scores 1.0 and there is no uncertainty for a second opinion to resolve.
+    * Anything the models were confident about. The judge is an escape hatch for the
+      low band, not a second pass over the whole document (spec section 11: 2-4 calls
+      per paper, not one per claim).
+    """
+    verdict = result.verdict
+    if verdict.passage is None or verdict.reason.startswith(NUMERIC_REASON):
+        return False
+    return verdict.tier == "low" or verdict.label is Label.NEI
+
+
+def _judging(
+    engine: Engine,
+    results: list[ClaimResult],
+    findings: list[Finding],
+    *,
+    emit: Listener,
+    check: Callable[[], None],
+) -> _Judged:
+    """Ask the judge about the verdicts the models were least sure of.
+
+    Nothing here can change a verdict, a finding's kind, level or state: the opinion
+    is attached beside what the pipeline decided, and a disagreement becomes one more
+    line under the finding (spec section 11.1). That is the whole contract, and it is
+    why this stage runs after the verifying stage has already closed.
+    """
+    judge = engine.judge
+    if judge is None:  # pragma: no cover - the caller checks, this keeps mypy honest
+        raise ValueError("no judge on this engine")
+    began = time.monotonic()
+    emit(StageStart(name=JUDGING, by=judge.name))
+
+    escalated = [(index, result) for index, result in enumerate(results) if _escalates(result)]
+    opinions: dict[str, JudgeOpinion] = {}
+    fresh: dict[str, JudgeOpinion] = {}
+    keys: dict[str, tuple[str, str]] = {}
+    ask: list[JudgeItem] = []
+    for index, result in escalated:
+        ident = f"c{index}"
+        keys[ident] = (cache_mod.claim_hash(result.claim.text), result.source_id)
+        stored = (
+            None if engine.cache is None else engine.cache.get_judgement(*keys[ident], judge.name)
+        )
+        if stored is not None:
+            opinions[ident] = stored
+            continue
+        passage = result.verdict.passage
+        if passage is None:  # pragma: no cover - _escalates already refused these
+            continue
+        ask.append(
+            JudgeItem(
+                id=ident,
+                claim=result.claim.text,
+                passage=passage.text,
+                verdict=result.verdict.label,
+                tier=result.verdict.tier,
+            )
+        )
+
+    cancelled = False
+    if ask:
+
+        def on_batch(done: int, total: int) -> None:
+            emit(Progress(name=JUDGING, done=done, total=total))
+            check()
+
+        try:
+            judge.review(ask, on_batch=on_batch, into=fresh)
+        except Cancelled:
+            # The batches already paid for are kept: they are in ``fresh``, and the
+            # report they land in says of itself that it stopped (product rule 6).
+            cancelled = True
+    opinions.update(fresh)
+    if engine.cache is not None:
+        try:
+            for ident, opinion in fresh.items():
+                engine.cache.put_judgement(*keys[ident], judge.name, opinion)
+        except sqlite3.Error as exc:
+            # The cache is a speed-up, never a gate. A judgement that cannot be
+            # stored -- a source row the cascade already took, a file gone read-only
+            # -- costs the *next* run a call and nothing else: the opinion is
+            # attached to this report either way. The optional judge layer is the
+            # last thing in the tool allowed to end a run. The type is named and the
+            # message is not, for the same reason it is not elsewhere.
+            emit(Note(f"judgement not cached: {type(exc).__name__}"))
+
+    for note in judge.skipped:
+        emit(Note(note))
+    # ``ask`` guards the read: a run whose opinions all came out of the cache made
+    # no call at all, and a stale ``unavailable`` from an earlier document would
+    # report a provider as down that this run never even asked.
+    if ask and judge.unavailable:
+        # One sentence, every surface: the note (for a run watching events), the
+        # stage summary below (report, JSON and the terminal's stage row) and the
+        # markdown header, so no surface can make a provider that was down look like
+        # a document with nothing to escalate (product rule 6).
+        summary = f"judge {judge_unavailable(judge.cost.calls, judge.detail)}"
+        emit(Note(summary))
+    else:
+        summary = _judge_summary(len(opinions), len(results), judge.cost)
+
+    by_claim = {keys[ident]: opinion for ident, opinion in opinions.items()}
+    elapsed = time.monotonic() - began
+    emit(StageEnd(name=JUDGING, by=judge.name, summary=summary, elapsed=elapsed))
+    return _Judged(
+        results=[
+            replace(result, judge=opinions[f"c{index}"]) if f"c{index}" in opinions else result
+            for index, result in enumerate(results)
+        ],
+        findings=[_with_opinion(item, by_claim) for item in findings],
+        stage=Stage(name=JUDGING, by=judge.name, summary=summary, elapsed=elapsed),
+        cost=judge.cost,
+        cancelled=cancelled,
+    )
+
+
+def _with_opinion(item: Finding, by_claim: dict[tuple[str, str], JudgeOpinion]) -> Finding:
+    """The finding with the judge's opinion beside it, and nothing else changed.
+
+    ``kind``, ``level``, ``state`` and ``verdict`` are copied through untouched. A
+    disagreement earns one more detail line -- agreement does not, because a line
+    repeating the verdict above it says nothing the reader did not already read.
+    """
+    if item.claim is None or item.source_id is None:
+        return item
+    opinion = by_claim.get((cache_mod.claim_hash(item.claim.text), item.source_id))
+    if opinion is None:
+        return item
+    detail = item.detail
+    if item.verdict is not None and opinion.label is not item.verdict.label:
+        detail = (*detail, judge_detail(opinion))
+    return replace(item, judge=opinion, detail=detail)
+
+
+def _judge_summary(reviewed: int, total: int, cost: JudgeCost) -> str:
+    """``"12 of 118 verdicts reviewed, 3 calls, 18,402 prompt - 1,210 completion tokens"``.
+
+    Both numbers matter: how much of the document got a second opinion, and what that
+    opinion cost on a tier metered in tokens per minute (spec section 11).
+    """
+    return (
+        f"{reviewed} of {total} verdicts reviewed, {_calls(cost.calls)}, "
+        f"{cost.prompt_tokens:,} prompt \u00b7 {cost.completion_tokens:,} completion tokens"
+    )
+
+
+def _calls(count: int) -> str:
+    """``"1 call"`` / ``"3 calls"``: one spelling, wherever a call count is printed."""
+    return f"{count} call" + ("" if count == 1 else "s")
 
 
 def _ordered(item: Finding) -> tuple[int, int, int, str]:

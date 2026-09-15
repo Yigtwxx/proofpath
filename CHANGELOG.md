@@ -6,6 +6,52 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-15
+
+The judge layer: an opt-in LLM second opinion and an opt-in model-written summary.
+The default run still makes zero LLM calls, and nothing the model says can change a
+verdict. Live run on Groq in `docs/eval/2026-09-15-judge-live.md`.
+
+### Added
+- **`check --judge`** (`judge.py`, `verify.py`). After the local verdicts are final, the
+  `low`-tier ones — never a numeric mismatch, never a claim without a quoted passage —
+  go to the model in batches of up to 20 items (about 7k tokens), each with its claim and
+  passage. The opinion (`SUPPORTED | REFUTED | NEI` plus a one-sentence rationale) is
+  attached beside the verdict: a `= judge (groq openai/gpt-oss-120b): …` line under a
+  finding it disagrees with, a `judge` column in the markdown `## Checked` table, and
+  `judge` fields in the JSON. The local `Verdict`, the finding kind and every state are
+  untouched (spec §11.1). Opinions are cached in the new `judgements` table (schema v4,
+  additive; wiped with the verdicts when a source's text changes), so a re-run asks
+  nothing, and `model_id` is untouched, so toggling `--judge` never invalidates a verdict.
+- **`check --summarize`** and the TUI's **`/summarize`**: one extra call over the finished
+  markdown report, run after the report is final, off by default in both front-ends,
+  printed as `summary    (model-written, groq openai/gpt-oss-120b) …` and as
+  `## Summary (model-written, …)` in the file. `--summarize` alone is exactly one call.
+- **`JudgeClient`**: one adapter for Groq (default `openai/gpt-oss-120b`), Gemini and
+  Ollama over the OpenAI `chat/completions` shape; strict JSON-schema output with a
+  `json_object` fallback, `reasoning_effort=low` with a fallback for providers that
+  reject it, `Retry-After` on 429 (capped, accounted), exponential backoff on 5xx, then
+  `JudgeUnavailable`. The key comes from the environment or `.env`, never from config,
+  never appears in `repr`, errors or logs; provider bodies are never echoed. Prompts are
+  packaged template files (`proofpath/prompts/review.md`, `summarize.md`).
+- **Cost on every surface**: the `Judging` and `Summarising` stage lines carry calls and
+  prompt/completion tokens; the footer counts the calls; `Report.judge_cost` and
+  `models["judge"]` land in the JSON.
+- **An unanswered judge is reported, not hidden**: `judge unavailable after N calls
+  (HTTP 401 from …); local verdicts stand` in the stage line, the report header
+  (`judge status:` / `summary status:`), the JSON and an unsuppressed terminal line — a
+  `-q` or piped run cannot look like a judged-clean one. The SARIF log does not carry it.
+  The run never fails because of the judge.
+- Gemini prints its data-use warning once per run (spec §11).
+
+### Changed
+- `check --judge` / `--summarize` no longer exit with `arrives in v0.3`.
+- Cache schema **v4** (`judgements`); a v1 file still migrates through the whole chain.
+- The markdown `## Checked` table always carries a `judge` column; without `--judge` every
+  cell is `—`, so a v0.2 report and a v0.3 one differ by that column alone.
+- `--format json` gained `summary`, `summary_model`, `judge_cost` and per-result `judge`
+  fields; every one of them is `null` on a default run.
+
 ## [0.2.1] - 2026-09-15
 
 The TUI's second look. No behaviour change: every state word, every honesty sentence,

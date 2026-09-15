@@ -299,6 +299,19 @@ below are the original outline and stay as the scope statement.
 limit, and disabling the judge changes cost to zero without changing the report
 format. `--summarize` adds exactly one call and its absence changes nothing else.
 
+**Status (2026-09-15): released as v0.3.0.** Tasks 9.1–9.3 (`.superpowers/sdd/phase9/`,
+briefs in `2026-09-12-phases-9-10-plan.md`): `JudgeClient` with packaged prompts and cost
+accounting; `Judge` escalation (low tier with a passage; ≤ 20 items / ~7k tokens per
+call), the `judgements` cache (schema v4) and `check --judge`; `--summarize` and the TUI
+`/summarize`. Gates: 118 items pack into ≤ 6 calls at the 7k cap (unit test); a judge
+disabled run is byte-identical minus the judge fields with `api_calls == 0`;
+`--summarize` alone is exactly one call and leaves `results`/`findings` identical
+(tests). Live on Groq (`docs/eval/2026-09-15-judge-live.md`): 1 of 10 verdicts
+escalated, 1 call; the first summary attempt came back empty (`finish_reason=length`)
+and led to `reasoning_effort=low` plus larger budgets. The adapter table above (Ollama
+default, OpenRouter) was superseded by the 2026-09-11 decision: Groq default, Gemini and
+Ollama selectable.
+
 ---
 
 ## Phase 10 — Social provider (v0.4)

@@ -1,7 +1,8 @@
 """The persistent cache: one plain SQLite file under the user cache dir.
 
 Holds fetched source text (with a 7-day TTL), sentence chunks with their
-embeddings, verdicts keyed ``(claim_hash, source_id, model_id)`` and the two
+embeddings, verdicts keyed ``(claim_hash, source_id, model_id)``, the optional
+judge's opinions beside them, and the two
 network lookups a run makes before it fetches anything -- reference resolution and
 the retraction check -- so a re-run of the same document costs nothing. No
 extension, no server: any SQLite GUI can open the file (spec sections 5.1, 12, 16).
@@ -21,12 +22,13 @@ from typing import Any
 
 import numpy as np
 
+from proofpath.judge import JudgeOpinion
 from proofpath.models import Label, Passage, Tier, Verdict
 from proofpath.paths import cache_dir
 from proofpath.pipeline import CUT_DECIMALS, Thresholds
 from proofpath.resolve import Candidate, FieldMatch, ResolveResult, Retraction, State, strip_marker
 
-SCHEMA_VERSION = "3"
+SCHEMA_VERSION = "4"
 RAW_TEXT_TTL_DAYS = 7
 # A resolution is a statement about a published record, which does not change; the
 # month is there so a reference an index had not yet ingested is looked at again.
@@ -130,7 +132,28 @@ _LOOKUPS_DDL: tuple[str, ...] = (
 )
 _LOOKUPS_SCHEMA = ";\n".join(_LOOKUPS_DDL) + ";\n"
 
-_SCHEMA = _BASE_SCHEMA + _CHUNKS_SCHEMA + _LOOKUPS_SCHEMA
+# The optional judge's opinions, beside the verdicts and never instead of them (spec
+# section 11.1). Keyed by the judge model as well, so a run with another judge asks
+# again rather than reading back an opinion that model never gave. ``model_id`` is
+# deliberately absent: an opinion is about the claim and the passage, not about which
+# local NLI happened to escalate it, so toggling ``--judge`` cannot invalidate a
+# cached verdict and re-tuning the thresholds cannot invalidate a cached opinion.
+_JUDGEMENTS_DDL: tuple[str, ...] = (
+    """
+    CREATE TABLE IF NOT EXISTS judgements (
+        claim_hash  TEXT NOT NULL,
+        source_id   TEXT NOT NULL REFERENCES sources(source_id) ON DELETE CASCADE,
+        judge_model TEXT NOT NULL,       -- "groq openai/gpt-oss-120b"
+        label       TEXT NOT NULL,
+        rationale   TEXT NOT NULL,
+        created_at  TEXT NOT NULL,
+        PRIMARY KEY (claim_hash, source_id, judge_model)
+    )
+    """,
+)
+_JUDGEMENTS_SCHEMA = ";\n".join(_JUDGEMENTS_DDL) + ";\n"
+
+_SCHEMA = _BASE_SCHEMA + _CHUNKS_SCHEMA + _LOOKUPS_SCHEMA + _JUDGEMENTS_SCHEMA
 
 
 def _migrate_to_v2(conn: sqlite3.Connection) -> None:
@@ -156,7 +179,19 @@ def _migrate_to_v3(conn: sqlite3.Connection) -> None:
         conn.execute(statement)
 
 
-# One step per schema version, oldest first; Phase 9 appends its own.
+def _migrate_to_v4(conn: sqlite3.Connection) -> None:
+    """v3 -> v4: the ``judgements`` table.
+
+    Additive, like v3: nothing stored before v4 holds a second opinion, and the
+    verdicts are untouched on purpose -- their ``model_id`` says nothing about the
+    judge, so a file that gains this table hands back exactly the verdicts it held
+    before and a run with ``--judge`` costs no re-verification (spec section 11.1).
+    """
+    for statement in _JUDGEMENTS_DDL:
+        conn.execute(statement)
+
+
+# One step per schema version, oldest first.
 #
 # Invariant, on which the self-healing in ``Cache.__init__`` rests: every step runs
 # inside the one transaction that also records the new version, so a step must issue
@@ -166,6 +201,7 @@ def _migrate_to_v3(conn: sqlite3.Connection) -> None:
 _MIGRATIONS: tuple[tuple[str, Callable[[sqlite3.Connection], None]], ...] = (
     ("2", _migrate_to_v2),
     ("3", _migrate_to_v3),
+    ("4", _migrate_to_v4),
 )
 
 
@@ -473,6 +509,10 @@ class Cache:
             }
             if digests - {text_sha256}:
                 self._conn.execute("DELETE FROM verdicts WHERE source_id = ?", (source_id,))
+                # The judge quoted the same passages, so its opinions go the same way:
+                # a second opinion about text the source no longer serves is evidence
+                # nobody can check (product rule 1).
+                self._conn.execute("DELETE FROM judgements WHERE source_id = ?", (source_id,))
             self._conn.execute(
                 "DELETE FROM chunks WHERE source_id = ? AND embed_model = ?",
                 (source_id, embed_model),
@@ -552,6 +592,53 @@ class Cache:
             None if passage_text is None else Passage(passage_text, source_id, int(passage_index))
         )
         return Verdict(Label(label), float(score), _tier(tier), passage, reason=reason)
+
+    # --- judgements ---------------------------------------------------------------
+
+    def put_judgement(
+        self,
+        claim_hash_: str,
+        source_id: str,
+        judge_model: str,
+        opinion: JudgeOpinion,
+        *,
+        now: datetime | None = None,
+    ) -> None:
+        """Store one judge opinion. Re-asking the same judge replaces what it said."""
+        with self._conn:
+            self._conn.execute(
+                "INSERT INTO judgements(claim_hash, source_id, judge_model, label, rationale, "
+                "created_at) VALUES (?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(claim_hash, source_id, judge_model) DO UPDATE SET "
+                "label = excluded.label, rationale = excluded.rationale, "
+                "created_at = excluded.created_at",
+                (
+                    claim_hash_,
+                    source_id,
+                    judge_model,
+                    opinion.label.value,
+                    opinion.rationale,
+                    _iso(now or _now()),
+                ),
+            )
+
+    def get_judgement(
+        self, claim_hash_: str, source_id: str, judge_model: str
+    ) -> JudgeOpinion | None:
+        """What this judge said about this claim and source, or ``None`` if unasked.
+
+        No TTL: an opinion is about a claim and a passage, both of which are fixed.
+        The passage changing is what retires it, and ``put_chunks`` does that.
+        """
+        row = self._conn.execute(
+            "SELECT label, rationale FROM judgements "
+            "WHERE claim_hash = ? AND source_id = ? AND judge_model = ?",
+            (claim_hash_, source_id, judge_model),
+        ).fetchone()
+        if row is None:
+            return None
+        label, rationale = row
+        return JudgeOpinion(label=Label(label), rationale=str(rationale), model=judge_model)
 
     # --- resolutions and retractions ---------------------------------------------
 

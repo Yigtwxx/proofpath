@@ -469,13 +469,27 @@ the judge enabled. With Ollama there is no wait at all.
 
 **Provider (decided 2026-09-11).** Default is Groq `openai/gpt-oss-120b`: free
 without a card, no training on submitted data, strict JSON schema output, but an
-8K tokens-per-minute cap that forces batches under ~7k tokens and roughly one call
-per minute. Gemini 3.8 Flash is selectable but Google trains on free-tier prompts
+8K tokens-per-minute cap that forces small batches (as built: 3,500 prompt tokens plus
+a 4,096-token answer budget) and roughly one call per minute. Gemini 3.8 Flash is selectable but Google trains on free-tier prompts
 outside the EEA/UK/CH, so choosing it prints a data-use warning. Ollama is the
 offline option. All three speak the OpenAI ``chat/completions`` shape, so one
 adapter covers them. The API key is read from an environment variable or a
 ``.env`` file, never written to config and never printed. Survey:
 ``docs/research/2026-09-11-free-llm-api-tiers.md``.
+
+**As built (v0.3.0).** The escalation set is the `low` tier plus `NEI` verdicts that
+carry a passage; a numeric mismatch (rule-decided) and any result without a passage are
+never sent (rule 1 binds the judge too). `openai/gpt-oss-120b` is a reasoning model, so
+requests carry `reasoning_effort=low` (dropped on a 400 from providers that reject it)
+and budgets of 4096 tokens per review batch and 1500 for the summary; the first live run
+with a 400-token summary budget came back empty with `finish_reason=length`. The batch
+cap counts the prompt only, so it is set to 3,500 tokens: a full batch plus its answer
+budget stays under the 8K-per-minute tier. The `NEI`-with-a-passage half of the
+escalation rule is currently unreachable — the pipeline never attaches a passage to an
+`NEI` (OPEN-ITEMS 14.1) — so in practice the judge sees the `low` tier only. A judge
+that does not answer is not a §15 state — the verdicts stand — but it is reported on the
+stage line, the `judge status:` / `summary status:` header lines, the JSON and an
+unsuppressed terminal line; `-q` cannot hide it. The SARIF log carries findings only.
 
 ## 12. Cross-platform constraints
 
@@ -929,8 +943,12 @@ pairing at 0.940 on its hand set (`docs/eval/2026-09-12-pairing-author-year.md`)
 beyond the plan, a resolution and retraction cache (warm re-run 1.35 s,
 `docs/eval/2026-09-15-v0.2-live.md`).
 
-**v0.3 — judge layer.** Opt-in LLM second opinion, Ollama default, OpenRouter and
-Gemini adapters, batching and cost reporting.
+**v0.3 — judge layer.** Opt-in LLM second opinion (Groq `openai/gpt-oss-120b` default,
+Gemini and Ollama selectable), batching and cost reporting, `--summarize`.
+*Shipped 2026-09-15 as v0.3.0:* `check --judge` escalates the `low`-tier verdicts with a
+passage in batches of ≤ 20 / ~7k tokens and attaches the opinion beside the verdict;
+judgements cached in schema v4; `--summarize` and the TUI `/summarize` as one extra call;
+an unanswered judge reported on every surface but SARIF. Live run: `docs/eval/2026-09-15-judge-live.md`.
 
 **v0.4 — social provider.** Bluesky and Hacker News first, Reddit via user-supplied
 OAuth app (missing credentials are reported, never silently skipped), Mastodon

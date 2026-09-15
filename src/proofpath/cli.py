@@ -90,6 +90,11 @@ def _fail(out: ui.Ui, exc: Exception) -> typer.Exit:
     return typer.Exit(EXIT_ERROR)
 
 
+#: What ``--summarize`` says when no judge can be built. It is one call over a report
+#: that is already final (spec section 11.1), but it is still a call to a provider.
+SUMMARIZE_NEEDS_JUDGE = "--summarize needs --judge or a configured judge"
+
+
 def _reject_sarif(out: ui.Ui, fmt: Format) -> None:
     """``sarif`` parses wherever ``Format`` does, but a SARIF log is a *document's*
     findings, so only ``check`` emits one. The other verbs say so rather than quietly
@@ -517,13 +522,14 @@ def check(
     if allow_browser and no_browser:
         ui.error(out, "--allow-browser and --no-browser cannot be combined.")
         raise typer.Exit(EXIT_ERROR)
-    for flag, asked in (("--judge", judge), ("--summarize", summarize)):
-        if asked:
-            ui.error(out, f"{flag} arrives in v0.3")
-            raise typer.Exit(EXIT_ERROR)
-
     source, name = _check_target(out, target)
     config = _load_config(out)
+    # ``--summarize`` is a judge call too (spec section 11.1), so it builds the same
+    # judge ``--judge`` builds and stops here for the same missing key -- saying which
+    # flag asked for it, because the user typed the other one.
+    second_opinion = None
+    if judge or summarize:
+        second_opinion = _build_judge(out, config, asked_by="" if judge else SUMMARIZE_NEEDS_JUDGE)
     override = True if allow_browser else False if no_browser else None
     structured = fmt is not Format.TEXT
     # Under --format json or sarif stdout carries one document and nothing else, so
@@ -546,10 +552,21 @@ def check(
                 interactive=cfg.is_interactive(),  # rule 4: never sniffed further down
                 browser=override,
                 no_cache=no_cache,
+                judge=second_opinion,
+                # ``--summarize`` on its own is one call over the finished report and
+                # nothing else; the escalation stage is what ``--judge`` buys.
+                escalate=judge,
             ) as engine,
             _interruptible(cancel),
         ):
-            report = verify_mod.verify(source, engine, name=name, on_event=on_event, cancel=cancel)
+            report = verify_mod.verify(
+                source,
+                engine,
+                name=name,
+                summarize=summarize,
+                on_event=on_event,
+                cancel=cancel,
+            )
     except (KeyboardInterrupt, events.Cancelled) as exc:
         # A stopped run is incomplete, not wrong (product rule 6): whatever it did
         # decide is still printed, and the footer says the run was cancelled. A Ctrl-C
@@ -586,6 +603,22 @@ def check(
         for item in report_mod.render_diagnostics(report):
             ui.diagnostic(out, item)
         ui.blank(out)
+        unanswered = report_mod.judge_unavailable_line(report)
+        if unanswered is not None:
+            # Same rule as the ``summary`` line below: the stage row and the note are
+            # both dropped under ``-q``, so without this a text run whose provider was
+            # down reads exactly like one with nothing to escalate (rules 2 and 6).
+            ui.kv(out, "judge", unanswered)
+        if report.summary:
+            ui.summary(out, report.summary, report.models.get("judge", ""))
+        else:
+            unwritten = report_mod.summary_unavailable(report)
+            if unwritten is not None:
+                # Not ``ui.summary`` and not a note: both are dropped under ``-q``, and
+                # a summary that was asked for and never came is a state of the run, not
+                # a nicety (product rules 2 and 6). An empty ``report.summary`` prints
+                # nothing on its own, so this line is the only thing that says so.
+                ui.kv(out, "summary", unwritten)
         ui.footer(out, report_mod.render_footer(report, written=written))
     # Everything the run had to say is out, and the engine — with the ONNX sessions
     # it owned — was closed on the way out of the ``with`` block above. Flushing here
@@ -594,6 +627,27 @@ def check(
     _flush_streams()
     # A cancelled run is not a verdict on the document: 2 says the tool stopped early.
     raise typer.Exit(EXIT_ERROR if report.cancelled else report.exit_code())
+
+
+def _build_judge(out: ui.Ui, config: cfg.Config, *, asked_by: str = "") -> judge_mod.Judge:
+    """The opt-in second opinion, or exit 2 saying which key is missing.
+
+    A judge the run cannot build is the tool failing, not a verdict on the document:
+    the run stops here rather than quietly checking the paper without the layer it
+    was told to use. ``asked_by`` names the flag that wanted the judge when it is not
+    ``--judge`` itself, so the message answers the flag the user actually typed.
+    """
+    key = judge_mod.resolve_api_key(config.judge.api_key_env)
+    if config.judge.api_key_env and key is None:
+        missing = (
+            f"{config.judge.api_key_env} is not set (put it in .env; see `proofpath config check`)"
+        )
+        raise _fail(out, cfg.ConfigError(f"{asked_by}: {missing}" if asked_by else missing))
+    if config.judge.provider == "gemini":
+        # Said once, before anything is sent, and on stderr so --format json keeps
+        # one document on stdout (spec section 11).
+        ui.hint(out, judge_mod.GEMINI_DATA_USE, err=True)
+    return judge_mod.Judge(judge_mod.JudgeClient(config.judge, key))
 
 
 def _flush_streams() -> None:

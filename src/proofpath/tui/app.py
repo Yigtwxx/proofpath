@@ -49,6 +49,8 @@ from proofpath import __version__, device, ui
 from proofpath.browser import Answer
 from proofpath.config import Config, ConfigError, load_config
 from proofpath.events import Event
+from proofpath.judge import Judge, JudgeClient, JudgeError, resolve_api_key
+from proofpath.report import Report, render_markdown, summary_silence
 from proofpath.tui import commands, pet
 from proofpath.tui.runs import EngineFactory as RunsEngineFactory
 from proofpath.tui.runs import Run, Scheduler
@@ -82,8 +84,19 @@ DEFAULT_PLACEHOLDER = "paste a file path, a URL, or a claim"
 #: The CLI verbs the TUI mirrors (spec section 13.3): each one calls the same
 #: :mod:`proofpath.commands` function ``cli.py`` calls, on a worker thread.
 MIRRORED = ("resolve", "fetch", "config", "cache")
-#: ``/summarize`` is the one verb that is still nothing but a promise (spec 13.1).
-V03_NOTE = "arrives in v0.3"
+#: What ``/summarize`` says when no judge can be built from the config and the
+#: environment. It is one call over a finished report (spec section 11.1), but it is
+#: still a call, so it needs a provider and a key like every other one.
+NO_JUDGE_NOTE = "configure a judge first (`/config set judge.provider ...`, key in .env)"
+#: What ``/summarize`` says before anything has finished. A run still going, or one
+#: that stopped early, has no finished report to summarise (product rule 2).
+NOTHING_TO_SUMMARIZE = "nothing to summarize yet: finish a /check first"
+#: What a second ``/summarize`` over the same run says. One run gets one paragraph
+#: (spec section 11.1), and a second line would read as a second opinion about a
+#: report that has not changed -- besides costing another call nobody asked for.
+ALREADY_SUMMARISED = "already summarised: this run has its one model-written summary"
+#: The same, while the first call is still out.
+SUMMARY_IN_PROGRESS = "summary in progress: one call is already out for this run"
 
 #: Which verbs hold the bar is the parser's decision, not this module's; it is
 #: re-exported here because the app is where the mode is entered and left.
@@ -115,6 +128,8 @@ class SchedulerLike(Protocol):
     @property
     def runs(self) -> tuple[Run, ...]: ...
 
+    def last_done(self) -> Run | None: ...
+
     def submit(self, target: str, *, command: str) -> Run: ...
 
     def cancel(self, run_id: int) -> bool: ...
@@ -123,6 +138,9 @@ class SchedulerLike(Protocol):
 
 
 SchedulerFactory = Callable[..., SchedulerLike]
+#: Built once per ``/summarize``, so a key added to ``.env`` mid-session is picked up
+#: and nothing holds a socket open between summaries.
+JudgeFactory = Callable[[], Judge]
 #: Re-exported, never redeclared: the scheduler calls the factory with the run it is
 #: building for, and a second spelling here would let a zero-argument factory type-check
 #: against an app that then hands it a ``Run`` at runtime.
@@ -188,6 +206,7 @@ class ProofpathApp(App[None]):
         *,
         engine_factory: EngineFactory | None = None,
         scheduler_factory: SchedulerFactory | None = None,
+        judge_factory: JudgeFactory | None = None,
         theme: Theme = PLAIN,
     ) -> None:
         super().__init__()
@@ -198,8 +217,12 @@ class ProofpathApp(App[None]):
         self._theme = theme
         self._engine_factory = engine_factory or self._default_engine
         self._scheduler_factory: SchedulerFactory = scheduler_factory or Scheduler
+        self._judge_factory: JudgeFactory = judge_factory or self._default_judge
         self._scheduler: SchedulerLike | None = None
         self._blocks: dict[int, RunBlock] = {}
+        #: Runs with a summary call still out, so a second ``/summarize`` cannot put
+        #: two workers on the same report before the first has a line to show for it.
+        self._summarising: set[int] = set()
         #: The verb whose argument the bar is waiting for, or ``None``.
         self.awaiting: str | None = None
         #: The section 7.1 questions waiting for an answer, by the id of whatever
@@ -231,6 +254,21 @@ class ProofpathApp(App[None]):
             no_cache=False,
             prompt=self._prompt_for(run.id),
         )
+
+    def _default_judge(self) -> Judge:
+        """The judge ``/summarize`` calls, from the config and the environment.
+
+        Built per summary rather than per session: the config is re-read first, so a
+        provider switched with ``/config set`` or a key just added to ``.env`` takes
+        effect without restarting the app. A missing key raises, and the caller says
+        what to do about it -- the summary is optional, the session is not.
+        """
+        self._reload_config()
+        settings = self._config.judge
+        key = resolve_api_key(settings.api_key_env)
+        if settings.api_key_env and key is None:
+            raise JudgeError(NO_JUDGE_NOTE)
+        return Judge(JudgeClient(settings, key))
 
     # --- the section 7.1 prompt, inline ---------------------------------------------
 
@@ -484,7 +522,7 @@ class ProofpathApp(App[None]):
         elif command.verb == "help":
             self._help()
         elif command.verb == "summarize":
-            self._note(f"/summarize {V03_NOTE}")
+            self._summarize()
         elif command.verb == "quit":
             await self._quit()
         elif command.verb in MIRRORED:
@@ -532,6 +570,69 @@ class ProofpathApp(App[None]):
             # The file on disk has just changed; the session must not keep deciding by
             # the config it was launched with (``permissions.network`` is on the banner).
             self._reload_config()
+        self._scroll_log()
+
+    # --- the summary ------------------------------------------------------------------
+
+    def _summarize(self) -> None:
+        """One model-written paragraph about the last finished run (spec section 11.1).
+
+        Not a mirrored verb and not a block of its own: it is *that run's* summary, so
+        it appends one line to that run's block. The report it reads is already final,
+        which is the whole reason this is safe -- nothing it comes back with can reach
+        a verdict, because every verdict was settled before it was asked.
+        """
+        run = self._scheduler.last_done() if self._scheduler is not None else None
+        block = self._blocks.get(run.id) if run is not None else None
+        if run is None or run.report is None or block is None:
+            self._note(NOTHING_TO_SUMMARIZE)
+            return
+        if run.id in self._summarising:
+            self._note(SUMMARY_IN_PROGRESS)
+            return
+        if block.summarised:
+            self._note(ALREADY_SUMMARISED)
+            return
+        try:
+            judge = self._judge_factory()
+        except (JudgeError, ConfigError) as exc:
+            # The reason is not printed: a provider's own message can carry the key.
+            self._note(NO_JUDGE_NOTE)
+            self.log(f"/summarize: {type(exc).__name__}")
+            return
+        self._summarising.add(run.id)
+        self.run_worker(self._run_summary(run.id, run.report, block, judge), name="/summarize")
+
+    async def _run_summary(
+        self, run_id: int, report: Report, block: RunBlock, judge: Judge
+    ) -> None:
+        """The one call, off the loop, and the one line it earns.
+
+        Trouble never reaches the loop and never leaves the block empty: a provider
+        that would not answer is reported in the line the paragraph would have
+        occupied, because a blank there would read as a report with nothing to add
+        (product rule 2).
+        """
+        try:
+            text = await asyncio.to_thread(judge.summarize, render_markdown(report))
+            detail = judge.detail
+        except Exception as exc:
+            text, detail = "", f"{type(exc).__name__} from the judge"
+        finally:
+            judge.close()
+            self._summarising.discard(run_id)
+        if text:
+            label = Text(
+                f"(model-written, {judge.name}) ",
+                style=self._theme.tone("muted") if self._out.color else "",
+            )
+            line = ui.kv_text(self._out, "summary", Text.assemble(label, text))
+        else:
+            # The CLI's own builder, so the mounted line is the sentence the one-shot
+            # run prints (spec 13.3). It counts no calls: one request was made, and
+            # ``cost.calls`` counts answers.
+            line = ui.kv_text(self._out, "summary", summary_silence(detail))
+        block.add_summary(line)
         self._scroll_log()
 
     def _allow(self, arg: str) -> None:

@@ -9,6 +9,7 @@ uses, kept here in their smallest form so the two files can move independently.
 from __future__ import annotations
 
 import json
+import re
 import signal
 import threading
 from collections.abc import Callable, Sequence
@@ -19,12 +20,14 @@ import pytest
 from typer.testing import CliRunner
 
 from proofpath import cli as cli_mod
+from proofpath import judge as judge_mod
 from proofpath import verify as verify_mod
 from proofpath.browser import ConsentGate
 from proofpath.cli import _interruptible, app
 from proofpath.config import Config
 from proofpath.events import Cancelled
 from proofpath.fetch import Fetched, FetchStats, Outcome
+from proofpath.judge import Completion, Judge, JudgeCost, JudgeUnavailable
 from proofpath.oa import Attempt, Evidence, Location
 from proofpath.resolve import Candidate, ResolveResult, Retraction, State
 from proofpath.retrieval import Embedder
@@ -183,6 +186,15 @@ def install(monkeypatch: pytest.MonkeyPatch, engine: Engine | None = None) -> di
     def fake_default(config: Config, **kwargs: Any) -> Engine:
         seen["config"] = config
         seen.update(kwargs)
+        # ``escalate`` decides whether the judging stage may spend the judge; the
+        # real ``Engine.default`` puts it on the engine, so the stub does too.
+        prepared.escalate = kwargs.get("escalate", True)
+        judge = kwargs.get("judge")
+        if judge is not None:
+            # The real ``Engine.default`` takes ownership of the judge it is handed.
+            # The stub engine is not the one the CLI built, so it closes it instead --
+            # otherwise the socket behind it outlives the command.
+            prepared._closers.append(judge.close)
         return prepared
 
     monkeypatch.setattr(verify_mod.Engine, "default", staticmethod(fake_default))
@@ -345,14 +357,6 @@ def test_an_unknown_format_is_a_usage_error(monkeypatch: pytest.MonkeyPatch) -> 
     install(monkeypatch)
     result = runner.invoke(app, ["check", "-", "--format", "xml"], input=draft(CLEAN_BODY))
     assert result.exit_code == 2
-
-
-@pytest.mark.parametrize("flag", ["--judge", "--summarize"])
-def test_judge_and_summarize_arrive_in_v0_3(flag: str, monkeypatch: pytest.MonkeyPatch) -> None:
-    install(monkeypatch)
-    result = runner.invoke(app, ["check", "-", flag], input=draft(CLEAN_BODY))
-    assert result.exit_code == 2
-    assert f"error: {flag} arrives in v0.3" in result.output
 
 
 def test_allow_browser_and_no_browser_cannot_be_combined(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -828,3 +832,391 @@ def test_a_document_with_markers_and_no_bibliography_does_not_look_clean(
     assert "no bibliography was found; 1 citation marker could not be checked" in result.stdout
     assert "coverage is weak" not in result.stdout
     assert "no bibliography was found" in (tmp_path / "report.md").read_text(encoding="utf-8")
+
+
+# --- --judge -------------------------------------------------------------------------
+
+
+class FakeJudgeClient:
+    """``JudgeClient`` without a socket: one agreeing answer per id it is shown."""
+
+    provider = "fake"
+    model = "judge-1"
+
+    def __init__(self) -> None:
+        self.cost = JudgeCost(model=self.model)
+
+    def complete(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        json_schema: dict[str, object] | None = None,
+        max_tokens: int = 1024,
+        temperature: float = 0.0,
+        reasoning_effort: str | None = None,
+    ) -> Completion:
+        ids = re.findall(r"id: (\S+)", messages[-1]["content"])
+        text = json.dumps(
+            {
+                "opinions": [
+                    {"id": i, "label": "NEI", "rationale": "the passage is silent"} for i in ids
+                ]
+            }
+        )
+        self.cost.calls += 1
+        self.cost.prompt_tokens += 420
+        self.cost.completion_tokens += 40
+        return Completion(text=text, prompt_tokens=420, completion_tokens=40, model=self.model)
+
+    def close(self) -> None:
+        return None
+
+
+# Between ``decide`` (0.45) and ``medium`` (0.457948): decided, but only just, which
+# is the band the judge is asked about (spec section 9 step 8).
+LOW_ROW = (0.02, 0.455, 0.525)
+
+
+def test_judge_without_a_key_stops_before_the_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Exit 2: the tool could not do what it was told, which is not a finding."""
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    seen = install(monkeypatch)
+    result = runner.invoke(app, ["check", str(write(tmp_path, CLEAN_BODY)), "--judge"])
+
+    assert result.exit_code == 2
+    assert "error: GROQ_API_KEY is not set" in result.output
+    assert "proofpath config check" in result.output
+    assert seen == {}  # no engine was built, so no model was loaded
+
+
+def test_judge_builds_a_judge_and_the_report_counts_its_calls(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("GROQ_API_KEY", "gsk_not_a_real_key")
+    client = FakeJudgeClient()
+    engine = built_engine(scorer=TableScorer({SUPPORTING: LOW_ROW}))
+    engine.judge = Judge(client)  # type: ignore[arg-type]
+    install(monkeypatch, engine)
+    result = runner.invoke(
+        app, ["check", str(write(tmp_path, CLEAN_BODY)), "--judge", "--format", "json"]
+    )
+
+    assert result.exit_code == 1, result.output  # a low-tier REFUTED is a finding
+    payload = json.loads(result.stdout)
+    assert payload["api_calls"] == 1
+    assert payload["judge_cost"]["prompt_tokens"] == 420
+    assert payload["models"]["judge"] == "fake judge-1"
+    (judged,) = [item for item in payload["results"] if item["judge"] is not None]
+    assert judged["judge"]["label"] == "NEI"
+    # The judge never moved the verdict it disagreed with (spec section 11.1).
+    assert judged["verdict"]["label"] == "REFUTED"
+    assert "gsk_not_a_real_key" not in result.output
+
+
+class DownJudgeClient(FakeJudgeClient):
+    """A provider that answers nothing at all -- a wrong key, or a tier that is out."""
+
+    def complete(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        json_schema: dict[str, object] | None = None,
+        max_tokens: int = 1024,
+        temperature: float = 0.0,
+        reasoning_effort: str | None = None,
+    ) -> Completion:
+        raise JudgeUnavailable("HTTP 401 from https://api.test/chat/completions")
+
+
+def test_a_quiet_run_still_says_the_judge_never_answered(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``-q`` suppresses the note and the stage row, so the summary the report keeps
+    is the only thing left to tell a provider that was down from a document with
+    nothing to escalate (product rules 2 and 6)."""
+    monkeypatch.setenv("GROQ_API_KEY", "gsk_not_a_real_key")
+    engine = built_engine(scorer=TableScorer({SUPPORTING: LOW_ROW}))
+    engine.judge = Judge(DownJudgeClient())  # type: ignore[arg-type]
+    install(monkeypatch, engine)
+    result = runner.invoke(
+        app, ["-q", "check", str(write(tmp_path, CLEAN_BODY)), "--judge", "--format", "json"]
+    )
+
+    payload = json.loads(result.stdout)
+    assert payload["stages"][-1]["summary"] == (
+        "judge unavailable after 0 calls "
+        "(HTTP 401 from https://api.test/chat/completions); local verdicts stand"
+    )
+    assert payload["api_calls"] == 0
+    assert all(item["judge"] is None for item in payload["results"])
+
+
+def test_a_quiet_text_run_prints_the_judge_line_the_stage_row_would_have_carried(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``ui.stage_row`` and ``ui.note`` are both dropped under ``-q``, so a text run
+    whose provider was down would otherwise say nothing at all about it -- reading
+    exactly like a run with nothing to escalate (product rules 2 and 6). It mirrors
+    the ``summary`` line, which is unsuppressible for the same reason."""
+    monkeypatch.setenv("GROQ_API_KEY", "gsk_not_a_real_key")
+    engine = built_engine(scorer=TableScorer({SUPPORTING: LOW_ROW}))
+    engine.judge = Judge(DownJudgeClient())  # type: ignore[arg-type]
+    install(monkeypatch, engine)
+    written = tmp_path / "report.md"
+    result = runner.invoke(
+        app, ["-q", "check", str(write(tmp_path, CLEAN_BODY)), "--judge", "--out", str(written)]
+    )
+
+    assert (
+        f"judge      judge unavailable after 0 calls ({DOWN_DETAIL}); local verdicts stand"
+        in result.output
+    )
+    # The same sentence the markdown header carries, so neither surface invents one.
+    text = written.read_text(encoding="utf-8")
+    assert (
+        f"- judge status: unavailable after 0 calls ({DOWN_DETAIL}); local verdicts stand" in text
+    )
+
+
+def test_a_judge_that_answered_gets_no_unavailable_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The line is a state of the run, not a header: a judge that answered has none."""
+    monkeypatch.setenv("GROQ_API_KEY", "gsk_not_a_real_key")
+    engine = built_engine(scorer=TableScorer({SUPPORTING: LOW_ROW}))
+    engine.judge = Judge(FakeJudgeClient())  # type: ignore[arg-type]
+    install(monkeypatch, engine)
+    result = runner.invoke(
+        app,
+        [
+            "-q",
+            "check",
+            str(write(tmp_path, CLEAN_BODY)),
+            "--judge",
+            "--out",
+            str(tmp_path / "r.md"),
+        ],
+    )
+
+    assert "judge unavailable" not in result.output
+
+
+def test_without_judge_the_json_report_has_no_judge_anywhere(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    install(monkeypatch, built_engine(scorer=TableScorer({SUPPORTING: LOW_ROW})))
+    result = runner.invoke(app, ["check", str(write(tmp_path, CLEAN_BODY)), "--format", "json"])
+
+    payload = json.loads(result.stdout)
+    assert payload["api_calls"] == 0
+    assert payload["judge_cost"] is None
+    assert "judge" not in payload["models"]
+    assert all(item["judge"] is None for item in payload["results"])
+
+
+def test_choosing_gemini_says_so_once_before_the_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Spec section 11: Google trains on free-tier prompts, so the run says so."""
+    monkeypatch.setenv("GEMINI_API_KEY", "not_a_real_key")
+    (tmp_path / "conf").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "conf" / "config.toml").write_text(
+        '[judge]\nprovider = "gemini"\nmodel = "gemini-3.8-flash"\n'
+        'base_url = "https://generativelanguage.googleapis.com/v1beta/openai"\n'
+        'api_key_env = "GEMINI_API_KEY"\n',
+        encoding="utf-8",
+    )
+    client = FakeJudgeClient()
+    engine = built_engine()
+    engine.judge = Judge(client)  # type: ignore[arg-type]
+    install(monkeypatch, engine)
+    result = runner.invoke(app, ["check", str(write(tmp_path, CLEAN_BODY)), "--judge"])
+
+    assert result.exit_code == 0, result.output
+    assert result.output.count(judge_mod.GEMINI_DATA_USE) == 1
+
+
+# --- --summarize ---------------------------------------------------------------------
+
+
+class SummarisingJudgeClient(FakeJudgeClient):
+    """Reviews as ``FakeJudgeClient`` does, and writes prose when asked for prose.
+
+    The summary call is the one that carries no JSON schema.
+    """
+
+    PARAGRAPH = "Three references do not say this."
+
+    def complete(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        json_schema: dict[str, object] | None = None,
+        max_tokens: int = 1024,
+        temperature: float = 0.0,
+        reasoning_effort: str | None = None,
+    ) -> Completion:
+        if json_schema is not None:
+            return super().complete(
+                messages,
+                json_schema=json_schema,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                reasoning_effort=reasoning_effort,
+            )
+        self.cost.calls += 1
+        self.cost.prompt_tokens += 900
+        self.cost.completion_tokens += 30
+        return Completion(
+            text=self.PARAGRAPH, prompt_tokens=900, completion_tokens=30, model=self.model
+        )
+
+
+def summarising_engine() -> Engine:
+    engine = built_engine(scorer=TableScorer({SUPPORTING: LOW_ROW}))
+    engine.judge = Judge(SummarisingJudgeClient())  # type: ignore[arg-type]
+    return engine
+
+
+def test_summarize_without_a_key_stops_before_the_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A summary is a judge call too, so it needs the provider ``--judge`` needs."""
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    seen = install(monkeypatch)
+    result = runner.invoke(app, ["check", str(write(tmp_path, CLEAN_BODY)), "--summarize"])
+
+    assert result.exit_code == 2
+    assert "error: --summarize needs --judge or a configured judge" in result.output
+    assert "GROQ_API_KEY is not set" in result.output
+    assert seen == {}  # no engine was built, so no model was loaded
+
+
+def test_summarize_alone_costs_one_call_and_never_escalates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Spec section 11.1: the summary adds exactly one call. Escalation is --judge's."""
+    monkeypatch.setenv("GROQ_API_KEY", "gsk_not_a_real_key")
+    seen = install(monkeypatch, summarising_engine())
+    result = runner.invoke(app, ["check", str(write(tmp_path, CLEAN_BODY)), "--summarize"])
+
+    assert seen["escalate"] is False
+    assert f"summary    (model-written, fake judge-1) {SummarisingJudgeClient.PARAGRAPH}" in (
+        result.output
+    )
+    assert "1 API calls" in result.output
+    assert "gsk_not_a_real_key" not in result.output
+
+
+def test_judge_and_summarize_together_escalate_and_then_summarise(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("GROQ_API_KEY", "gsk_not_a_real_key")
+    seen = install(monkeypatch, summarising_engine())
+    result = runner.invoke(
+        app,
+        ["check", str(write(tmp_path, CLEAN_BODY)), "--judge", "--summarize", "--format", "json"],
+    )
+
+    assert seen["escalate"] is True
+    payload = json.loads(result.stdout)
+    assert payload["summary"] == SummarisingJudgeClient.PARAGRAPH
+    assert payload["api_calls"] == 2
+    assert payload["stages"][-1]["name"] == "Summarising"
+
+
+def test_without_summarize_the_report_carries_no_summary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("GROQ_API_KEY", "gsk_not_a_real_key")
+    install(monkeypatch, summarising_engine())
+    result = runner.invoke(
+        app, ["check", str(write(tmp_path, CLEAN_BODY)), "--judge", "--format", "json"]
+    )
+
+    payload = json.loads(result.stdout)
+    assert payload["summary"] is None
+    assert payload["api_calls"] == 1
+    assert "model-written" not in result.output
+
+
+def test_a_quiet_run_drops_the_summary_line_but_the_report_keeps_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``-q`` keeps findings and drops the rest, and a summary is not a finding."""
+    monkeypatch.setenv("GROQ_API_KEY", "gsk_not_a_real_key")
+    install(monkeypatch, summarising_engine())
+    written = tmp_path / "report.md"
+    result = runner.invoke(
+        app, ["-q", "check", str(write(tmp_path, CLEAN_BODY)), "--summarize", "--out", str(written)]
+    )
+
+    assert "model-written" not in result.stdout
+    text = written.read_text(encoding="utf-8")
+    assert "## Summary (model-written, fake judge-1)" in text
+    assert SummarisingJudgeClient.PARAGRAPH in text
+
+
+def test_a_summary_the_provider_would_not_write_is_reported_in_the_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Product rule 2: a silent provider must not read as a report with nothing to add."""
+    monkeypatch.setenv("GROQ_API_KEY", "gsk_not_a_real_key")
+    engine = built_engine(scorer=TableScorer({SUPPORTING: LOW_ROW}))
+    engine.judge = Judge(DownJudgeClient())  # type: ignore[arg-type]
+    install(monkeypatch, engine)
+    result = runner.invoke(
+        app, ["check", str(write(tmp_path, CLEAN_BODY)), "--summarize", "--format", "json"]
+    )
+
+    payload = json.loads(result.stdout)
+    assert payload["summary"] == ""  # asked, and answered with nothing
+    assert payload["stages"][-1]["summary"] == (
+        "summary unavailable "
+        "(HTTP 401 from https://api.test/chat/completions); local verdicts stand"
+    )
+    assert payload["api_calls"] == 0
+
+
+DOWN_DETAIL = "HTTP 401 from https://api.test/chat/completions"
+
+
+def down_summary_engine() -> Engine:
+    engine = built_engine(scorer=TableScorer({SUPPORTING: LOW_ROW}))
+    engine.judge = Judge(DownJudgeClient())  # type: ignore[arg-type]
+    return engine
+
+
+def test_a_summary_that_never_came_is_printed_and_written_not_left_out(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``report.summary == ""`` is falsy, so without a line of its own the silence is
+    invisible on both surfaces a text run has (product rules 2 and 6)."""
+    monkeypatch.setenv("GROQ_API_KEY", "gsk_not_a_real_key")
+    install(monkeypatch, down_summary_engine())
+    written = tmp_path / "report.md"
+    result = runner.invoke(
+        app, ["check", str(write(tmp_path, CLEAN_BODY)), "--summarize", "--out", str(written)]
+    )
+
+    assert f"summary    judge unavailable ({DOWN_DETAIL}); local verdicts stand" in result.output
+    assert "note       summary" not in result.output  # the stage and the line, not three
+    text = written.read_text(encoding="utf-8")
+    assert f"- summary status: unavailable ({DOWN_DETAIL}); local verdicts stand" in text
+    assert "## Summary" not in text
+
+
+def test_a_report_with_a_summary_says_nothing_about_one_going_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("GROQ_API_KEY", "gsk_not_a_real_key")
+    install(monkeypatch, summarising_engine())
+    written = tmp_path / "report.md"
+    result = runner.invoke(
+        app, ["check", str(write(tmp_path, CLEAN_BODY)), "--summarize", "--out", str(written)]
+    )
+
+    assert "judge unavailable" not in result.output
+    assert "- summary status:" not in written.read_text(encoding="utf-8")

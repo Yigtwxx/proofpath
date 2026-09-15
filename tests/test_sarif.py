@@ -23,7 +23,15 @@ import pytest
 from proofpath import __version__
 from proofpath.fetch import Outcome
 from proofpath.models import Label, Passage, Verdict
-from proofpath.report import LEVELS, STATE_WORDS, Coverage, Finding, Kind, Report
+from proofpath.report import (
+    LEVELS,
+    STATE_WORDS,
+    Coverage,
+    Finding,
+    Kind,
+    Report,
+    judge_detail,
+)
 from proofpath.sarif import (
     RULE_DESCRIPTIONS,
     SARIF_VERSION,
@@ -31,7 +39,7 @@ from proofpath.sarif import (
     SRCROOT,
     to_sarif,
 )
-from tests.test_report import PASSAGE, finding, report_with
+from tests.test_report import OPINION, PASSAGE, finding, report_with
 
 SCHEMA_PATH = Path(__file__).parent / "data" / "sarif-schema-2.1.0.json"
 SCHEMA_SHA256 = "7c9688f0a1c4a4e1649ecc78521087e664729c1dff56ee8212ff195c7b16132a"
@@ -378,3 +386,23 @@ def test_to_sarif_reads_nothing_and_writes_nothing(tmp_path: Path) -> None:
     payload = to_sarif(full_report(), artifact=missing)
     assert payload["runs"][0]["results"]
     assert not missing.exists()
+
+
+def test_a_judged_finding_still_validates_and_keeps_its_local_verdict(
+    schema: dict[str, Any],
+) -> None:
+    """The judge adds fields to a finding; SARIF must neither crash nor repeat them
+    as if they were the verdict (spec section 11.1)."""
+    judged = dataclasses.replace(
+        finding(Kind.NOT_SUPPORTED, line=9, page=2),
+        judge=OPINION,
+        detail=(judge_detail(OPINION),),
+    )
+    payload = to_sarif(
+        dataclasses.replace(report_with(judged), coverage=COVERAGE, api_calls=3),
+        artifact="draft.md",
+    )
+    jsonschema.validate(payload, schema)
+    result = results_by_kind(payload)[Kind.NOT_SUPPORTED.value]
+    assert result["level"] == "error"
+    assert PASSAGE.text in result["message"]["text"]

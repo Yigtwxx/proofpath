@@ -390,18 +390,15 @@ Findings from inspecting the installed base environment, and the decisions they 
 | 12.6 | ~~TUI finding rows print the entry's marker twice~~ **Closed 2026-09-15 (final review fix: `strip_marker` on the label)** | `[7] [7] Marchetti, …` in the pty session: `Reference.raw` keeps its printed marker (Phase 5) and `FindingLine` prefixes the number again. The CLI diagnostic prints the entry once. Cosmetic; `strip_marker` on the label is the fix |
 | 12.7 | `loading models …` is drawn under the `Verifying` row in the TUI, above it on the CLI | the true order: `verify` emits the note inside the stage, after `StageStart`, and the TUI draws the row on `StageStart` while the CLI prints only `StageEnd`. Moving the note before `StageStart` in `verify.py` would put it outside the stage it belongs to; a `StageLine` that shows notes as its own children is the tidier fix. Cosmetic, not a `report`/`ui` one-liner |
 | 12.8 | The SARIF artifact for `check -` is `-` | `to_sarif(report, artifact=target)` takes the target as typed; a stdin run has no file, and `-` under `%SRCROOT%` is what a viewer gets. `report.document.name` (`stdin`) is no better an address; a `--artifact` override is the only honest option |
-| 12.9 | `api_calls` in the footer counts LLM calls only | a cold resolution of five references (33.5 s against Crossref and Semantic Scholar) still prints `0 API calls`; the counter is the judge's (Phase 9) and the wording says nothing about provider lookups. Rename or count — one line either way |
+| 12.9 | `api_calls` in the footer counts LLM calls only — **restated 2026-09-15 (v0.3.0)**: it is now the judge's real counter (answers, not attempts); provider lookups are still uncounted | a cold resolution of five references (33.5 s against Crossref and Semantic Scholar) still prints `0 API calls`; the counter is the judge's (Phase 9) and the wording says nothing about provider lookups. Rename or count — one line either way |
 | 12.10 | A cached resolution reprints its notes as if current | the live draft's ghost still carries `openalex unavailable (HTTP 429, retry after 65567s)` from the day the resolution was stored. Correct (nothing was re-checked) but it reads like today's outage; a `cached:` prefix on stored notes would say so |
 | 12.11 | A provider body that is valid JSON but not an object escapes `resolve` as an error | `_json` guards against a non-JSON body (`ProviderError`), but a bare list or string parses and then fails the `.get(...)` that follows with an `AttributeError`: exit 2 instead of `UNVERIFIED (provider unavailable)`. A type check in `_json` is the fix |
 | 12.12 | `/quit` waits for an in-flight mirrored `/fetch` | a `/check` run is cancelled through its scheduler; a mirrored verb runs in `asyncio.to_thread` with no cancel hook, and the loop's shutdown joins that executor, so the app exits only when the ladder returns. Bounded by the fetch timeouts, but a browser step can take a while |
-| 12.13 | Phase-9 briefs are untracked | they live under the git-ignored `.superpowers/sdd/phase9/`; the tracked plan is `docs/superpowers/plans/2026-09-12-phases-9-10-plan.md` |
+| 12.13 | ~~Phase-9 briefs are untracked~~ **Closed 2026-09-15**: Phase 9 shipped from the tracked `docs/superpowers/plans/2026-09-12-phases-9-10-plan.md`; the drift amendments live in the same git-ignored briefs and are summarised in §14 | — |
 
-### Next session
+### Next session (as of v0.2.0 — superseded by §14)
 
-1. **Phases 9–10 are deferred.** Development stops after v0.2.0 for now; when it
-   resumes, the judge layer (v0.3) and the social provider (v0.4) are planned in
-   `docs/superpowers/plans/2026-09-12-phases-9-10-plan.md` (briefs under
-   `.superpowers/sdd/phase9/`), with 12.1–12.10 above as the backlog beside them.
+1. Phases 9–10 were deferred after v0.2.0 and resumed 2026-09-15; Phase 9 is §14.
 
 ## 13. TUI v2 — v0.2.1, 2026-09-15
 
@@ -427,3 +424,45 @@ Findings from inspecting the installed base environment, and the decisions they 
 | 13.3 | `PLAIN` keeps the flat v0.2.0 layout the author rated 2/10 (now pure ASCII, with `= note:` rows) | By design (v2 §2, "nothing regresses where borders cannot draw"): the flat rows, the three-line pet and the `kv` footer are v0.2.0's layout with ASCII glyphs, so a legacy-conhost, `NO_COLOR` or `-q` user sees the prototype. A `PLAIN` pass — the fixed-column stage table needs no border and would fit — is the one improvement that does not touch the ASCII rule |
 | 13.4 | The exported SVGs reference a webfont | `App.save_screenshot` (Rich's exporter) emits an `@font-face` for Fira Code with `local()` first and a `cdnjs` URL second; the files are 96 KB and 66 KB, no network is needed to read them, but an offline viewer without Fira Code falls back to its own monospace and the box drawing may not join |
 | 13.5 | 12.7 still shows in the live session | `loading models …` is drawn under the `Verifying` row in both themes (true event order); the tidier fix — a `StageLine` that owns its notes — was out of T1–T5's scope |
+
+## 14. Phase 9 — v0.3.0, 2026-09-15
+
+- Shipped: `JudgeClient` (9.1; Groq / Gemini / Ollama over `chat/completions`, packaged
+  prompts, retry/backoff, cost), `Judge` escalation with the `judgements` cache (9.2;
+  schema v4, `check --judge`), `--summarize` and the TUI `/summarize` (9.3). Briefs under
+  `.superpowers/sdd/phase9/` with their 2026-09-15 drift amendments; plan
+  `plans/2026-09-12-phases-9-10-plan.md`.
+- Live (`docs/eval/2026-09-15-judge-live.md`): on `tests/data/draft-live.md` the judge
+  escalated 1 of 10 verdicts (1 call, 613 prompt · 193 completion tokens) and answered
+  `NEI` beside a low-tier `NOT SUPPORTED`; the summary cost 1 call (1,608 · 343); the first `--summarize` attempt came back
+  empty with `finish_reason=length` — `openai/gpt-oss-120b` spends its completion budget
+  on reasoning — which is why requests now carry `reasoning_effort=low` and larger
+  budgets. The v0.1 lesson held again: the suite was green, the live run found the defect.
+- Reviewer-found before the tag: an empty 200 was counted as an answer (9.1); an
+  unavailable judge reached only the terminal `Note` (9.2); an unanswered summary was
+  invisible in the markdown file (9.3). All three were rule-2/6 failures and were fixed.
+
+### New open items
+
+| # | Item | Note |
+|---|---|---|
+| 14.1 | The `NEI`-with-a-passage escalation clause is unreachable | `pipeline.aggregate` and `decide_indexed` return `Verdict(NEI, …, passage=None)`, so the escalation set is the `low` tier only (a ~0.008-wide band, 1 of 10 verdicts on the live draft). Widening it is a pipeline decision: attach the best passage to an `NEI` and let the judge see it, or narrow the clause in the spec |
+| 14.2 | An agreeing opinion leaves no mark on a rendered finding | by design only a disagreement adds the `= judge:` line; agreement shows in the markdown `judge` column and in JSON. A markdown reader of a low-tier `NOT SUPPORTED` cannot tell "judge confirmed" from "judge never saw it" without the table |
+| 14.3 | Judgements are matched by `(claim_hash, source_id)` | two results with identical claim text against the same source share one opinion and are asked twice in one batch. Rare; carrying the result index would settle it |
+| 14.4 | `Progress` on the Judging stage counts asked items, the summary counts all results | a fully warm run emits no `Progress` and reports `1 of 10 verdicts reviewed` |
+| 14.5 | `report.py` and `cache.py` import `judge` | no cycle, but `httpx` now loads behind the output and storage layers; `JudgeOpinion`/`JudgeCost` could move to `models.py` |
+| 14.6 | `Cache.detail()` / `Cleared` do not count judgements | they are removed by cascade and on `clear`, just not reported |
+| 14.7 | A wrong or revoked key (401/403) arrives as `JudgeUnavailable` | same type as an outage; the detail names the HTTP status, so it is reportable, but a config error and a provider outage are one exception type |
+| 14.8 | ~~`--format json` carries `summary` with no inline model-written label~~ **Closed by the whole-phase review: `summary_model` sits beside it** | attribution is `models["judge"]` plus the `Summarising` stage; an inline label would change the schema |
+| 14.9 | An empty 200 is not retried while a 5xx is | right for `content_filter`, pessimistic for a flaky truncation |
+| 14.10 | Small test gaps | the bare-429 ladder (no `Retry-After`) is untested; `finish_reason` is echoed unbounded in the unavailable detail; the packaged-prompt test cannot fail on an editable install (the wheel listing is the evidence) |
+| 14.13 | The CLI's unavailable-judge line stutters | it prints `judge      judge unavailable after 0 calls (…)` because the line returns the one shared sentence verbatim while the markdown header and the sibling `summary` line strip the leading subject. Kept for v0.3.0: byte-identical wording on every surface was the point, and the same string is also printed as a `Note` where the subject is needed |
+| 14.14 | The 3,500-token batch cap rests on a rough estimator | `estimate_tokens` is `len(text) // 4 + 8` and says so; 3,500 + 4,096 leaves ~400 tokens under Groq's 8K tier, so a badly estimated batch can still meet a 429 (waited out, then reported). Calibrating the estimator against the `usage` block the provider already returns would settle it |
+| 14.11 | The unanswered judge is absent from the SARIF log | `_run_properties` carries `models` and `apiCalls` but no `judge status` / `summary status`, so a `--format sarif` log of a run whose provider was down reads like one with nothing to escalate. SARIF is a findings document, and the markdown, JSON and terminal all say it; still, a viewer-only workflow does not see it |
+| 14.12 | Groq's free tier is metered on prompt **plus** requested answer | the whole-phase review caught `TOKEN_CAP = 7000` left over from the 1,024-token answer budget: with the 4,096-token budget of 9.3 a full batch would ask for ~11.1k against an 8K/minute tier. The cap is now 3,500. Nothing measured this live — the live escalation set was one item |
+
+### Next session
+
+1. **Phase 10** (`providers/` refactor, Bluesky/HN, Reddit/Mastodon/X, AVeriTeC) runs
+   from `plans/2026-09-12-phases-9-10-plan.md`; Task 10.4a (AVeriTeC loader and scorer)
+   is already implemented and reviewed, unstaged behind the v0.3.0 tag.

@@ -35,6 +35,7 @@ from typing import Literal
 
 from proofpath.document import Claim, Document, Locator, Reference
 from proofpath.fetch import Outcome
+from proofpath.judge import JudgeCost, JudgeOpinion
 from proofpath.models import Label, Tier, Verdict
 from proofpath.oa import ABSTRACT_ONLY
 from proofpath.resolve import ResolveResult, Retraction, State
@@ -160,6 +161,10 @@ class ClaimResult:
     source_id: str
     verdict: Verdict
     from_cache: bool
+    # The optional LLM judge's second opinion, when it was asked about this claim. It
+    # sits *beside* the verdict and never replaces it (spec section 11.1); ``None``
+    # means nobody asked, which is not the same as "the judge agreed".
+    judge: JudgeOpinion | None = None
 
 
 @dataclass(frozen=True)
@@ -179,6 +184,10 @@ class Finding:
     tier: Tier | None
     detail: tuple[str, ...] = ()  # the "= note:" lines under the snippet
     group: str | None = None  # shared by the claims of one paragraph-scoped citation
+    # The judge's opinion, when one was given. It never changes ``kind``, ``level``,
+    # ``state`` or ``verdict``: an opinion that could rewrite a finding would be a
+    # second verdict layer, which is exactly what spec section 11.1 forbids.
+    judge: JudgeOpinion | None = None
 
     def __post_init__(self) -> None:
         if self.level != LEVELS[self.kind]:
@@ -288,6 +297,14 @@ class Report:
     tier_note: str = ""
     cancelled: bool = False
     summary: str | None = None  # Phase 9, model-written
+    # Who wrote ``summary``: ``"<provider> <model>"``, or ``None`` when there is no
+    # paragraph. It travels beside the prose rather than only in ``models`` because a
+    # consumer rendering ``payload["summary"]`` alone would otherwise have nothing to
+    # label it with, and unlabelled model prose is what spec section 11.1 forbids.
+    summary_model: str | None = None
+    # What the optional judge spent, or ``None`` on a run that never asked one. A
+    # run states its own cost for the same reason it states its own coverage.
+    judge_cost: JudgeCost | None = None
 
     def exit_code(self) -> int:
         """0 when the run is clean, 1 when it has findings. 2 is never returned here.
@@ -339,6 +356,9 @@ SNIPPET_LIMIT = 100
 # A group member's diagnostic is shifted this far under its group finding.
 MEMBER_INDENT = 2
 
+# What the ``## Checked`` table shows for a claim the judge was never asked about.
+NO_OPINION = "\u2014"
+
 # The section 15 coverage block, label column and all.
 COVERAGE_LABELS = ("verified against full text", "abstract only", "unverified")
 COVERAGE_WIDTH = 29
@@ -346,6 +366,132 @@ COVERAGE_WIDTH = 29
 # named one by one, but a reader scanning the footer has to be told how many there
 # were without counting them (product rule 6). One wording for both surfaces.
 BROWSER_SKIPPED_REASON = "because the browser was not permitted"
+
+# A judge's disagreement travels as an ordinary ``Finding.detail`` line, so nothing
+# downstream has to know the judge exists to print it -- but it names its own key
+# rather than borrowing "note:", because who said it is half of what it says. The
+# prefix is what the renderers recognise it by, and it is written in exactly one place.
+JUDGE_DETAIL_PREFIX = "judge ("
+
+
+def judge_detail(opinion: JudgeOpinion) -> str:
+    """The one wording for the judge's opinion, shared by every surface.
+
+    ``judge (groq openai/gpt-oss-120b): SUPPORTED - <rationale>``. The model is named
+    because an opinion nobody can attribute is not evidence, and the label is the
+    judge's own: the local verdict is elsewhere on the same finding, unchanged.
+    """
+    head = f"{JUDGE_DETAIL_PREFIX}{opinion.model}): {opinion.label.value}"
+    return f"{head} \u2014 {opinion.rationale}"
+
+
+# A judge that never answered is a *state* of the run, not a silence. A note alone
+# would be quiet-suppressed and is never stored on the report, so "the provider was
+# down" and "nothing was escalated" would read identically -- which is exactly the
+# absence-of-evidence collapse product rules 2 and 6 forbid. The one sentence below
+# therefore goes into the "Judging" stage summary (so ``--format json`` and the
+# terminal's stage row carry it) *and* into the markdown header.
+UNAVAILABLE = "unavailable"
+JUDGE_UNAVAILABLE_PREFIX = f"{UNAVAILABLE} after"
+
+#: The two things a run can be told it will not get. Each writes its sentence into
+#: its own stage summary, prefixed with its own name.
+JUDGE = "judge"
+SUMMARY = "summary"
+
+#: What the reader still has, whichever of the two went missing. Written once.
+_STANDS = "local verdicts stand"
+
+
+def _summary_silence(detail: str) -> str:
+    """``"unavailable (<detail>); local verdicts stand"``: the summary's own sentence.
+
+    It counts no calls on purpose. ``JudgeCost.calls`` counts *answers* and the
+    summary is exactly one request by construction (spec section 11.1), so a request
+    that came back unusable would render "after 0 calls" -- which reads as if nothing
+    had been tried. There is therefore no call count to pass in.
+    """
+    return f"{UNAVAILABLE} ({detail}); {_STANDS}"
+
+
+def summary_silence(detail: str) -> str:
+    """``"judge unavailable (<detail>); local verdicts stand"``: the ``summary`` line.
+
+    The key already says ``summary``, so the value spends its first word on who was
+    silent. The CLI reads the same sentence off a finished report's stage
+    (:func:`summary_unavailable`); the TUI summarises a run that has no such stage and
+    holds only the detail, and calls this -- so the two surfaces cannot drift into two
+    wordings for one silence.
+    """
+    return f"{JUDGE} {_summary_silence(detail)}"
+
+
+def judge_unavailable(calls: int, detail: str, *, what: str = JUDGE) -> str:
+    """``"unavailable after 2 calls (HTTP 401 from ...); local verdicts stand"``.
+
+    The detail says *why*, so a wrong key is visible rather than just "unavailable",
+    and the last clause says what the reader still has: every local verdict, intact.
+
+    ``what`` names which of the two went unanswered. The summary's sentence drops the
+    call count and therefore ignores ``calls`` -- see :func:`_summary_silence`, which
+    is what a caller holding only a detail should reach for instead.
+    """
+    if what == SUMMARY:
+        return _summary_silence(detail)
+    plural = "" if calls == 1 else "s"
+    return f"{JUDGE_UNAVAILABLE_PREFIX} {calls} call{plural} ({detail}); {_STANDS}"
+
+
+def _unavailable_stage(report: Report, what: str) -> str | None:
+    """The stage summary saying ``what`` went unanswered, or ``None``."""
+    marker = f"{what} {UNAVAILABLE}"
+    for stage in report.stages:
+        if stage.summary.startswith(marker):
+            return stage.summary
+    return None
+
+
+def _unavailable_header(report: Report, what: str) -> str | None:
+    """One markdown header line for a judge or a summary that never came.
+
+    The sentence lives in the stage summary; the header prints that same one under
+    its own key rather than inventing a second wording for the same fact. The key is
+    ``judge status`` and not ``judge``, because ``models`` already spends ``judge`` on
+    the model's name and a header with the same key twice reads as a contradiction.
+
+    The summary needs a header line of its own for a blunter reason: an unwritten
+    paragraph leaves ``report.summary == ""``, which is falsy, so the body prints
+    nothing at all and a run whose provider went quiet reads exactly like one that was
+    never asked -- the collapse product rules 2 and 6 forbid.
+    """
+    found = _unavailable_stage(report, what)
+    if found is None:
+        return None
+    return f"- {what} status: {found.removeprefix(f'{what} ')}"
+
+
+def judge_unavailable_line(report: Report) -> str | None:
+    """The ``judge`` line's value when the escalation's provider never answered.
+
+    The stage summary already opens with ``judge``, so it is printed verbatim: the
+    terminal and the ``- judge status:`` markdown header say the one sentence, and a
+    ``-q`` run -- which drops the stage row and the note both -- still gets it.
+    """
+    return _unavailable_stage(report, JUDGE)
+
+
+def summary_unavailable(report: Report) -> str | None:
+    """The ``summary`` line's value when the paragraph was asked for and never came.
+
+    The stage's sentence, with ``summary`` swapped for ``judge``: the terminal's key
+    already says which line this is, so the value spends its first word on who was
+    silent instead of repeating the key.
+    """
+    found = _unavailable_stage(report, SUMMARY)
+    if found is None:
+        return None
+    return f"{JUDGE} {found.removeprefix(f'{SUMMARY} ')}"
+
 
 # ``pipeline.py`` writes this reason when a rule, not the model, refuted a claim. It
 # is parsed back out rather than re-derived, so the caret line and the verdict can
@@ -408,6 +554,10 @@ class Footer:
     # ``Coverage.browser_skipped``. The reason they are unread is a permission, not a
     # failure of the source, and the footer has to say which.
     browser_skipped: int = 0
+    # ``(prompt, completion)`` tokens the optional judge spent, or ``None`` when no
+    # judge ran. Beside ``api_calls``, because calls alone do not say what a free
+    # tier's per-minute token budget was spent on.
+    judge_tokens: tuple[int, int] | None = None
 
 
 def render_diagnostics(report: Report) -> list[Diagnostic]:
@@ -455,7 +605,20 @@ def render_footer(report: Report, *, written: str | None = None) -> Footer:
         note=report.tier_note or None,
         unchecked_markers=_unchecked(report),
         browser_skipped=report.coverage.browser_skipped,
+        judge_tokens=_judge_tokens(report),
     )
+
+
+def _judge_tokens(report: Report) -> tuple[int, int] | None:
+    """The judge's token spend, or ``None`` when there is nothing to report.
+
+    A judge that was asked and answered nothing at all spent nothing, and a zero
+    beside the API calls would read as a cost rather than as an absence.
+    """
+    cost = report.judge_cost
+    if cost is None or not (cost.prompt_tokens or cost.completion_tokens):
+        return None
+    return (cost.prompt_tokens, cost.completion_tokens)
 
 
 def render_markdown(report: Report, *, written_at: datetime | None = None) -> str:
@@ -468,6 +631,10 @@ def render_markdown(report: Report, *, written_at: datetime | None = None) -> st
         lines.append(f"- tiers: {report.tier_note}")
     lines.append(f"- elapsed: {report.elapsed:.1f}s")
     lines.append(f"- api calls: {report.api_calls}")
+    for what in (JUDGE, SUMMARY):
+        unavailable = _unavailable_header(report, what)
+        if unavailable is not None:
+            lines.append(unavailable)
     if report.cancelled:
         lines.append("- cancelled: the run stopped early, so this report is partial")
     lines.append("")
@@ -476,7 +643,11 @@ def render_markdown(report: Report, *, written_at: datetime | None = None) -> st
     lines.extend(_markdown_sources(report))
     lines.extend(_markdown_coverage(report))
     if report.summary:
-        lines.extend(["## Summary (model-written)", "", report.summary, ""])
+        # Labelled, and attributed, every time it is printed (spec section 11.1): a
+        # paragraph a model wrote must never be mistaken for the report's own findings.
+        written_by = report.models.get("judge")
+        label = f"model-written, {written_by}" if written_by else "model-written"
+        lines.extend([f"## Summary ({label})", "", report.summary, ""])
     return "\n".join(lines) + "\n"
 
 
@@ -572,7 +743,13 @@ def _evidence(item: Finding) -> list[str]:
         if item.reference is not None:
             where = f"[{item.reference.number}] {where}"
         lines.append(f'{GUTTER}= source: "{item.verdict.passage.text}"  ({where})')
-    lines.extend(f"{GUTTER}= note: {detail}" for detail in item.detail)
+    # A judge line names its own key; everything else is a note.
+    lines.extend(
+        f"{GUTTER}= {detail}"
+        if detail.startswith(JUDGE_DETAIL_PREFIX)
+        else f"{GUTTER}= note: {detail}"
+        for detail in item.detail
+    )
     # Rule 2: the UNVERIFIED family says which flavour it is, in its own words.
     if item.kind is Kind.UNVERIFIED:
         lines.append(f"{GUTTER}= state: {item.state}")
@@ -636,7 +813,12 @@ def _markdown_evidence(item: Finding) -> list[str]:
         lines.append(f'  - source: "{_one_line(item.verdict.passage.text)}"')  # rule 1
     # No "- state:" line: unlike a diagnostic header, the bullet above already
     # carries the state string verbatim, and rule 2 asks for it once, not twice.
-    lines.extend(f"  - note: {_one_line(detail)}" for detail in item.detail)
+    lines.extend(
+        f"  - {_one_line(detail)}"
+        if detail.startswith(JUDGE_DETAIL_PREFIX)
+        else f"  - note: {_one_line(detail)}"
+        for detail in item.detail
+    )
     return lines
 
 
@@ -645,14 +827,16 @@ def _markdown_checked(report: Report) -> list[str]:
     rows = [item for item in report.results if item.verdict.label is Label.SUPPORTED]
     if not rows:
         return [*lines, "No claim came back supported.", ""]
-    lines.extend(["| location | ref | tier | passage |", "| --- | --- | --- | --- |"])
+    lines.extend(["| location | ref | tier | judge | passage |", "| --- | --- | --- | --- | --- |"])
     for row in rows:
         # A SUPPORTED verdict cannot exist without a passage (rule 1, enforced in
-        # ``Verdict``), so the column is always filled.
+        # ``Verdict``), so the column is always filled. The judge column is a dash
+        # when nobody was asked: a blank would read as an opinion nobody gave.
         passage = row.verdict.passage.text if row.verdict.passage is not None else ""
+        judged = NO_OPINION if row.judge is None else row.judge.label.value
         lines.append(
             f"| {row.claim.locator.label()} | [{row.reference}] "
-            f"| {row.verdict.tier} | {_cell(passage)} |"
+            f"| {row.verdict.tier} | {judged} | {_cell(passage)} |"
         )
     lines.append("")
     return lines

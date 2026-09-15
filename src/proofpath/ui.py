@@ -123,14 +123,23 @@ def style_state(ui: Ui, word: str) -> Text:
     return text
 
 
-def kv(ui: Ui, key: str, value: str | Text, *, state: bool = False, err: bool = False) -> None:
-    """``key`` padded to ``KEY_WIDTH``, one space, ``value``. Never suppressed.
-    ``err`` sends the line to stderr, for when stdout must stay one JSON document."""
+def kv_text(ui: Ui, key: str, value: str | Text, *, state: bool = False) -> Text:
+    """The line :func:`kv` prints, built but not printed.
+
+    The TUI mounts what the CLI prints, so the ten-column key and the bold it carries
+    live here once instead of being spelled out again in a widget.
+    """
     if isinstance(value, str):
         value = style_state(ui, value) if state else Text(value)
     # assemble() keeps the key's bold as a span, so it never bleeds into the value.
+    return Text.assemble((key.ljust(KEY_WIDTH) + " ", "bold" if ui.color else ""), value)
+
+
+def kv(ui: Ui, key: str, value: str | Text, *, state: bool = False, err: bool = False) -> None:
+    """``key`` padded to ``KEY_WIDTH``, one space, ``value``. Never suppressed.
+    ``err`` sends the line to stderr, for when stdout must stay one JSON document."""
     console = ui.err if err else ui.out
-    console.print(Text.assemble((key.ljust(KEY_WIDTH) + " ", "bold" if ui.color else ""), value))
+    console.print(kv_text(ui, key, value, state=state))
 
 
 def state_line(ui: Ui, key: str, word: str, rest: str = "", *, prefix: str = "") -> None:
@@ -154,6 +163,23 @@ def note(ui: Ui, text: str, *, key: str = "note") -> None:
     kind that follows the same rule (``attempt`` lines under ``fetch``)."""
     if not ui.quiet:
         kv(ui, key, text)
+
+
+def summary(ui: Ui, text: str, model: str) -> None:
+    """The model-written paragraph, labelled and attributed; dropped under ``-q``.
+
+    The label is not decoration (spec section 11.1): a summary is prose a model wrote
+    about a report that was already final, and a reader must never take it for one of
+    the run's own findings. It is dim because it is the least load-bearing line on the
+    page, and ``-q`` -- which keeps findings and drops everything else -- drops it.
+    """
+    if ui.quiet:
+        return
+    # The same fallback the markdown heading uses: a blank name must not print as
+    # ``(model-written, )``, and the label itself is never the part that is dropped.
+    written_by = f"model-written, {model}" if model else "model-written"
+    label = Text(f"({written_by}) ", style="dim" if ui.color else "")
+    kv(ui, "summary", Text.assemble(label, text))
 
 
 def hint(ui: Ui, text: str, *, err: bool = False) -> None:
@@ -272,6 +298,11 @@ def footer(ui: Ui, item: Footer) -> None:
         hint(ui, item.note)
     written = f"{item.written} written" if item.written else "no report written"
     ui.out.print(f"{written}  ·  {item.api_calls} API calls  ·  {item.elapsed:.1f}s")
+    if item.judge_tokens is not None:
+        # Its own line, and never suppressed: what the optional judge spent is part
+        # of what the run cost, and a free tier is metered in tokens, not in calls.
+        prompt, completion = item.judge_tokens
+        kv(ui, "judge", f"{prompt:,} prompt · {completion:,} completion tokens")
 
 
 def error(ui: Ui, text: str) -> None:

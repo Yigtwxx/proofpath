@@ -12,6 +12,7 @@ import pytest
 
 from proofpath import cache as cache_mod
 from proofpath.cache import Cache, sha256_text
+from proofpath.judge import JudgeOpinion
 from proofpath.models import Label, Passage, Verdict
 from proofpath.pipeline import Thresholds
 from proofpath.resolve import (
@@ -54,8 +55,9 @@ def test_schema_is_plain_sqlite_readable_without_extensions(db: Cache) -> None:
         "verdicts",
         "resolutions",
         "retractions",
+        "judgements",
     } <= tables
-    assert conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone() == ("3",)
+    assert conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone() == ("4",)
 
 
 def test_chunks_round_trip_with_embeddings(db: Cache) -> None:
@@ -427,7 +429,7 @@ def test_opening_a_v1_file_migrates_it_and_keeps_sources_text_and_verdicts(
 
     with Cache(path) as db:
         assert db._conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone() == (
-            "3",
+            "4",
         )
         columns = {r[1] for r in db._conn.execute("PRAGMA table_info(chunks)")}
         assert "text_sha256" in columns
@@ -460,12 +462,12 @@ def test_a_newer_file_is_left_alone_and_never_downgraded(tmp_path: Path) -> None
     _write_v1_database(path)
     conn = sqlite3.connect(str(path))
     with conn:
-        conn.execute("UPDATE meta SET value = '4' WHERE key = 'schema_version'")
+        conn.execute("UPDATE meta SET value = '9' WHERE key = 'schema_version'")
     conn.close()
 
     with Cache(path) as db:
         assert db._conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone() == (
-            "4",
+            "9",
         )
         assert db.migrated_from is None
         # The v1 chunks table is still there, rows and all.
@@ -499,7 +501,7 @@ def test_a_failed_migration_leaves_the_old_version_and_self_heals(
     monkeypatch.undo()
     with Cache(path) as db:
         assert db._conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone() == (
-            "3",
+            "4",
         )
         assert db.migrated_from == "1"
         assert "text_sha256" in {r[1] for r in db._conn.execute("PRAGMA table_info(chunks)")}
@@ -651,4 +653,145 @@ def test_migrating_a_v1_file_adds_the_lookup_tables(tmp_path: Path) -> None:
     with Cache(path) as db:
         db.put_resolution(RAW_REFERENCE, RESOLVED, now=NOW)
         assert db.get_resolution(RAW_REFERENCE, now=NOW) == RESOLVED
+        assert db.get_verdict("h", "s", "m") is not None  # nothing else was lost
+
+
+# --- judgements (schema v4) ------------------------------------------------------
+
+OPINION = JudgeOpinion(
+    label=Label.SUPPORTED, rationale='the passage says "cats purr"', model="groq gpt-oss"
+)
+
+
+def test_a_judgement_round_trips_and_is_keyed_by_the_judge_model(db: Cache) -> None:
+    db.add_source(
+        "s", scheme="academic", title="", url="", text_kind="abstract", raw_text=RAW, now=NOW
+    )
+    db.put_judgement("h", "s", "groq gpt-oss", OPINION, now=NOW)
+    assert db.get_judgement("h", "s", "groq gpt-oss") == OPINION
+    # Another judge has not been asked; absence of its opinion is not an opinion.
+    assert db.get_judgement("h", "s", "ollama llama3.1") is None
+    assert db.get_judgement("other", "s", "groq gpt-oss") is None
+
+
+def test_a_second_opinion_from_the_same_judge_replaces_the_first(db: Cache) -> None:
+    db.add_source(
+        "s", scheme="academic", title="", url="", text_kind="abstract", raw_text=RAW, now=NOW
+    )
+    db.put_judgement("h", "s", "groq gpt-oss", OPINION, now=NOW)
+    later = JudgeOpinion(label=Label.NEI, rationale="on reflection, silent", model="groq gpt-oss")
+    db.put_judgement("h", "s", "groq gpt-oss", later, now=NOW)
+    assert db.get_judgement("h", "s", "groq gpt-oss") == later
+
+
+def test_judgements_go_with_the_verdicts_when_the_source_text_changes(db: Cache) -> None:
+    """A judgement quotes the same passage a verdict does (product rule 1): text that
+    has changed invalidates both, in the one transaction that stores the new chunks."""
+    db.add_source(
+        "s", scheme="academic", title="", url="", text_kind="abstract", raw_text=RAW, now=NOW
+    )
+    db.put_chunks("s", "bge@rev", PASSAGES, VECTORS, text_sha256=RAW_SHA)
+    db.put_verdict("h", "s", "m", Verdict(Label.SUPPORTED, 0.93, "high", PASSAGES[0]), now=NOW)
+    db.put_judgement("h", "s", "groq gpt-oss", OPINION, now=NOW)
+
+    db.put_chunks("s", "bge@rev", PASSAGES, VECTORS, text_sha256=sha256_text("different text"))
+    assert db.get_verdict("h", "s", "m") is None
+    assert db.get_judgement("h", "s", "groq gpt-oss") is None
+
+
+def test_re_chunking_the_same_text_keeps_the_judgements(db: Cache) -> None:
+    db.add_source(
+        "s", scheme="academic", title="", url="", text_kind="abstract", raw_text=RAW, now=NOW
+    )
+    db.put_chunks("s", "bge@rev", PASSAGES, VECTORS, text_sha256=RAW_SHA)
+    db.put_judgement("h", "s", "groq gpt-oss", OPINION, now=NOW)
+    db.put_chunks("s", "other@rev", PASSAGES, VECTORS, text_sha256=RAW_SHA)
+    assert db.get_judgement("h", "s", "groq gpt-oss") == OPINION
+
+
+def test_clearing_a_source_takes_its_judgements_with_it(db: Cache) -> None:
+    db.add_source(
+        "s", scheme="academic", title="", url="", text_kind="abstract", raw_text=RAW, now=NOW
+    )
+    db.put_judgement("h", "s", "groq gpt-oss", OPINION, now=NOW)
+    db.clear()
+    assert db.get_judgement("h", "s", "groq gpt-oss") is None
+
+
+_V3_SCHEMA = (
+    _V1_SCHEMA.replace(
+        "embed_model TEXT NOT NULL, ordinal INTEGER NOT NULL, text TEXT, embedding BLOB NOT NULL,",
+        "embed_model TEXT NOT NULL, ordinal INTEGER NOT NULL, text TEXT, embedding BLOB NOT NULL,\n"
+        "    text_sha256 TEXT NOT NULL,",
+    )
+    + """
+CREATE TABLE resolutions (
+    raw_hash TEXT PRIMARY KEY, state TEXT NOT NULL, best_json TEXT,
+    candidates_json TEXT NOT NULL, notes_json TEXT NOT NULL, match_json TEXT,
+    resolved_at TEXT NOT NULL, expires_at TEXT NOT NULL
+);
+CREATE TABLE retractions (
+    doi TEXT PRIMARY KEY, retraction_json TEXT, checked_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL
+);
+"""
+)
+
+
+def _write_v3_database(path: Path) -> None:
+    """A file as task 8.7 left it: everything but the judgements table."""
+    conn = sqlite3.connect(str(path))
+    with conn:
+        conn.executescript(_V3_SCHEMA)
+        conn.execute("INSERT INTO meta(key, value) VALUES ('schema_version', '3')")
+        conn.execute(
+            "INSERT INTO sources(source_id, scheme, title, url, text_kind, fetched_at) "
+            "VALUES ('s', 'academic', 'Paper', 'https://x', 'abstract', ?)",
+            (NOW.isoformat(),),
+        )
+        conn.execute(
+            "INSERT INTO raw_text(source_id, content, sha256, fetched_at, expires_at) "
+            "VALUES ('s', ?, ?, ?, ?)",
+            (RAW, RAW_SHA, NOW.isoformat(), (NOW + timedelta(days=7)).isoformat()),
+        )
+        conn.execute(
+            "INSERT INTO chunks(source_id, embed_model, ordinal, text, embedding, text_sha256) "
+            "VALUES ('s', 'bge@rev', 0, 'cats purr', ?, ?)",
+            (VECTORS[0].tobytes(), RAW_SHA),
+        )
+        conn.execute(
+            "INSERT INTO verdicts(claim_hash, source_id, model_id, label, score, tier, reason, "
+            "passage_text, passage_index, created_at) "
+            "VALUES ('h', 's', 'm', 'SUPPORTED', 0.93, 'high', '', 'cats purr', 0, ?)",
+            (NOW.isoformat(),),
+        )
+    conn.close()
+
+
+def test_migrating_a_v3_file_adds_judgements_and_keeps_everything_else(tmp_path: Path) -> None:
+    path = tmp_path / "proofpath.sqlite3"
+    _write_v3_database(path)
+
+    with Cache(path) as db:
+        assert db.migrated_from == "3"
+        assert db._conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone() == (
+            "4",
+        )
+        # v4 is additive: the chunks stay, so a warm run stays free.
+        assert db.get_chunks("s", "bge@rev", text_sha256=RAW_SHA) is not None
+        assert db.get_raw_text("s", now=NOW) == RAW
+        assert db.get_verdict("h", "s", "m") is not None
+        db.put_judgement("h", "s", "groq gpt-oss", OPINION, now=NOW)
+        assert db.get_judgement("h", "s", "groq gpt-oss") == OPINION
+
+
+def test_migrating_a_v1_file_runs_the_whole_chain_including_judgements(tmp_path: Path) -> None:
+    path = tmp_path / "proofpath.sqlite3"
+    _write_v1_database(path)
+    with Cache(path) as db:
+        assert db.migrated_from == "1"
+        db.put_resolution(RAW_REFERENCE, RESOLVED, now=NOW)
+        assert db.get_resolution(RAW_REFERENCE, now=NOW) == RESOLVED
+        db.put_judgement("h", "s", "groq gpt-oss", OPINION, now=NOW)
+        assert db.get_judgement("h", "s", "groq gpt-oss") == OPINION
         assert db.get_verdict("h", "s", "m") is not None  # nothing else was lost

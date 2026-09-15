@@ -152,6 +152,27 @@ def test_note_stage_blank_and_rule_print_when_not_quiet() -> None:
     assert lines[3] == "─" * 60
 
 
+def test_summary_is_labelled_model_written_and_names_the_model() -> None:
+    """Spec section 11.1: the paragraph carries its label on every surface."""
+    instance, out, _ = _build()
+    ui.summary(instance, "says this.", "groq openai/gpt-oss-120b")
+    assert out.getvalue() == "summary    (model-written, groq openai/gpt-oss-120b) says this.\n"
+
+
+def test_a_summary_with_no_named_model_still_says_it_was_model_written() -> None:
+    """The markdown falls back to the bare label; the terminal must spell it the same
+    way rather than printing an empty name after a comma."""
+    instance, out, _ = _build()
+    ui.summary(instance, "says this.", "")
+    assert out.getvalue() == "summary    (model-written) says this.\n"
+
+
+def test_summary_is_dropped_under_quiet_because_it_is_not_a_finding() -> None:
+    instance, out, _ = _build(quiet=True)
+    ui.summary(instance, "Three references do not say this.", "groq openai/gpt-oss-120b")
+    assert out.getvalue() == ""
+
+
 # --- error / json -----------------------------------------------------------------
 
 
@@ -591,3 +612,42 @@ def test_the_skipped_count_is_yellow_on_a_terminal() -> None:
     ui.footer(instance, _skipped_footer(2))
     line = next(ln for ln in out.getvalue().splitlines() if "skipped" in ln)
     assert "\x1b[33m2 source(s)\x1b[0m" in line
+
+
+def test_footer_names_the_judge_tokens_on_their_own_line() -> None:
+    """Calls alone do not say what a free tier's per-minute budget went on."""
+    instance, out, _ = _build()
+    ui.footer(
+        instance,
+        Footer(
+            counts="7 refs: 1 unsupported, 6 ok",
+            coverage=(100, 0, 0),
+            api_calls=3,
+            elapsed=38.4,
+            written="report.md",
+            weak=False,
+            cancelled=False,
+            judge_tokens=(18402, 1210),
+        ),
+    )
+    assert out.getvalue().splitlines()[-2:] == [
+        "report.md written  ·  3 API calls  ·  38.4s",
+        "judge      18,402 prompt · 1,210 completion tokens",
+    ]
+
+
+def test_footer_says_nothing_about_a_judge_that_never_ran() -> None:
+    instance, out, _ = _build()
+    ui.footer(
+        instance,
+        Footer(
+            counts="7 refs: 7 ok",
+            coverage=(100, 0, 0),
+            api_calls=0,
+            elapsed=1.0,
+            written=None,
+            weak=False,
+            cancelled=False,
+        ),
+    )
+    assert "judge" not in out.getvalue()
