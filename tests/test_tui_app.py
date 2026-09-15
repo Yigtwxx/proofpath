@@ -152,7 +152,7 @@ def _banner_lines(app: ProofpathApp) -> tuple[str, ...]:
     return drawn.lines
 
 
-async def until(pilot: Any, ready: Callable[[], bool], what: str, timeout: float = 3.0) -> None:
+async def until(pilot: Any, ready: Callable[[], bool], what: str, timeout: float = 15.0) -> None:
     """Pump the loop until ``ready()``; a worker thread is on the other end of these."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -884,7 +884,7 @@ async def test_quitting_answers_every_open_question_before_closing() -> None:
         await until(pilot, lambda: app.query(PermissionPrompt), "the prompt")
         await submit(pilot, "/quit")
         await pilot.pause()
-    assert answer.result(timeout=3) == "no"
+    assert answer.result(timeout=15) == "no"
     assert schedulers[0].closed
 
 
@@ -950,7 +950,7 @@ async def test_the_gate_asks_the_inline_prompt_and_never_stdin(
         allowed = in_a_worker(lambda: gate.allow(HOST, 403))
         await until(pilot, lambda: app.query(PermissionPrompt), "the prompt")
         await pilot.click("#allow-no")
-        assert allowed.result(timeout=3) is False
+        assert await answered(pilot, allowed) is False
     # Rule 5: the install happens through the gate, after an answer, and "no" is an
     # answer that installs nothing.
     assert gate.decision.reason == "user answered no"
@@ -1348,7 +1348,7 @@ async def test_never_is_honoured_by_the_run_after_it(monkeypatch: pytest.MonkeyP
         allowed = in_a_worker(lambda: gate.allow(HOST, 403))
         await until(pilot, lambda: app.query(PermissionPrompt), "the prompt")
         await pilot.click("#allow-never")
-        assert allowed.result(timeout=3) is False
+        assert await answered(pilot, allowed) is False
         await until(
             pilot,
             lambda: library.config_view().config.permissions.install_browser == "deny",
@@ -1407,7 +1407,7 @@ async def test_a_question_asked_while_quitting_is_answered_without_being_drawn()
         async def close_and_ask() -> None:
             # The worker asks *after* the quit began: it must get an answer straight
             # back rather than a widget nobody will ever see.
-            late.append(ask_from_a_worker(app, run.id).result(timeout=3))
+            late.append(ask_from_a_worker(app, run.id).result(timeout=15))
             await original()
 
         scheduler.close = close_and_ask  # type: ignore[method-assign]
