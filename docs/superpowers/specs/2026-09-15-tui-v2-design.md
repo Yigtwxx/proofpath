@@ -20,8 +20,8 @@ everywhere*, not *identical everywhere*. The TUI therefore has two themes:
 
 | Theme | When | Glyphs | Colour |
 |---|---|---|---|
-| `RICH` | `COLORTERM` is `truecolor`/`24bit`, or the terminal is known to support it (iTerm2, WezTerm, kitty, Ghostty, Alacritty, Windows Terminal via `WT_SESSION`, VS Code via `TERM_PROGRAM=vscode`), **and** none of the PLAIN triggers apply | Unicode: box drawing, `⏺ ✓ ✗ ⚠ ● ▰ ▱ █ ▓ ░ ⧉ ›` | truecolor tones of the same four meanings + one accent per run |
-| `PLAIN` | `NO_COLOR`, `--no-color`, `-q`, `TERM=dumb`, legacy conhost (`WT_SESSION` unset on Windows), or no truecolor evidence | ASCII only: `* + x ! # = - ~ >` | ANSI-16 names exactly as today |
+| `RICH` | `COLORTERM` is `truecolor`/`24bit`, or the terminal is known to support it (iTerm2, WezTerm, kitty, Ghostty, Alacritty, Windows Terminal via `WT_SESSION`, VS Code via `TERM_PROGRAM=vscode`, and macOS Terminal.app — 256-colour, the tones downgrade faithfully), **and** none of the PLAIN triggers apply | Unicode: box drawing, `⏺ ✓ ✗ ⚠ ● ▰ ▱ █ ▓ ░ ⧉ ›` | truecolor tones of the same four meanings + one accent per run |
+| `PLAIN` | `NO_COLOR`, `--no-color`, `-q`, `TERM=dumb`, legacy conhost (`WT_SESSION` unset on Windows), a CJK locale (`LC_ALL`/`LC_CTYPE`/`LANG` naming `zh`/`ja`/`ko` — box drawing renders double-width there), or no truecolor evidence | ASCII only: `* + x ! # = - ~ >` | ANSI-16 names exactly as today |
 
 Detection lives in one place (`tui/theme.py`) and is testable by injecting the
 environment. `PROOFPATH_THEME=rich|plain` overrides detection (documented, for
@@ -35,28 +35,19 @@ only colour remains the red stamp.
 
 ## 3. The pet
 
-`RICH` draws a seven-line ferret whose body stretches across the width and ends in
-the `[PROOF]` stamp:
-
-```
-        ╭───╮
-   ╭────┤o o├────────────────────────────────────────────────────────────╮
-   │    ╰─┬─╯                                                             │
-   ╰──────┴──────────────────────────────────────────────────────────── ~~╯[PROOF]
-     ˘˘        ˘˘                                                   ˘˘
-      proofpath v0.3.0                                  academic · online · coreml
-      paste a file path, a URL, or a claim.              /help  /config  /quit
-```
-
-(The exact art is the implementer's; the rules are: head at the left, a body that
-grows with the width, four feet, the tail ending in the stamp, seven lines
-including the two text lines. Below 60 columns the stamp is dropped, below 48 the
-`PLAIN` pet is used regardless of theme.) `PLAIN` keeps today's three-line ASCII
+`RICH` draws a seven-line ferret: head at the left with a `╸┤` nose and `╭╮ ╭╮` ears, a
+low body that grows with the width and ends in a rounded rump, four feet under the
+joints, and a **real tail** that leaves the rump at mid-height and runs `~~~~` to the
+`[PROOF]` stamp, whose right edge aligns with the context and hint lines below. The
+two text lines are lines six and seven. Tail length ≥ 8 and grows with the width (up
+to about a third of the body); below 60 columns the stamp is dropped and the tail
+shortens; below 48 the `PLAIN` pet is used regardless of theme. Exact art lives in
+`tui/pet.py` as a commented constant; the reviewer judges it. `PLAIN` keeps today's three-line ASCII
 ferret unchanged, so the golden block in §13.1 still holds for that theme.
 
 Animation (both themes, off under `-q`/`NO_COLOR`): eyes blink `(-.-)` once every
 6–10 s; while any run is `running`/`verifying` the eyes look down the path `(>.>)`
-and in `RICH` the tail `~~` walks one column per second; a run that ends with
+and in `RICH` the tail wags (three frames at ~2 Hz); a run that ends with
 findings shows `(O.O)` for two seconds, a clean one `(^.^)`.
 
 ## 4. Layout

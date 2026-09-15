@@ -2,7 +2,8 @@
 
 One thin layer over ``rich``. Every human line a command prints goes through
 here, so the layout (10-column key, one space, value) and the colour tables are
-defined once. Nothing else in the package imports ``rich`` or names a colour.
+defined once. Nothing else in the package imports ``rich`` or names a colour, except
+``tui/theme.py``, which maps these meanings to the TUI's truecolor tones.
 """
 
 from __future__ import annotations
@@ -103,10 +104,20 @@ def build(
     return Ui(color=not plain and out.is_terminal, quiet=quiet, out=out, err=err)
 
 
+def state_colour(word: str) -> str:
+    """The ANSI-16 name a state word carries by meaning, ``""`` for an unknown word.
+
+    The one rule behind every coloured state word: an exact hit in the green, red
+    or dim tables wins, otherwise a yellow prefix. Public so the TUI's themes can
+    map the meaning to their own tone without repeating the tables or this rule.
+    """
+    return _EXACT.get(word, "yellow" if word.startswith(YELLOW_PREFIXES) else "")
+
+
 def style_state(ui: Ui, word: str) -> Text:
     """Colour a state word by meaning; unknown words and colourless output stay plain."""
     text = Text(word)
-    style = _EXACT.get(word, "yellow" if word.startswith(YELLOW_PREFIXES) else "")
+    style = state_colour(word)
     if ui.color and style:
         text.stylize(style)
     return text

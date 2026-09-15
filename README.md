@@ -21,20 +21,47 @@ proofpath
 ```
 
 ```
-   ,_,
-  (o.o)~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~[PROOF]
-   " "    proofpath v0.2.0                                              academic . online . coreml
-          paste a file path, a URL, or a claim.            /help  /config  /quit
+    ╭╮ ╭╮
+   ╭╯╰─╯╰────────────────────────────────────────────────────────────────────╮
+  ╸┤ o o                                                                     ╰~~~~~~~~~~~~~[PROOF]
+   ╰─┬─┬────────────────────────────────────────────────────────────────┬─┬──╯
+     ˘ ˘                                                                ˘ ˘
+      proofpath v0.2.1                                                  academic . online . coreml
+      paste a file path, a URL, or a claim.                                  /help  /config  /quit
 ```
 
-Bare `proofpath` opens the terminal UI ([a recorded session](docs/eval/2026-09-15-v0.2-live.md)).
+Bare `proofpath` opens the terminal UI ([a recorded session in both themes](docs/eval/2026-09-15-tui-v2-live.md),
+with [SVG screenshots](docs/eval/tui-v2-rich.svg)). Each run is one panel in its own
+accent: the command on the top border and the run's state at its right, a fixed-column
+stage table underneath (`✓` finished, `⏺` still running or finished with something
+unverified, a real progress bar on the active stage, the provider that produced each
+number at the right), a rule, then the findings — location, reference, the state word
+as a badge, the tier — with the finding's notes and the claim (`you`) and the passage
+(`source`) it was checked against under it. The bottom border carries the run's
+coverage; the docked footer draws it as a bar and never scrolls away.
+
 Paste a path and it runs; every one-shot verb is a slash command (`/check`, `/resolve`,
 `/fetch`, `/config`, `/cache`), runs can be started while others are in flight and
-stopped with `/cancel #n` — a stopped run keeps what it had decided — and the
-coverage footer never scrolls away. Click (or press `enter` on) a finding to read the
-whole quoted passage; `⧉` copies it; a finding's reference is a link to its source.
-When a publisher blocks the plain fetch, the permission question is asked **inline,
-under the stage that hit the wall**, with `[allow once] [always] [no] [never]`.
+stopped with `/cancel #n` — a stopped run keeps what it had decided. Click (or press
+`enter` on) a finding to read the whole quoted passage; `⧉` copies it; a finding's
+reference is a link to its source. When a publisher blocks the plain fetch, the
+permission question is asked **inline, under the stage that hit the wall**, with
+`[allow once] [always] [no] [never]`.
+
+**Windows / `NO_COLOR`.** The look above is the `rich` theme, chosen when the terminal
+gives evidence of truecolor (`COLORTERM`, Windows Terminal, iTerm2, kitty, WezTerm,
+Ghostty, VS Code, Terminal.app). Under `NO_COLOR`, `--no-color`, `-q`, `TERM=dumb`,
+legacy conhost or a CJK locale the `plain` theme draws the same runs as flat ASCII rows
+in the terminal's own 16 colours — the state words, the coverage and every honesty
+sentence are identical, only the drawing changes. `PROOFPATH_THEME=rich|plain` forces
+either, for screenshots and bug reports.
+
+```
+   ,_,
+  (o.o)~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~[PROOF]
+   " "    proofpath v0.2.1                                              academic . online . coreml
+          paste a file path, a URL, or a claim.            /help  /config  /quit
+```
 
 The same engine behind a pipe or in CI:
 

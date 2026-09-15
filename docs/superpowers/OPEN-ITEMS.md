@@ -385,7 +385,7 @@ Findings from inspecting the installed base environment, and the decisions they 
 | 12.1 | Two-column unnumbered bibliographies (9.10) | still the largest author-year item: RoBERTa yields 103 entries for ~50 and 15 claims where a rejoin would give 65. Rejoining an entry with the one before it whenever the first prints no year was measured, not shipped |
 | 12.2 | The undated fabricated pair form (11.13) and the proceedings-volume acceptance (11.14) | carried into v0.2 as Known issues; both are rule-3-first trades and stay open until a guard is found that does not cost a real reference |
 | 12.3 | Headless fallback limits (11.11, 11.12) | only the last numbered run is taken and the prose before a block's first entry is dropped; AlphaFold recovers 17 of 84 |
-| 12.4 | `tui/app.py` is 1798 lines (11.17) | the mirrored verbs' renderers belong in a `tui/lines.py` with their own tests |
+| 12.4 | ~~`tui/app.py` is 1798 lines (11.17)~~ **Closed 2026-09-15 (v0.2.1, TUI v2 §5)** | split into `tui/theme.py`, `tui/pet.py`, `tui/verbs.py` (the mirrored verbs' renderers; their tests stay in `tests/test_tui_app.py`) and `tui/widgets/`; `app.py` is 681 lines of composition, wiring and slash commands |
 | 12.5 | `#n` in a run header is a click target, not a hyperlink | spec §13.1 says "a `#n` reference or a source URL" is an OSC 8 link; a run number has no address, so the header folds its block (`enter`) and the link went to the finding's reference instead (8.4 deviation 3). Either the spec wording or a `proofpath://run/n` scheme settles it |
 | 12.6 | ~~TUI finding rows print the entry's marker twice~~ **Closed 2026-09-15 (final review fix: `strip_marker` on the label)** | `[7] [7] Marchetti, …` in the pty session: `Reference.raw` keeps its printed marker (Phase 5) and `FindingLine` prefixes the number again. The CLI diagnostic prints the entry once. Cosmetic; `strip_marker` on the label is the fix |
 | 12.7 | `loading models …` is drawn under the `Verifying` row in the TUI, above it on the CLI | the true order: `verify` emits the note inside the stage, after `StageStart`, and the TUI draws the row on `StageStart` while the CLI prints only `StageEnd`. Moving the note before `StageStart` in `verify.py` would put it outside the stage it belongs to; a `StageLine` that shows notes as its own children is the tidier fix. Cosmetic, not a `report`/`ui` one-liner |
@@ -402,3 +402,28 @@ Findings from inspecting the installed base environment, and the decisions they 
    resumes, the judge layer (v0.3) and the social provider (v0.4) are planned in
    `docs/superpowers/plans/2026-09-12-phases-9-10-plan.md` (briefs under
    `.superpowers/sdd/phase9/`), with 12.1–12.10 above as the backlog beside them.
+
+## 13. TUI v2 — v0.2.1, 2026-09-15
+
+- Shipped: the two themes (`tui/theme.py`, detection by injected environment,
+  `PROOFPATH_THEME` override), the seven-line `RICH` ferret, run panels with the state
+  on the border and the coverage on its foot, the fixed-column stage table with a real
+  progress bar, badges, `you`/`source` rows, the coverage bar in the footer, the
+  bordered prompt, and the `app.py` split (12.4). Design:
+  `docs/superpowers/specs/2026-09-15-tui-v2-design.md`; spec §13.1 and §13.3 amended
+  by reference. Live session in both themes with SVG screenshots:
+  `docs/eval/2026-09-15-tui-v2-live.md`. 1723 tests pass, 1 skipped.
+- The T4 follow-ups: a run that finished below the panel floor no longer shows its
+  coverage twice after widening (and one that finished wide keeps it when narrowed —
+  the `CoverageLine` is always mounted and shown only while the block is flat); a
+  tier-less badge keeps its row at 60–79 columns.
+
+### New open items
+
+| # | Item | Note |
+|---|---|---|
+| 13.1 | Badges do not end on one column at 60–79 columns when a tier-less finding would otherwise stack | `FindingLine._draw` drops the empty six-column tier cell only when the label's floor would not fit beside it (the T4 follow-up). At those widths a `GHOST REFERENCE` row ends eight columns right of a `NOT SUPPORTED  high` row. Kept: a stacked row costs a line per finding, a ragged right edge costs nothing a reader misreads. `≥ 80` columns is unaffected |
+| 13.2 | `⏺` (U+23FA) is an `Emoji=Yes` character | Every width table says one cell (`unicodedata` EAW `N`, `wcwidth` 1, Rich 1), and in Chromium's font fallback on this Mac — which is what VS Code's terminal draws with — it measures 1.04 cells and is drawn as a text glyph in the accent colour, so the switch to `●` was **not** made (T5 brief: only if it renders wide). Terminals that give `Emoji=Yes` characters emoji presentation (Apple Terminal with some fonts, Windows Terminal) may draw it as the colour "record" glyph, two cells wide and ignoring the accent. If a report says so, `Glyphs.stage_active` and `stage_flag` in `tui/theme.py` become `●` (U+25CF, EAW `A`, one cell outside CJK locales, which already select `PLAIN`) — two characters and three golden strings. `⧉` (U+29C9) measures 1.29 cells in the same fallback; it sits before a space and the border, so the overflow is invisible, but a narrower copy glyph would be safer |
+| 13.3 | `PLAIN` keeps the flat v0.2.0 layout the author rated 2/10 (now pure ASCII, with `= note:` rows) | By design (v2 §2, "nothing regresses where borders cannot draw"): the flat rows, the three-line pet and the `kv` footer are v0.2.0's layout with ASCII glyphs, so a legacy-conhost, `NO_COLOR` or `-q` user sees the prototype. A `PLAIN` pass — the fixed-column stage table needs no border and would fit — is the one improvement that does not touch the ASCII rule |
+| 13.4 | The exported SVGs reference a webfont | `App.save_screenshot` (Rich's exporter) emits an `@font-face` for Fira Code with `local()` first and a `cdnjs` URL second; the files are 96 KB and 66 KB, no network is needed to read them, but an offline viewer without Fira Code falls back to its own monospace and the box drawing may not join |
+| 13.5 | 12.7 still shows in the live session | `loading models …` is drawn under the `Verifying` row in both themes (true event order); the tidier fix — a `StageLine` that owns its notes — was out of T1–T5's scope |

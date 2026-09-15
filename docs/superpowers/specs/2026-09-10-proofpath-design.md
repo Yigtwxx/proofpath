@@ -522,6 +522,17 @@ bare invocation is a first-class entry point rather than a help screen.
 
 ### 13.1 TUI — streaming prompt
 
+> **Amended 2026-09-15 (v0.2.1) by `2026-09-15-tui-v2-design.md`.** The TUI now has
+> two themes drawing one truth: `rich` (box-drawing panels per run, Unicode glyphs,
+> truecolor tones, a seven-line ferret, badges, real progress and coverage bars) when
+> the terminal gives evidence of truecolor, and `plain` (exactly the layout below)
+> otherwise; `PROOFPATH_THEME=rich|plain` overrides detection. The "pure ASCII" rule
+> for the pet and the "identical everywhere" goal below now bind the `plain` theme
+> only — the goal was *readable everywhere*, which both themes meet. Every state
+> word, every honesty sentence, the mouse/keyboard rule and rule 6 are unchanged;
+> the golden block below still holds for `plain`. See the v2 design's §2–§4 for the
+> `rich` layout and §5 for the module split.
+
 The TUI is a streaming log with a prompt at the bottom, in the manner of Claude Code
 and OpenClaw. Chosen over a split-pane browser because it handles several documents
 in one session naturally, surfaces the permission prompt (§7.1) inline in the flow
@@ -758,6 +769,14 @@ carries them; `config set permissions.<key>` and `config set judge.<key>` replac
 **Colour system (decided 2026-09-11).** Two layers, both drawn from the terminal's own
 16-colour ANSI palette — no hex values, so light and dark themes both work and
 `NO_COLOR` removes everything cleanly.
+
+> **Amended 2026-09-15 (v0.2.1) by `2026-09-15-tui-v2-design.md`.** The "ANSI-16
+> only" rule now describes the `plain` theme and the one-shot CLI. In the TUI's
+> `rich` theme the same two layers are spelled as truecolor tones (`tui/theme.py`
+> maps each of `ui.py`'s four meanings and five accents to a hex value; the accents
+> stay clear of red, yellow and green) and the state words are drawn as badges. The
+> tables that decide *which* word carries *which* meaning stay in `ui.py`; no theme
+> may change them, and `NO_COLOR` still removes everything by selecting `plain`.
 
 | Layer | Colour | Used for |
 |---|---|---|

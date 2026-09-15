@@ -399,6 +399,22 @@ async def test_events_render_stages_findings_and_the_footer() -> None:
         assert "62/21/17%" in header
 
 
+async def test_a_findings_notes_are_printed_under_it_as_the_cli_prints_them() -> None:
+    """TUI v2 polish: a ghost's reason is part of the finding, in PLAIN too (rule 2)."""
+    app, schedulers = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "/check draft.md")
+        scheduler = schedulers[0]
+        scheduler.push(scheduler.runs[0], Emitted(a_finding()))
+        await pilot.pause()
+        line = app.query_one(FindingLine)
+        rendered = line.render()
+        rows = rendered.plain.split("\n")
+        assert line.region.height == 2
+    assert rows[1] == "       = note: DOI 10.1016/j.xxxx.2021.99999 resolves to nothing"
+    assert str(rendered.spans[-1].style) == "dim"
+
+
 async def test_a_finding_prints_the_entrys_marker_once() -> None:
     """``Reference.raw`` keeps its printed marker (Phase 5); the row adds the number
     itself, so the label must strip the marker or read ``[7] [7] Marchetti …``."""

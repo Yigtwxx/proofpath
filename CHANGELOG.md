@@ -6,6 +6,47 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-09-15
+
+The TUI's second look. No behaviour change: every state word, every honesty sentence,
+the exit codes, the scheduler and the one-shot CLI are exactly v0.2.0's. Design in
+`docs/superpowers/specs/2026-09-15-tui-v2-design.md`; the by-hand session in both
+themes, with SVG screenshots, in `docs/eval/2026-09-15-tui-v2-live.md`.
+
+### Changed
+- **Two themes, one truth** (`tui/theme.py`). `rich` draws box borders, Unicode glyphs
+  and truecolor tones when the terminal gives evidence of them (`COLORTERM`, Windows
+  Terminal, iTerm2, kitty, WezTerm, Ghostty, VS Code, Terminal.app); `plain` is a pure-ASCII, ANSI-16 look
+  (v0.2.0's `⏺ ✗ ⚠ › ⧉` become `* x ! > [copy]`, and findings now print their `= note:`
+  lines as the CLI does), chosen under `NO_COLOR`, `--no-color`, `-q`,
+  `TERM=dumb`, legacy conhost, a CJK locale, or any session without truecolor evidence (an SSH
+  or tmux session that strips `COLORTERM` gets `plain`). `PROOFPATH_THEME=rich|plain` overrides
+  detection. The meaning colours stay `ui.py`'s tables; a theme changes how a meaning
+  looks, never what a word means. Spec §13.1's "pure ASCII" rule for the pet now binds
+  `plain` only.
+- **The pet** (`tui/pet.py`): `rich` draws a seven-line ferret with a real tail running
+  to the `[PROOF]` stamp; `plain` keeps the three-line one unchanged. Same eyes, same
+  blink, same reactions; the tail wags in `rich` while a run works.
+- **Run panels** (`tui/widgets/run_block.py`): in `rich` each run is a rounded panel in
+  its accent, the command and the state word on the top border, the coverage on the
+  bottom one; the stages are a fixed-column table (symbol, name, summary with `·`
+  separators, attribution, elapsed) and the active stage carries a real `▰▱` progress
+  bar with `done/total`. A finished stage that left something unverified keeps the
+  `⏺` mark instead of a tick. Below 60 columns the borders go and the flat rows
+  return; a run that crossed the floor either way says its coverage exactly once.
+- **Findings** (`tui/widgets/finding.py`): the state word is a badge, the location a
+  fixed cell, the tier right-aligned; the finding's notes and the claim (`you`) and
+  the passage (`source`) it was checked against are printed under it. A tier-less
+  badge keeps its row at 60–79 columns. `plain` prints the notes as the CLI's own
+  `= note:` rows and keeps `[copy]`.
+- **Footer** (`tui/widgets/footer.py`): `rich` draws the coverage as a proportional
+  `█▓░` bar in the three meaning colours over the counts line; `plain` keeps the
+  `kv` lines. The prompt wears a one-line rounded border in the run's accent.
+- **Structure** (OPEN-ITEMS 12.4): `tui/app.py` is split — `theme.py`, `pet.py`,
+  `verbs.py` and `tui/widgets/` (`run_block`, `finding`, `footer`, `prompt`,
+  `banner`, `_shared`) — and is now 681 lines of composition, scheduler wiring and
+  slash commands, no rendering.
+
 ## [0.2.0] - 2026-09-15
 
 The interactive front-end, author-year citations, SARIF output and a cache for the
