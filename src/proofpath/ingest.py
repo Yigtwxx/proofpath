@@ -23,6 +23,7 @@ import zipfile
 from bisect import bisect_right
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
+from itertools import pairwise
 from pathlib import Path
 from typing import Any, Literal
 
@@ -246,6 +247,12 @@ _ENTRY_START = re.compile(r"^\s*(?:\[(\d{1,4})\]|(\d{1,3})[.)]\s|(\d{1,3})\s{2,}
 # keeps a year out.
 
 
+# What a run of numbered paragraphs has to reach before it may be read as a
+# bibliography nobody put a heading on. Four numbered lines are a numbered list; a
+# reference list is longer than that, and mistaking one for the other would point
+# every citation at the wrong source.
+MIN_FALLBACK_ENTRIES = 5
+
 # offset in the paragraph text, line number, printed number, marker style.
 Cut = tuple[int, int, int, str]
 
@@ -264,6 +271,47 @@ def _entry_cuts(paragraph: Paragraph) -> list[Cut]:
         style = "bracket" if match.group(1) else "bare"
         cuts.append((offset, number, printed, style))
     return cuts
+
+
+def find_last_numbered_run(paragraphs: Sequence[Paragraph]) -> tuple[int, int] | None:
+    """Half-open range of the last run of numbered entries, or ``None``.
+
+    Nature and its family print the reference list with no heading of any kind, so
+    ``find_bibliography`` finds nothing and the paper arrives with no references at
+    all -- its citation markers then have nothing to be checked against, which the
+    coverage block can only report as a gap (OPEN-ITEMS 9.3 / 11.4).
+
+    What is left to go on is the shape of the block: a contiguous run of paragraphs
+    whose lines open with a printed number, the numbers counting upward, and enough
+    of them that a numbered list in the prose cannot be mistaken for one. The *last*
+    such run, because a paper's methods may number its steps and its bibliography
+    still comes after them.
+    """
+    marked = [index for index, paragraph in enumerate(paragraphs) if _entry_cuts(paragraph)]
+    if not marked:
+        return None
+    numbered = set(marked)
+    start = marked[-1]
+    while start - 1 in numbered:
+        start -= 1
+    printed = [
+        number
+        for index in range(start, marked[-1] + 1)
+        for _, _, number, _ in _entry_cuts(paragraphs[index])
+    ]
+    if len(printed) < MIN_FALLBACK_ENTRIES:
+        return None
+    # Strictly ascending: a bibliography counts up, a protocol's steps or a table of
+    # measurements do not have to. A gap is fine -- OCR loses entries -- but a number
+    # that goes backwards means these are not entries in one list.
+    if any(later <= earlier for earlier, later in pairwise(printed)):
+        return None
+    # The range ends at the last numbered paragraph, not at the end of the document.
+    # A heading says "everything after me is the bibliography"; a run found by shape
+    # says only what it covers, and whatever a journal prints after the list --
+    # acknowledgements, a reporting summary, author contributions -- is body text
+    # that would otherwise be glued onto the final entry.
+    return (start, marked[-1] + 1)
 
 
 def _collapse(text: str) -> str:
@@ -347,18 +395,29 @@ def _assemble(
     pages: int,
     errors: Sequence[PageError] = (),
     across_pages: bool = False,
+    headless_fallback: bool = False,
 ) -> Document:
     """Cut the bibliography off the body and put the Document together.
 
     ``across_pages`` rejoins an entry whose printing ran over a page break; only a
-    paged format asks for it.
+    paged format asks for it. ``headless_fallback`` lets a paged document whose
+    reference list carries no heading be found by its shape instead (see
+    ``find_last_numbered_run``); a pasted draft keeps its numbered lists.
     """
     heading = find_bibliography(paragraphs)
-    if heading is None:
+    span: tuple[int, int] | None = None
+    if heading is not None:
+        span = (heading + 1, len(paragraphs))
+    elif headless_fallback:
+        span = find_last_numbered_run(paragraphs)
+    if span is None:
         body, references = list(paragraphs), []
     else:
-        body = list(paragraphs[:heading])
-        entries = list(paragraphs[heading + 1 :])
+        start, end = span
+        # The heading itself is dropped; a run found by shape has none to drop.
+        body = list(paragraphs[: heading if heading is not None else start])
+        body.extend(paragraphs[end:])
+        entries = list(paragraphs[start:end])
         references = split_references(
             _merge_across_pages(entries) if across_pages else entries, start=0
         )
@@ -638,6 +697,7 @@ def from_pdf(path: Path) -> Document:
         pages=count,
         errors=errors,
         across_pages=True,
+        headless_fallback=True,
     )
 
 

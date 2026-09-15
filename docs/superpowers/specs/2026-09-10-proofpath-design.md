@@ -352,10 +352,23 @@ Retraction Watch is queried independently of this, keyed on the resolved DOI.
 
 1. `ingest` parses the document, keeping page and line numbers per sentence.
 2. `claims` pairs each in-text citation marker with the sentence carrying it, and
-   extracts numeric spans (§10). v0.1 handles **numeric markers only** (`[12]`,
-   `[12,15]`, `[12-15]`); an author-year marker such as `(Smith et al., 2020)` is
-   reported as `UNSUPPORTED CITATION STYLE` and skipped, never guessed. Author-year
-   pairing is a v0.2 task with its own test set (§17).
+   extracts numeric spans (§10). v0.2 handles **numeric markers** (`[12]`, `[12,15]`,
+   `[12-15]`) **and author-year ones**: `(Smith et al., 2020)`, `(Smith, 2020; Jones,
+   2021)`, narrative `Jones and Ruiz (2019b)`, page and chapter tails (`, p. 12`), and
+   the back-references `ibid.` and `op. cit.`. An author-year item is paired with a
+   bibliography entry only when the first author's surname (diacritics folded, last word
+   only, so `van der Berg` meets a `Berg` hint) *and* the printed year both agree.
+   Several entries agreeing equally well resolve only through a printed `2020a`/`2020b`
+   disambiguator; without one, and whenever nothing matches, the marker is reported as
+   `UNRESOLVED MARKER` and never guessed. A mixed `(see Smith, 2020; [12])` yields both
+   halves — the numeric marker and the author-year one — rather than letting the number
+   win the overlap.
+
+   `UNSUPPORTED CITATION STYLE` is left for the styles the patterns still do not read:
+   footnote-only citations, superscript *letters* (`ᵃ`), and a bare `Smith 2020` with
+   neither a comma nor brackets to tell it from a label. Nothing detects those today, so
+   they reach no report at all; measured misses and the live ceiling on a real ACL PDF
+   are in `docs/eval/2026-09-12-pairing-author-year.md`.
 
    **Paragraph-scoped citations.** When the marker sits at the end of a paragraph
    and its carrying sentence holds no other marker, the citation is treated as
@@ -848,7 +861,8 @@ presented as evidence of absence.
 | `NEI` | source read, but it neither supports nor contradicts |
 | `UNVERIFIED (not in bibliographic indexes)` | web page, blog, report, manual or organisation-authored document; indexes do not cover it, so absence proves nothing (§8.1) |
 | `PARAGRAPH-SCOPED` | the citation supports a paragraph, not one sentence (§9); every sentence is verified separately and grouped |
-| `UNSUPPORTED CITATION STYLE` | author-year marker found; v0.1 pairs numeric markers only, so the claim is listed but not judged |
+| `UNSUPPORTED CITATION STYLE` | a citation style proofpath cannot pair yet — footnote-only and superscript-letter (`ᵃ`) styles; the claim is listed but not judged. Author-year has been paired since v0.2 and is no longer reported here |
+| `UNRESOLVED MARKER` | a citation marker naming no bibliography entry: a number outside what the list prints, or an author-year item with no matching entry — or with several and no `2020a`/`2020b` to say which. Reported, never guessed at (§9 step 2) |
 
 Unparseable pages fail loudly with the page number and processing continues.
 
@@ -889,6 +903,12 @@ ghost set.
 SARIF output, verdict cache, fetch ladder steps 2-4 including the permission prompt
 and config file (§7.1), and author-year citation pairing (`(Smith et al., 2020)`,
 `ibid.`, same author-year collisions) with its own test set.
+*Shipped 2026-09-15 as v0.2.0:* the TUI (§13.1) with concurrent, cancellable runs and
+the §7.1 prompt drawn inline; `check --format sarif` (§13.2), validated against the
+2.1.0 schema; the full fetch ladder with the terminal and inline prompts; author-year
+pairing at 0.940 on its hand set (`docs/eval/2026-09-12-pairing-author-year.md`); and,
+beyond the plan, a resolution and retraction cache (warm re-run 1.35 s,
+`docs/eval/2026-09-15-v0.2-live.md`).
 
 **v0.3 — judge layer.** Opt-in LLM second opinion, Ollama default, OpenRouter and
 Gemini adapters, batching and cost reporting.

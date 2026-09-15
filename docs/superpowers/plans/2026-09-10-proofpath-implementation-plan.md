@@ -263,6 +263,26 @@ coverage) were fixed before tagging (Task 7.4).
 cancelling a run leaves no partial cache entries, the coverage footer never scrolls
 away, and the TUI renders correctly at 80 columns.
 
+**Status (2026-09-15): released as v0.2.0.** Tasks 8.1–8.7 (`.superpowers/sdd/phase8/`):
+banner and slash commands, the `Scheduler`, the app, the inline §7.1 prompt with the
+mirrored verbs over `commands.py`, author-year pairing (hand set 0.940,
+`docs/eval/2026-09-12-pairing-author-year.md`), `sarif.py` with `check --format sarif`,
+and the v0.1 field findings (resolution + retraction cache, browser-binary check,
+resolver rescues, headless-bibliography fallback; ghost set 274 rows at 0.0 % false-ghost).
+Gates: the SARIF log validates against the vendored 2.1.0 schema (14 results on the live
+draft; the `code` CLI was not available to open it in VS Code — recorded as such); a
+cancelled run keeps its decided verdicts and caches nothing partial (tests in
+`test_tui_runs.py` / `test_verify.py`); the coverage footer is a docked widget; every TUI
+test renders at 80 × 24. Live checks in `docs/eval/2026-09-15-v0.2-live.md`: warm
+re-run 1.35 s, the TUI driven in a real pty, an author-year draft paired 6 of 6.
+
+---
+
+**Phases 9–10: deferred.** Development stops after v0.2.0 for now. The judge layer and
+the social provider are planned in detail in
+[`2026-09-12-phases-9-10-plan.md`](2026-09-12-phases-9-10-plan.md); the sections
+below are the original outline and stay as the scope statement.
+
 ---
 
 ## Phase 9 — Judge layer (v0.3)

@@ -36,10 +36,12 @@ from proofpath.fetch import Fetched, FetchStats, Outcome
 from proofpath.models import Label
 from proofpath.oa import ABSTRACT_ONLY, Attempt, Evidence, Location
 from proofpath.pipeline import Thresholds
+from proofpath.polite import ProviderError
 from proofpath.report import Kind
 from proofpath.resolve import Candidate, ResolveResult, Retraction, State
 from proofpath.retrieval import Embedder
 from proofpath.verify import (
+    CACHE_BY,
     CLAIMS,
     FETCHING,
     LOADING_MODELS,
@@ -49,7 +51,9 @@ from proofpath.verify import (
     NOT_ATTEMPTED,
     NOTHING_TO_VERIFY,
     PARSING,
+    RESOLVERS_BY,
     RESOLVING,
+    RETRACTION_UNAVAILABLE,
     RETRACTIONS,
     VERIFYING,
     Engine,
@@ -341,17 +345,29 @@ def test_a_document_with_no_text_at_all_cannot_look_clean(
 # --- stage 2: claims ---------------------------------------------------------
 
 
-def test_author_year_marker_is_reported_at_its_locator() -> None:
+def test_an_author_year_marker_no_entry_answers_is_reported_at_its_locator() -> None:
+    # The only entry is Vaswani 2017, so "(Smith et al., 2020)" names nothing this
+    # document lists. v0.2 pairs the style, so the marker is reported as unresolved --
+    # a statement about this bibliography, not about what the tool can read.
     text, doc = drafted("The effect was large (Smith et al., 2020) and real.", [REAL])
     ready = prepare(text, engine())
 
-    style = [f for f in ready.findings if f.kind is Kind.UNSUPPORTED_STYLE]
-    assert len(style) == 1
-    marker = ready.claims.unsupported[0]
-    assert style[0].locator == doc.locate(marker.paragraph, marker.start)
-    assert style[0].level == "note"
-    assert style[0].title == "author-year citation is not paired in v0.1"
-    assert style[0].claim is None
+    assert [f for f in ready.findings if f.kind is Kind.UNSUPPORTED_STYLE] == []
+    unresolved = [f for f in ready.findings if f.kind is Kind.UNRESOLVED_MARKER]
+    assert len(unresolved) == 1
+    marker = ready.claims.unresolved[0]
+    assert unresolved[0].locator == doc.locate(marker.paragraph, marker.start)
+    assert unresolved[0].detail == ("(Smith et al., 2020)",)
+    assert unresolved[0].claim is None
+
+
+def test_an_author_year_marker_is_paired_with_the_entry_it_names() -> None:
+    text = draft("The attention result was large (Vaswani, 2017) and real.", [REAL])
+    ready = prepare(text, engine(resolver=StubResolver({"Vaswani": resolved()})))
+
+    assert ready.claims.unresolved == ()
+    assert [claim.cited_refs for claim in ready.claims.claims] == [(1,)]
+    assert ready.claims.claims[0].text == "The attention result was large and real."
 
 
 def test_unresolved_marker_is_reported_with_its_text() -> None:
@@ -363,7 +379,7 @@ def test_unresolved_marker_is_reported_with_its_text() -> None:
     assert unresolved[0].title == "citation marker names no bibliography entry"
     claims_stage = ready.stages[1]
     assert (claims_stage.name, claims_stage.by) == (CLAIMS, "rules")
-    assert claims_stage.summary == "2 citations, 0 unsupported"
+    assert claims_stage.summary == "2 citations, 1 unresolved"
 
 
 # --- stage 3: resolving ------------------------------------------------------
@@ -1331,3 +1347,174 @@ def test_decide_all_leaves_the_models_on_the_engine() -> None:
     eng.close()
     assert embedder_model.closed == 1
     assert scorer_model.closed == 1
+
+
+# --- the resolution and retraction cache (OPEN-ITEMS 10.8, 11.3) --------------
+
+
+def test_a_second_prepare_of_the_same_document_makes_no_resolver_calls(tmp_path: Path) -> None:
+    """The point of the cache: a warm run is an offline run, resolving included."""
+    text, _ = drafted("The effect was large [1].", [REAL])
+    retractions = {DOI: Retraction("retraction-watch", "2021-03-01", "10.1/n", "Retraction")}
+    with Cache(tmp_path / "c.sqlite3") as db:
+        first = StubResolver({"Vaswani": resolved()}, retractions)
+        prepare(text, engine(resolver=first, cache=db))
+        assert first.resolved and first.asked_retraction == [DOI]
+
+        second = StubResolver({"Vaswani": resolved()}, retractions)
+        ready = prepare(text, engine(resolver=second, cache=db))
+
+    assert second.resolved == []
+    assert second.asked_retraction == []
+    status = ready.sources[1]
+    assert status.resolve is not None and status.resolve.state is State.RESOLVED
+    assert status.resolve_from_cache is True
+    # The retraction survived the round trip, so the finding is still raised.
+    assert status.retraction is not None and status.retraction.date == "2021-03-01"
+    assert [f.kind for f in ready.findings if f.kind is Kind.RETRACTED] == [Kind.RETRACTED]
+
+
+def test_a_cached_run_attributes_the_two_stages_to_the_cache(tmp_path: Path) -> None:
+    text, _ = drafted("The effect was large [1].", [REAL])
+    with Cache(tmp_path / "c.sqlite3") as db:
+        prepare(text, engine(resolver=StubResolver({"Vaswani": resolved()}), cache=db))
+        ready = prepare(text, engine(resolver=StubResolver({"Vaswani": resolved()}), cache=db))
+    by = {stage.name: stage.by for stage in ready.stages}
+    assert by[RESOLVING] == CACHE_BY
+    assert by[RETRACTIONS] == CACHE_BY
+
+
+def test_a_partly_cached_run_still_names_the_providers(tmp_path: Path) -> None:
+    """One reference out of two came from the wire, so the stage did consult them."""
+    first_text, _ = drafted("A [1].", [REAL])
+    both_text, _ = drafted("A [1]. B [2].", [REAL, GHOSTLY])
+    with Cache(tmp_path / "c.sqlite3") as db:
+        prepare(first_text, engine(resolver=StubResolver({"Vaswani": resolved()}), cache=db))
+        resolver = StubResolver({"Vaswani": resolved()})
+        ready = prepare(both_text, engine(resolver=resolver, cache=db))
+    assert resolver.resolved == [f"[2] {GHOSTLY}"]
+    assert {stage.name: stage.by for stage in ready.stages}[RESOLVING] == RESOLVERS_BY
+
+
+def test_an_unavailable_resolution_is_never_served_from_the_cache(tmp_path: Path) -> None:
+    """Product rule 2: an outage is not knowledge, so the next run asks again."""
+    text, _ = drafted("The effect was large [1].", [REAL])
+    down = ResolveResult(State.UNAVAILABLE, None, [], notes=["crossref unavailable (HTTP 503)"])
+    with Cache(tmp_path / "c.sqlite3") as db:
+        prepare(text, engine(resolver=StubResolver({"Vaswani": down}), cache=db))
+        second = StubResolver({"Vaswani": resolved()})
+        ready = prepare(text, engine(resolver=second, cache=db))
+    assert second.resolved == [f"[1] {REAL}"]
+    status = ready.sources[1]
+    assert status.resolve is not None and status.resolve.state is State.RESOLVED
+    assert status.resolve_from_cache is False
+
+
+def test_no_cache_bypasses_the_resolution_cache(tmp_path: Path) -> None:
+    text, _ = drafted("The effect was large [1].", [REAL])
+    with Cache(tmp_path / "c.sqlite3") as db:
+        prepare(text, engine(resolver=StubResolver({"Vaswani": resolved()}), cache=db))
+    # ``--no-cache`` builds an engine with no cache at all; nothing is consulted.
+    resolver = StubResolver({"Vaswani": resolved()})
+    prepare(text, engine(resolver=resolver, cache=None))
+    assert resolver.resolved == [f"[1] {REAL}"]
+
+
+def test_a_denied_network_never_writes_a_resolution(tmp_path: Path) -> None:
+    """Nothing was asked of anyone, so there is nothing to remember (rule 2)."""
+    text, _ = drafted("The effect was large [1].", [REAL])
+    fetcher = StubFetcher(network_allowed=False, network_note="network = deny")
+    with Cache(tmp_path / "c.sqlite3") as db:
+        prepare(text, engine(resolver=StubResolver(), fetcher=fetcher, cache=db))
+        assert db.lookup_counts() == (0, 0)
+
+
+# --- fix round 1: a retraction outage is never cached as "not retracted" ----------
+
+
+class DownRetractions(StubResolver):
+    """A resolver whose retraction check has lost every provider."""
+
+    def retraction(self, doi: str) -> Retraction | None:
+        self.asked_retraction.append(doi)
+        raise ProviderError("retraction check unavailable (ConnectError)")
+
+
+def test_a_retraction_outage_is_reported_and_never_cached(tmp_path: Path) -> None:
+    """Product rule 2: nobody answered, so nothing is known -- and a 7-day cached
+    "not retracted" would freeze that outage into a clean record."""
+    text, _ = drafted("The effect was large [1].", [REAL])
+    with Cache(tmp_path / "c.sqlite3") as db:
+        down = DownRetractions({"Vaswani": resolved()})
+        ready = prepare(text, engine(resolver=down, cache=db))
+        assert down.asked_retraction == [DOI]
+        assert db.get_retraction(DOI) is None  # nothing was stored
+
+        # The next run asks again rather than serving the outage.
+        again = DownRetractions({"Vaswani": resolved()})
+        prepare(text, engine(resolver=again, cache=db))
+        assert again.asked_retraction == [DOI]
+
+    status = ready.sources[1]
+    assert status.retraction is None
+    assert any(note.startswith(RETRACTION_UNAVAILABLE) for note in status.notes)
+    summary = {stage.name: stage.summary for stage in ready.stages}
+    assert summary[RETRACTIONS] == "1 unavailable"  # never the green "none"
+    assert not [f for f in ready.findings if f.kind is Kind.RETRACTED]
+
+
+def test_a_clean_retraction_check_is_cached_and_says_none(tmp_path: Path) -> None:
+    text, _ = drafted("The effect was large [1].", [REAL])
+    with Cache(tmp_path / "c.sqlite3") as db:
+        ready = prepare(text, engine(resolver=StubResolver({"Vaswani": resolved()}), cache=db))
+        hit = db.get_retraction(DOI)
+        assert hit is not None and hit.notice is None
+    assert {stage.name: stage.summary for stage in ready.stages}[RETRACTIONS] == "none"
+
+
+def test_a_retraction_hit_is_cached_and_counted(tmp_path: Path) -> None:
+    text, _ = drafted("The effect was large [1].", [REAL])
+    notice = Retraction("retraction-watch", "2021-03-01", "10.1/n", "Retraction")
+    with Cache(tmp_path / "c.sqlite3") as db:
+        ready = prepare(
+            text,
+            engine(resolver=StubResolver({"Vaswani": resolved()}, {DOI: notice}), cache=db),
+        )
+        hit = db.get_retraction(DOI)
+        assert hit is not None and hit.notice == notice
+    assert {stage.name: stage.summary for stage in ready.stages}[RETRACTIONS] == "1 retracted"
+
+
+def test_an_outage_alongside_a_notice_is_counted_apart(tmp_path: Path) -> None:
+    """Two sources, two different facts; the summary may not merge them."""
+    other = "Jumper, J. et al. Highly accurate protein structure prediction. Nature, 2021."
+    text, _ = drafted("A [1]. B [2].", [REAL, other])
+    notice = Retraction("retraction-watch", "2021-03-01", "10.1/n", "Retraction")
+
+    class OneDown(StubResolver):
+        def retraction(self, doi: str) -> Retraction | None:
+            self.asked_retraction.append(doi)
+            if doi == DOI:
+                return notice
+            raise ProviderError("retraction check unavailable (HTTP 503)")
+
+    resolver = OneDown({"Vaswani": resolved(), "Jumper": resolved("10.1038/other")})
+    with Cache(tmp_path / "c.sqlite3") as db:
+        ready = prepare(text, engine(resolver=resolver, cache=db))
+        assert db.get_retraction("10.1038/other") is None
+    summary = {stage.name: stage.summary for stage in ready.stages}
+    assert summary[RETRACTIONS] == "1 retracted, 1 unavailable"
+
+
+def test_a_retraction_note_survives_the_fetching_stage(tmp_path: Path) -> None:
+    """Stage 5 replaces the source's notes with the fetch's own; a fact stage 4
+    recorded must not be dropped on the way."""
+    text, _ = drafted("The effect was large [1].", [REAL])
+    chain = StubOpenAccess({DOI: abstract_evidence()})
+    with Cache(tmp_path / "c.sqlite3") as db:
+        ready = prepare(
+            text, engine(resolver=DownRetractions({"Vaswani": resolved()}), chain=chain, cache=db)
+        )
+    notes = ready.sources[1].notes
+    assert any(note.startswith(RETRACTION_UNAVAILABLE) for note in notes)
+    assert "no open-access full text" in notes  # the fetch's own note is still there

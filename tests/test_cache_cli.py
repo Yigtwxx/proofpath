@@ -10,9 +10,15 @@ from typer.testing import CliRunner
 from proofpath.cache import Cache, sha256_text
 from proofpath.cli import app
 from proofpath.models import Label, Passage, Verdict
+from proofpath.resolve import Candidate, ResolveResult, State
 
 runner = CliRunner()
 NOW = datetime(2026, 9, 11, tzinfo=timezone.utc)
+RESOLVED = ResolveResult(
+    State.RESOLVED,
+    Candidate("10.1/x", "Array programming with NumPy", "Harris", 2020, "Nature", "crossref"),
+    [],
+)
 
 
 @pytest.fixture
@@ -86,3 +92,24 @@ def test_cache_clear_expired_then_all(cache_path: Path) -> None:
     result = runner.invoke(app, ["cache", "clear"])
     assert result.exit_code == 0 and "1 source" in result.stdout
     assert "0 source" in runner.invoke(app, ["cache"]).stdout
+
+
+def test_cache_reports_the_lookup_counts(cache_path: Path) -> None:
+    with Cache() as db:
+        db.put_resolution("Harris, C. R. Array programming with NumPy. 2020.", RESOLVED, now=NOW)
+        db.put_retraction("10.1/x", None, now=NOW)
+    assert "1 resolutions, 1 retraction checks" in runner.invoke(app, ["cache"]).stdout
+    assert "1 resolution(s), 1 retraction check(s)" in runner.invoke(app, ["cache", "ls"]).stdout
+
+
+def test_cache_clear_expired_also_clears_the_lookups(cache_path: Path) -> None:
+    with Cache() as db:
+        db.put_resolution(
+            "Harris, C. R. Array programming with NumPy. 2020.",
+            RESOLVED,
+            now=NOW - timedelta(days=40),
+        )
+        db.put_retraction("10.1/x", None, now=NOW - timedelta(days=40))
+    result = runner.invoke(app, ["cache", "clear", "--expired"])
+    assert result.exit_code == 0
+    assert "1 resolution(s), 1 retraction check(s)" in result.stdout

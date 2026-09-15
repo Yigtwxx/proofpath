@@ -25,8 +25,22 @@ _ABBREVIATIONS = (
     "et al.", "Dr.", "Mr.", "Ms.", "Prof.", "Fig.", "vs.", "e.g.", "i.e.", "cf.",
     "Eq.", "Ref.", "Refs.", "No.", "Sec.", "Tab.", "approx.", "ca.", "Jr.", "St.",
 )  # fmt: skip
+# The page and chapter tails an author-year citation prints inside its own brackets
+# ("(Smith, 2020, p. 12)"): cutting the sentence there put half the marker in one
+# sentence and half in the next, and the claim lost its full stop with it. These are
+# *locators*, so they only hold a sentence together when a number follows: "It rose by
+# 5 pp. The trend…" ends a sentence with a unit and still splits.
+_LOCATORS = ("p.", "pp.", "ch.", "chap.")  # fmt: skip
 _NOT_AFTER_ABBREVIATION = "".join(f"(?<!\\b{re.escape(a)})" for a in _ABBREVIATIONS)
-_BOUNDARY = re.compile(_NOT_AFTER_ABBREVIATION + r"(?<=[.!?])\s+(?=[A-Z0-9(\[\"'])")
+_NOT_AFTER_LOCATOR = "".join(f"(?<!\\b{re.escape(a)})" for a in _LOCATORS)
+# The look-behinds sit at the start of the match, which is the position just after the
+# terminal punctuation; the locator ones are in the digit branch alone, so they say
+# nothing about a sentence that happens to end in one of those words.
+_BOUNDARY = re.compile(
+    _NOT_AFTER_ABBREVIATION
+    + r"(?<=[.!?])"
+    + rf"(?:{_NOT_AFTER_LOCATOR}\s+(?=\d)|\s+(?=[A-Z(\[\"']))"
+)
 # A lone capital before a period is an author initial ("J. Smith"), not a sentence
 # end -- wherever in the sentence it sits ("a study by J. Smith showed"). Checked
 # after the match, not in the pattern: the rule needs no context to its left, and

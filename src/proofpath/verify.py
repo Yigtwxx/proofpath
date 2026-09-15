@@ -65,7 +65,7 @@ from proofpath.models import Label, Passage, Verdict
 from proofpath.oa import ABSTRACT_ONLY, Evidence, OpenAccess
 from proofpath.paths import models_dir
 from proofpath.pipeline import DEFAULT_THRESHOLDS, Thresholds
-from proofpath.polite import PoliteClient, user_agent
+from proofpath.polite import PoliteClient, ProviderError, user_agent
 from proofpath.report import (
     LEVELS,
     STATE_WORDS,
@@ -96,11 +96,22 @@ CLAIMS_BY = "rules"
 RESOLVERS_BY = "Crossref, Semantic Scholar"
 RETRACTIONS_BY = "Retraction Watch"
 FETCH_BY = "fetch ladder"
+# What the resolving and retraction stages are attributed to when every reference
+# came out of the cache: naming the providers would say they were consulted, and on
+# a warm run nobody was (OPEN-ITEMS 10.8). The same word the fetching stage uses.
+CACHE_BY = "cache"
 
 # What a stage says when the network permission stopped it before it began. A
 # count would be a claim about the references ("0 ghost" says they were checked
 # and none was a ghost); a stage that ran on nothing has nothing to count.
 NOT_ATTEMPTED = "not attempted (network not permitted)"
+
+# What a source says when every retraction provider failed. ``Resolver.retraction``
+# returns ``None`` for "checked, and there is no notice" and raises for "nobody
+# answered"; the two must never read alike, and the second is never cached -- a
+# 7-day "not retracted" earned by an outage is exactly the absence-as-evidence
+# product rule 2 forbids.
+RETRACTION_UNAVAILABLE = "retraction check unavailable"
 
 # Two states section 15 does not name, because they are not a provider's answer:
 # both are this module's own reading of what happened, and both keep the shape of
@@ -449,12 +460,17 @@ def prepare(
     # --- 2. claims ----------------------------------------------------------
     began = opened(CLAIMS, CLAIMS_BY)
     claims = claims_mod.extract(document)
+    # Empty in v0.2: `claims` pairs both the styles it detects (numeric and author-year),
+    # so what is left here is a style a later version will detect but still not pair --
+    # footnote-only citations, superscript letters. The loop stays because the day one of
+    # those is detected it has to be *reported*, not counted as a document with no
+    # citations (product rule 6).
     for marker in claims.unsupported:
         add(
             _finding(
                 Kind.UNSUPPORTED_STYLE,
                 _marker_locator(document, marker),
-                "author-year citation is not paired in v0.1",
+                "citation style is not paired in this version",
             )
         )
     for marker in claims.unresolved:
@@ -470,7 +486,7 @@ def prepare(
     closed(
         CLAIMS,
         CLAIMS_BY,
-        f"{len(claims.markers)} citations, {len(claims.unsupported)} unsupported",
+        f"{len(claims.markers)} citations, {len(claims.unresolved)} unresolved",
         began,
     )
 
@@ -495,6 +511,8 @@ def prepare(
     # than dropped between the two stages.
     pending: dict[int, tuple[str | None, str | None, str]] = {}
     tally: Counter[State] = Counter()
+    resolved_total = 0
+    resolved_from_cache = 0
     for index, number in enumerate(cited, start=1):
         reference = by_number.get(number)
         if reference is None:
@@ -528,7 +546,19 @@ def prepare(
             emit(Progress(name=RESOLVING, done=index, total=len(cited), detail=f"[{number}]"))
             check()
             continue
-        result = engine.resolver.resolve(reference.raw)
+        # The cache answers for a reference, not for a source: a reference has no
+        # source id until it resolves. A miss costs exactly what it used to.
+        stored = None if engine.cache is None else engine.cache.get_resolution(reference.raw)
+        if stored is None:
+            result = engine.resolver.resolve(reference.raw)
+            if engine.cache is not None:
+                # ``put_resolution`` drops UNVERIFIED (provider unavailable) itself:
+                # an outage is not knowledge about the reference (product rule 2).
+                engine.cache.put_resolution(reference.raw, result)
+        else:
+            result = stored
+            resolved_from_cache += 1
+        resolved_total += 1
         tally[result.state] += 1
         state, source_id, plan = _placed(result, reference, add)
         if plan is not None:
@@ -543,13 +573,14 @@ def prepare(
             fetch_step=None,
             url=plan[2] if plan is not None else "",
             from_cache=False,
+            resolve_from_cache=stored is not None,
         )
         emit(Progress(name=RESOLVING, done=index, total=len(cited), detail=f"[{number}]"))
         check()
     # "0 ghost" would be a claim about the references; nothing was looked at.
     closed(
         RESOLVING,
-        RESOLVERS_BY,
+        _attribution(RESOLVERS_BY, total=resolved_total, cached=resolved_from_cache),
         _resolve_summary(tally) if allowed else NOT_ATTEMPTED,
         began,
     )
@@ -562,8 +593,28 @@ def prepare(
         if status.source_id is not None and status.source_id.startswith("doi:")
     ]
     retracted = 0
+    unavailable = 0
+    checked_from_cache = 0
     for index, (number, doi) in enumerate(dois, start=1):
-        notice = engine.resolver.retraction(doi)
+        hit = None if engine.cache is None else engine.cache.get_retraction(doi)
+        if hit is None:
+            try:
+                notice = engine.resolver.retraction(doi)
+            except ProviderError as exc:
+                # Nothing was learned, so nothing is stored and nothing is claimed.
+                unavailable += 1
+                status = sources[number]
+                sources[number] = replace(
+                    status, notes=(*status.notes, f"{RETRACTION_UNAVAILABLE}: {exc}")
+                )
+                emit(Progress(name=RETRACTIONS, done=index, total=len(dois), detail=doi))
+                check()
+                continue
+            if engine.cache is not None:
+                engine.cache.put_retraction(doi, notice)
+        else:
+            notice = hit.notice
+            checked_from_cache += 1
         if notice is not None:
             retracted += 1
             sources[number] = replace(sources[number], retraction=notice)
@@ -584,8 +635,8 @@ def prepare(
     # were none, which is not what a denied run knows.
     closed(
         RETRACTIONS,
-        RETRACTIONS_BY,
-        (f"{retracted} retracted" if retracted else "none") if allowed else NOT_ATTEMPTED,
+        _attribution(RETRACTIONS_BY, total=len(dois), cached=checked_from_cache),
+        _retraction_summary(retracted, unavailable) if allowed else NOT_ATTEMPTED,
         began,
     )
 
@@ -611,7 +662,10 @@ def prepare(
             fetch_step=read.step,
             url=read.url or status.url,
             from_cache=read.from_cache,
-            notes=read.notes,
+            # Appended, not replaced: an earlier stage may have recorded something
+            # about this source (a retraction check nobody answered) that the fetch
+            # knows nothing about and must not erase.
+            notes=(*status.notes, *read.notes),
         )
         if read.text and status.source_id is not None:
             texts[status.source_id] = read.text
@@ -1052,6 +1106,23 @@ def _ordered(item: Finding) -> tuple[int, int, int, str]:
 
 
 # --- stage helpers ----------------------------------------------------------------
+
+
+def _retraction_summary(retracted: int, unavailable: int) -> str:
+    """ "none" only when every DOI was checked and every check came back clean. A run
+    that could not reach a provider says so instead of reporting a clean sheet."""
+    parts = []
+    if retracted:
+        parts.append(f"{retracted} retracted")
+    if unavailable:
+        parts.append(f"{unavailable} unavailable")
+    return ", ".join(parts) or "none"
+
+
+def _attribution(providers: str, *, total: int, cached: int) -> str:
+    """Who a network stage is attributed to: the providers, or the cache when every
+    one of its units came from there and none of them was asked of anyone."""
+    return CACHE_BY if total > 0 and cached == total else providers
 
 
 @dataclass(frozen=True)

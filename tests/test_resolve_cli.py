@@ -27,7 +27,7 @@ def test_format_sarif_is_refused_rather_than_rendered_as_text() -> None:
     """The value parses everywhere the enum does; only Phase 8 makes it mean something."""
     result = runner.invoke(app, ["resolve", "--format", "sarif", ALPHAFOLD])
     assert result.exit_code == 2
-    assert "error: --format sarif arrives in v0.2" in result.output
+    assert "error: --format sarif applies to check only" in result.output
 
 
 @respx.mock
@@ -207,3 +207,57 @@ def test_resolve_exit_code_follows_spec_13_3(
     stub = rs.ResolveResult(rs.State[state], None, [])
     monkeypatch.setattr(rs.Resolver, "resolve", lambda self, raw: stub)
     assert runner.invoke(app, ["resolve", ALPHAFOLD]).exit_code == code
+
+
+@respx.mock
+def test_resolve_reports_a_failed_retraction_check_instead_of_dying() -> None:
+    """Both retraction routes down: the record resolves, the check is reported as
+    unavailable (rule 2, never "not retracted"), the run is not clean, no traceback."""
+    respx.get("https://api.crossref.org/works").mock(
+        return_value=httpx.Response(
+            200, json=json.loads((FIX / "crossref_alphafold.json").read_text())
+        )
+    )
+    respx.get("https://api.semanticscholar.org/graph/v1/paper/search/match").mock(
+        return_value=httpx.Response(200, json=json.loads((FIX / "s2_alphafold.json").read_text()))
+    )
+    # 403 is not retried, so the failure is immediate and the test never sleeps.
+    respx.get("https://api.crossref.org/works/10.1038/s41586-021-03819-2").mock(
+        return_value=httpx.Response(403)
+    )
+    respx.get("https://api.openalex.org/works/https://doi.org/10.1038/s41586-021-03819-2").mock(
+        return_value=httpx.Response(403)
+    )
+    result = runner.invoke(app, ["resolve", ALPHAFOLD])
+    assert result.exit_code == 1, result.output
+    assert result.exception is None or isinstance(result.exception, SystemExit)
+    assert "Traceback" not in result.output
+    assert "state      RESOLVED" in result.stdout
+    assert "retraction unavailable (crossref and openalex unavailable (HTTP 403))" in result.stdout
+    assert "not retracted" not in result.stdout
+
+
+def test_resolve_json_carries_the_retraction_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    from proofpath import resolve as rs
+    from proofpath.polite import ProviderError
+
+    def boom(self: rs.Resolver, doi: str) -> rs.Retraction | None:
+        raise ProviderError("crossref and openalex unavailable (HTTP 503)")
+
+    _resolved(monkeypatch)
+    monkeypatch.setattr(rs.Resolver, "retraction", boom)
+    result = runner.invoke(app, ["resolve", "--format", "json", ALPHAFOLD])
+    assert result.exit_code == 1, result.output
+    payload = json.loads(result.stdout)
+    assert payload["retraction"] is None
+    assert payload["retraction_error"] == "crossref and openalex unavailable (HTTP 503)"
+
+
+def test_resolve_unavailable_retraction_is_yellow_on_a_terminal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Caution, not a finding: the source may be fine, nobody could say (rule 2)."""
+    from proofpath import ui
+
+    styled = ui.style_state(ui.build(force_terminal=True), "unavailable")
+    assert [str(span.style) for span in styled.spans] == ["yellow"]

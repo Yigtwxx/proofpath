@@ -10,7 +10,7 @@ import signal
 import sys
 import threading
 from collections.abc import Iterator
-from contextlib import ExitStack, contextmanager, suppress
+from contextlib import contextmanager, suppress
 from dataclasses import replace
 from enum import Enum
 from pathlib import Path
@@ -19,18 +19,16 @@ from typing import Annotated
 
 import typer
 
-from proofpath import __version__, events, ingest, ui
+from proofpath import __version__, events, ingest, sarif, ui
+from proofpath import commands as lib
 from proofpath import config as cfg
 from proofpath import fetch as fetch_mod
 from proofpath import judge as judge_mod
 from proofpath import oa as oa_mod
 from proofpath import report as report_mod
-from proofpath import resolve as resolve_mod
 from proofpath import verify as verify_mod
 from proofpath.browser import ConsentGate
-from proofpath.cache import Cache
 from proofpath.paths import config_path
-from proofpath.polite import PoliteClient
 
 app = typer.Typer(
     name="proofpath",
@@ -43,11 +41,6 @@ app = typer.Typer(
 EXIT_CLEAN = 0
 EXIT_FINDINGS = 1
 EXIT_ERROR = 2
-
-# The bare-invocation line, until Phase 8 opens the TUI here instead.
-_NO_TUI_YET = (
-    f"proofpath {__version__} — the interactive TUI arrives in v0.2; try: proofpath check paper.pdf"
-)
 
 # Where ``check`` writes its markdown when ``--out`` is not given (text mode only).
 DEFAULT_REPORT = Path("report.md")
@@ -74,10 +67,15 @@ def main(
     ] = False,
 ) -> None:
     """Launch the interactive TUI when called with no subcommand."""
-    ctx.obj = ui.build(no_color=no_color, quiet=quiet)
+    out = ui.build(no_color=no_color, quiet=quiet)
+    ctx.obj = out
     if ctx.invoked_subcommand is not None:
         return
-    typer.echo(_NO_TUI_YET)
+    # Imported here and not at the top: ``textual`` is the one dependency the one-shot
+    # verbs never need, and a ``proofpath check`` in CI should not pay for loading it.
+    from proofpath.tui.app import run
+
+    run(_load_config(out), out)
     raise typer.Exit(EXIT_CLEAN)
 
 
@@ -93,10 +91,11 @@ def _fail(out: ui.Ui, exc: Exception) -> typer.Exit:
 
 
 def _reject_sarif(out: ui.Ui, fmt: Format) -> None:
-    """``sarif`` parses wherever ``Format`` does, but only ``check`` will ever emit it,
-    and not before Phase 8. Every command says so rather than quietly printing text."""
+    """``sarif`` parses wherever ``Format`` does, but a SARIF log is a *document's*
+    findings, so only ``check`` emits one. The other verbs say so rather than quietly
+    printing text."""
     if fmt is Format.SARIF:
-        ui.error(out, "--format sarif arrives in v0.2")
+        ui.error(out, "--format sarif applies to check only")
         raise typer.Exit(EXIT_ERROR)
 
 
@@ -127,21 +126,20 @@ def config(ctx: typer.Context) -> None:
 def config_show(ctx: typer.Context) -> None:
     """Print the config path and every section as TOML."""
     out = _ui(ctx)
-    current = _load_config(out)
-    path = config_path()
-    state = "" if path.exists() else "  (not written yet, showing defaults)"
-    ui.kv(out, "config", f"{path}{state}")
+    try:
+        view = lib.config_view()
+    except cfg.ConfigError as exc:
+        raise _fail(out, exc) from exc
+    state = "" if view.exists else "  (not written yet, showing defaults)"
+    ui.kv(out, "config", f"{view.path}{state}")
     ui.blank(out)
-    out.out.print(cfg.render_config(current))
+    out.out.print(view.toml)
 
 
 @config_app.command("path")
 def config_path_cmd(ctx: typer.Context) -> None:
     """Print the config file path, nothing else (pipeable)."""
     _ui(ctx).out.print(str(config_path()))
-
-
-_JUDGE_PRESET_FIELDS = ("provider", "model", "base_url", "api_key_env")
 
 
 @config_app.command("set")
@@ -157,47 +155,33 @@ def config_set(
     stale model/base_url pointed at the old one.
     """
     out = _ui(ctx)
-    if key == "judge.provider":
-        try:
-            preset = judge_mod.provider_defaults(value)
-        except judge_mod.JudgeError as exc:
-            raise _fail(out, exc) from exc
-        try:
-            for name in _JUDGE_PRESET_FIELDS:
-                cfg.set_value(f"judge.{name}", getattr(preset, name))
-        except cfg.ConfigError as exc:
-            raise _fail(out, exc) from exc
-        for name in _JUDGE_PRESET_FIELDS:
-            out.out.print(f"judge.{name} = {getattr(preset, name)}  ({config_path()})")
-        return
     try:
-        cfg.set_value(key, value)
-    except cfg.ConfigError as exc:
+        written = lib.config_set(key, value)
+    except (judge_mod.JudgeError, cfg.ConfigError) as exc:
         raise _fail(out, exc) from exc
-    out.out.print(f"{key} = {value}  ({config_path()})")
+    for name, setting in written:
+        out.out.print(f"{name} = {setting}  ({config_path()})")
 
 
 @config_app.command("check")
 def config_check(ctx: typer.Context) -> None:
     """Send one tiny request to prove the judge provider, model and key work."""
     out = _ui(ctx)
-    current = _load_config(out).judge
-    key = judge_mod.resolve_api_key(current.api_key_env)
-    if current.api_key_env and key is None:
-        ui.error(out, f"no API key found for {current.provider}.")
-        out.err.print(f"Put a line like  {current.api_key_env}=...  in one of:")
-        for path in judge_mod.default_dotenv_paths():
+    checked = lib.config_check(_load_config(out))
+    if checked.result is None:
+        ui.error(out, f"no API key found for {checked.judge.provider}.")
+        out.err.print(f"Put a line like  {checked.judge.api_key_env}=...  in one of:")
+        for path in checked.dotenv_paths:
             out.err.print(f"  {path}")
-        out.err.print(f"or export {current.api_key_env} in your shell.")
+        out.err.print(f"or export {checked.judge.api_key_env} in your shell.")
         raise typer.Exit(EXIT_ERROR)
-    result = judge_mod.check(current, key)
-    ui.kv(out, "provider", current.provider)
-    ui.kv(out, "model", result.model)
-    ui.kv(out, "key from", key.source if key else "(none needed)")
-    if result.ok:
-        ui.state_line(out, "status", "ok", f"{result.latency_ms} ms")
+    ui.kv(out, "provider", checked.judge.provider)
+    ui.kv(out, "model", checked.result.model)
+    ui.kv(out, "key from", checked.key.source if checked.key else "(none needed)")
+    if checked.ok:
+        ui.state_line(out, "status", "ok", f"{checked.result.latency_ms} ms")
         return
-    ui.state_line(out, "status", "FAILED", result.detail)
+    ui.state_line(out, "status", "FAILED", checked.result.detail)
     raise typer.Exit(EXIT_ERROR)
 
 
@@ -216,41 +200,38 @@ def cache(ctx: typer.Context) -> None:
     if ctx.invoked_subcommand is not None:
         return
     out = _ui(ctx)
-    with Cache() as db:
-        entries = db.summary()
-        ui.kv(out, "cache", str(db.path))
-        ui.kv(
-            out,
-            "holds",
-            f"{len(entries)} sources, {sum(e.chunks for e in entries)} chunks, "
-            f"{sum(e.verdicts for e in entries)} verdicts",
-        )
-        ui.hint(out, "open it with DB Browser for SQLite, TablePlus or DBeaver — plain tables.")
+    held = lib.cache_overview()
+    ui.kv(out, "cache", str(held.path))
+    ui.kv(
+        out,
+        "holds",
+        f"{held.sources} sources, {held.chunks} chunks, {held.verdicts} verdicts",
+    )
+    # The two network lookups a run makes before it fetches anything. They are keyed
+    # by reference and by DOI, not by source, so they are counted apart from the
+    # source list rather than inside it.
+    ui.kv(out, "lookups", f"{held.resolutions} resolutions, {held.retractions} retraction checks")
+    ui.hint(out, "open it with DB Browser for SQLite, TablePlus or DBeaver — plain tables.")
 
 
 @cache_app.command("path")
 def cache_path(ctx: typer.Context) -> None:
     """Print the SQLite file path, nothing else (pipeable)."""
-    with Cache() as db:
-        _ui(ctx).out.print(str(db.path))
+    _ui(ctx).out.print(str(lib.cache_file()))
 
 
 @cache_app.command("ls")
 def cache_ls(ctx: typer.Context) -> None:
     """List cached sources with chunk and verdict counts and text expiry."""
-    from datetime import datetime, timezone
-
     out = _ui(ctx).out
-    now = datetime.now(timezone.utc).isoformat()
-    with Cache() as db:
-        entries = db.summary()
-    if not entries:
+    listing = lib.cache_list()
+    if listing.empty:
         out.print("cache is empty")
         return
-    for e in entries:
+    for e in listing.entries:
         if e.expires_at is None:
             expiry = "no raw text"
-        elif e.expires_at <= now:
+        elif e.expires_at <= listing.now:
             expiry = "raw text expired"
         else:
             expiry = f"raw text until {e.expires_at[:10]}"
@@ -258,6 +239,7 @@ def cache_ls(ctx: typer.Context) -> None:
             f"{e.source_id}  {e.title or '(untitled)'}  [{e.scheme}/{e.text_kind}]  "
             f"{e.chunks} chunk(s), {e.verdicts} verdict(s), {expiry}"
         )
+    out.print(f"{listing.resolutions} resolution(s), {listing.retractions} retraction check(s)")
 
 
 @cache_app.command("show")
@@ -266,8 +248,7 @@ def cache_show(
     source_id: Annotated[str, typer.Argument(help="Source id, as listed by ls.")],
 ) -> None:
     """Print a source's chunks and verdicts."""
-    with Cache() as db:
-        detail = db.detail(source_id)
+    detail = lib.cache_detail(source_id)
     if detail is None:
         ui.error(_ui(ctx), f"no cached source {source_id!r}")
         raise typer.Exit(EXIT_ERROR)
@@ -304,15 +285,18 @@ def cache_clear(
     ] = False,
 ) -> None:
     """Delete cached sources with their text, chunks and verdicts."""
-    with Cache() as db:
-        removed = db.clear(expired_only=expired)
-    _ui(ctx).out.print(f"removed {removed} source(s){' (expired only)' if expired else ''}")
+    removed = lib.cache_clear(expired=expired)
+    _ui(ctx).out.print(
+        f"removed {removed.sources} source(s), {removed.resolutions} resolution(s), "
+        f"{removed.retractions} retraction check(s)"
+        f"{' (expired only)' if expired else ''}"
+    )
 
 
 class Format(str, Enum):
     TEXT = "text"
     JSON = "json"
-    SARIF = "sarif"  # ``check`` only, and Phase 8 fills it in (spec section 13.2)
+    SARIF = "sarif"  # ``check`` only (spec section 13.2)
 
 
 @app.command()
@@ -326,27 +310,29 @@ def resolve(
     """Check whether a cited reference exists (Crossref, Semantic Scholar, arXiv, OpenAlex)."""
     out = _ui(ctx)
     _reject_sarif(out, fmt)
-    contact = _load_config(out).contact.email
-    resolver = resolve_mod.Resolver(contact_email=contact)
-    result = resolver.resolve(reference)
-    best = result.best
-    retraction = resolver.retraction(best.doi) if best is not None and best.doi else None
+    resolved = lib.resolve_reference(reference, config=_load_config(out))
 
     if fmt is Format.JSON:
-        ui.emit_json(out, {"result": result, "retraction": retraction})
+        ui.emit_json(
+            out,
+            {
+                "result": resolved.result,
+                "retraction": resolved.retraction,
+                "retraction_error": resolved.retraction_error,
+            },
+        )
     else:
-        _print_resolve(out, result, retraction)
+        _print_resolve(out, resolved)
 
-    if result.state is resolve_mod.State.RESOLVED and retraction is None:
+    if resolved.clean:
         return
     # Every other state is a finding, including "provider unavailable" (spec 13.3),
     # and so is a resolved but retracted source (spec 13.2 ``warning[retracted]``).
     raise typer.Exit(EXIT_FINDINGS)
 
 
-def _print_resolve(
-    out: ui.Ui, result: resolve_mod.ResolveResult, retraction: resolve_mod.Retraction | None
-) -> None:
+def _print_resolve(out: ui.Ui, resolved: lib.Resolved) -> None:
+    result, retraction = resolved.result, resolved.retraction
     ui.kv(out, "state", result.state.value, state=True)
     best = result.best
     if best is not None:
@@ -366,7 +352,10 @@ def _print_resolve(
                 f"year {'yes' if m.year else 'no'}",
             )
         if best.doi:
-            if retraction is None:
+            if resolved.retraction_error is not None:
+                # Nobody answered: neither "not retracted" nor a notice (rule 2).
+                ui.state_line(out, "retraction", "unavailable", f"({resolved.retraction_error})")
+            elif retraction is None:
                 ui.state_line(
                     out, "retraction", "not retracted", "(Crossref/Retraction Watch, OpenAlex)"
                 )
@@ -414,34 +403,17 @@ def fetch(
         raise typer.Exit(EXIT_ERROR)
     override = True if allow_browser else False if no_browser else None
 
-    is_url = target.startswith(("http://", "https://"))
-    doi = arxiv_id = None
-    if not is_url:
-        doi = resolve_mod.find_doi(target)
-        arxiv_id = None if doi else resolve_mod.find_arxiv_id(target)
-        if doi is None and arxiv_id is None:
-            ui.error(out, f"not a URL, DOI or arXiv id: {target!r}")
-            raise typer.Exit(EXIT_ERROR)
-
-    interactive = cfg.is_interactive()
-    gate = ConsentGate(
-        config.permissions.install_browser, interactive=interactive, override=override
-    )
-    result: fetch_mod.Fetched | oa_mod.Evidence
-    with ExitStack() as stack:
-        cache = None if no_cache else stack.enter_context(Cache())
-        fetcher = fetch_mod.Fetcher(config=config, gate=gate, cache=cache, interactive=interactive)
-        stack.callback(fetcher.close)
-        if is_url:
-            result = fetcher.fetch(target)
-        else:
-            client = PoliteClient(contact_email=config.contact.email)
-            stack.callback(client.client.close)
-            chain = oa_mod.OpenAccess(
-                fetcher, client, contact_email=config.contact.email, cache=cache
-            )
-            result = chain.fetch(doi, arxiv_id)
-        stats = fetcher.summary()
+    try:
+        fetched = lib.fetch_target(
+            target,
+            config=config,
+            interactive=cfg.is_interactive(),  # rule 4: never sniffed further down
+            override=override,
+            no_cache=no_cache,
+        )
+    except lib.TargetError as exc:
+        raise _fail(out, exc) from exc
+    result, gate = fetched.result, fetched.gate
 
     if fmt is Format.JSON:
         if show > 0:
@@ -452,7 +424,9 @@ def fetch(
             "skipped_urls": gate.skipped_urls,
             "install_log": gate.install_log,
         }
-        ui.emit_json(out, {"target": target, "result": result, "stats": stats, "browser": browser})
+        ui.emit_json(
+            out, {"target": target, "result": result, "stats": fetched.stats, "browser": browser}
+        )
     else:
         if isinstance(result, fetch_mod.Fetched):
             _print_fetched(out, result)
@@ -462,11 +436,7 @@ def fetch(
         if show > 0:
             ui.kv(out, "text", result.text[:show])
 
-    if isinstance(result, fetch_mod.Fetched):
-        clean = result.ok and result.words > 0  # reached with nothing to read is not clean
-    else:
-        clean = result.kind == "fulltext"
-    if clean:
+    if fetched.clean:
         return
     # Abstract-only and every UNVERIFIED state are findings (spec 13.3).
     raise typer.Exit(EXIT_FINDINGS)
@@ -536,7 +506,10 @@ def check(
     ] = False,
     out_path: Annotated[
         Path | None,
-        typer.Option("--out", help="Markdown report path (default report.md; text mode)."),
+        typer.Option(
+            "--out",
+            help="Report path: markdown (default report.md, text mode) or the SARIF log.",
+        ),
     ] = None,
 ) -> None:
     """Verify every citation in a document and write a report."""
@@ -544,7 +517,6 @@ def check(
     if allow_browser and no_browser:
         ui.error(out, "--allow-browser and --no-browser cannot be combined.")
         raise typer.Exit(EXIT_ERROR)
-    _reject_sarif(out, fmt)
     for flag, asked in (("--judge", judge), ("--summarize", summarize)):
         if asked:
             ui.error(out, f"{flag} arrives in v0.3")
@@ -553,10 +525,10 @@ def check(
     source, name = _check_target(out, target)
     config = _load_config(out)
     override = True if allow_browser else False if no_browser else None
-    json_out = fmt is Format.JSON
-    # Under --format json stdout carries one document and nothing else, so the run's
-    # human lines are printed against stderr instead (spec section 13.3).
-    human = replace(out, out=out.err) if json_out else out
+    structured = fmt is not Format.TEXT
+    # Under --format json or sarif stdout carries one document and nothing else, so
+    # the run's human lines are printed against stderr instead (spec section 13.3).
+    human = replace(out, out=out.err) if structured else out
 
     def on_event(event: events.Event) -> None:
         # ``Emitted`` is not printed here: findings are shown at the end, in document
@@ -599,10 +571,17 @@ def check(
         # that statement, so anything unforeseen is reported as the tool failing (2).
         raise _fail(out, exc) from exc
 
-    written = _write_report(out, report, out_path, default=not json_out)
-    if json_out:
+    if fmt is Format.SARIF:
+        # The log is the output: ``--out`` holds the same document stdout carries
+        # (that file is what an editor opens), and no markdown is left behind.
+        log = sarif.to_sarif(report, artifact=target)
+        _write_file(out, out_path, ui.json_text(log))
+        ui.emit_json(out, log)
+    elif fmt is Format.JSON:
+        _write_report(out, report, out_path, default=False)
         ui.emit_json(out, report)
     else:
+        written = _write_report(out, report, out_path, default=True)
         ui.blank(out)
         for item in report_mod.render_diagnostics(report):
             ui.diagnostic(out, item)
@@ -697,11 +676,19 @@ def _write_report(
         if not default:
             return None
         path = DEFAULT_REPORT
+    _write_file(out, path, report_mod.render_markdown(report))
+    return str(path)
+
+
+def _write_file(out: ui.Ui, path: Path | None, text: str) -> None:
+    """Write ``text`` to ``path`` if there is one; a path that cannot be written is
+    the tool failing (exit 2), reported on one line."""
+    if path is None:
+        return
     try:
-        path.write_text(report_mod.render_markdown(report), encoding="utf-8")
+        path.write_text(text, encoding="utf-8")
     except OSError as exc:
         raise _fail(out, exc) from exc
-    return str(path)
 
 
 if __name__ == "__main__":  # pragma: no cover

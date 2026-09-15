@@ -14,6 +14,7 @@ is one skipped source, not four (product rule 6).
 from __future__ import annotations
 
 import importlib.util
+import os
 import shlex
 import shutil
 import subprocess
@@ -42,13 +43,27 @@ INSTALL_SPEC = "scrapling[fetchers]>=0.4.15"
 # string, so ``install`` arrives as the subcommand.
 SCRAPLING_CLI = "from scrapling.cli import main; main()"
 
+# Where playwright -- and patchright, which reuses its driver -- keep the browsers
+# they download. The environment variable replaces the defaults outright, except for
+# the literal "0", which is not a directory at all.
+BROWSERS_PATH_ENV = "PLAYWRIGHT_BROWSERS_PATH"
+BROWSERS_DIR = "ms-playwright"
+# One chromium build is one directory, named "chromium-<revision>" (and, on newer
+# drivers, "chromium_headless_shell-<revision>"): the glob matches either.
+CHROMIUM_GLOB = "chromium*"
+
 
 def prompt_text(host: str, status: int | None) -> str:
     """The spec section 7.1 consent block, rendered for one blocked host: three
     parts (what happened, what it costs, the choices) separated by blank lines."""
     status_desc = f"HTTP {status}" if status is not None else "no HTTP status"
+    # A 200 with nothing readable in it is the quiet half of the bot wall: the host
+    # did answer, so calling that "blocked" contradicts the status printed beside it
+    # and describes something the host never said. Same offer either way -- only the
+    # sentence that states what happened changes.
+    what = "answered without readable text" if status == 200 else "blocked this request"
     lines = [
-        f"  ⚠ {host} blocked this request ({status_desc}).",
+        f"  ⚠ {host} {what} ({status_desc}).",
         "",
         "    proofpath can retry with a real browser engine, but that needs a",
         "    one-time download:",
@@ -77,16 +92,67 @@ def ask_terminal(host: str, status: int | None) -> Answer:
         typer.echo(f"Please answer one of: {', '.join(PROMPT_CHOICES)}", err=True)
 
 
+def browser_cache_dirs() -> list[Path]:
+    """Every directory a downloaded chromium could be sitting in, most likely first.
+
+    When the environment variable names a directory, that directory is the *only*
+    answer: playwright and patchright read nothing else, so a chromium found in a
+    default they will not look at would let the gate skip an install the fetch then
+    needs. With no variable to obey, this platform's own default leads and the other
+    platforms' follow -- each costs one ``is_dir()`` on a path that does not exist,
+    and they cover a venv carried between machines.
+    """
+    override = os.environ.get(BROWSERS_PATH_ENV, "").strip()
+    # "0" is not a directory: playwright reads it as "put them next to the package".
+    if override and override != "0":
+        return [Path(override)]
+    home = Path.home()
+    local = os.environ.get("LOCALAPPDATA", "")
+    macos = home / "Library" / "Caches" / BROWSERS_DIR
+    linux = home / ".cache" / BROWSERS_DIR
+    windows = (Path(local) if local else home / "AppData" / "Local") / BROWSERS_DIR
+    if sys.platform == "darwin":
+        defaults = (macos, linux, windows)
+    elif sys.platform == "win32":
+        defaults = (windows, linux, macos)
+    else:
+        defaults = (linux, macos, windows)
+    return list(dict.fromkeys(defaults))
+
+
+def browser_binary_present() -> bool:
+    """True when one of the cache directories holds a chromium build.
+
+    Checked by looking at the directory rather than by importing anything: a real
+    check would have to start the driver, which is exactly the multi-second, ~200 MB
+    thing the gate exists to keep out of the fast path.
+    """
+    return any(
+        child.is_dir()
+        for directory in browser_cache_dirs()
+        if directory.is_dir()
+        for child in directory.glob(CHROMIUM_GLOB)
+    )
+
+
 def is_installed() -> bool:
-    """True once the browser extras ``fetch_with_browser`` needs are importable.
+    """True once ``fetch_with_browser`` has everything it needs: the wheels *and* a
+    downloaded browser.
 
     scrapling's ``StealthyFetcher`` drives ``patchright`` (scrapling 0.4.15,
     ``engines/_browsers/_stealth.py``); a bare ``playwright`` install is not enough,
     so it is not what is checked.
+
+    The wheels alone are not enough either. A venv that has them but never finished
+    the ~200 MB download skipped the installer and then failed inside the fetcher
+    (OPEN-ITEMS 11.6) -- reported, never a crash, but a failure the gate could have
+    prevented. ``install()`` is idempotent for the wheels and downloads the browser,
+    so the cheap directory check below is what decides to run it.
     """
     return (
         importlib.util.find_spec("patchright") is not None
         and importlib.util.find_spec("scrapling") is not None
+        and browser_binary_present()
     )
 
 
@@ -180,12 +246,17 @@ class ConsentGate:
         prompt: Callable[[str, int | None], Answer] | None = None,
         installer: Callable[[list[str]], bool] | None = None,
         installed: Callable[[], bool] | None = None,
+        binary: Callable[[], bool] | None = None,
         fetch: Callable[[str], tuple[int, bytes, str]] | None = None,
         config_path: Path | None = None,
     ) -> None:
         self._prompt = prompt or ask_terminal
         self._installer = installer or install
         self._installed = installed or is_installed
+        # Asked separately from ``_installed``, which also answers for the wheels:
+        # the log line is about the ~200 MB download, and "missing" next to importable
+        # wheels is the half-installed venv this check exists for (OPEN-ITEMS 11.6).
+        self._binary = binary or browser_binary_present
         self._fetch = fetch or fetch_with_browser
         self._config_path = config_path
 
@@ -237,7 +308,11 @@ class ConsentGate:
             return False
 
         if not self._ready:
-            if self._installed():
+            ready = self._installed()
+            # What the gate decided on, in the log the report prints: a run that
+            # paid for a download says why it had to (product rule 6).
+            self.install_log.append(f"browser binary: {'found' if self._binary() else 'missing'}")
+            if ready:
                 self._ready = True
             else:
                 installed_ok = self._installer(self.install_log)

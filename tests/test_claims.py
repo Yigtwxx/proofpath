@@ -115,10 +115,25 @@ def test_find_markers_sorts_by_paragraph_and_start() -> None:
     assert [marker.text for marker in markers] == ["[3]", "[7]", "[5]"]
 
 
-def test_find_markers_keeps_the_numeric_marker_when_spans_overlap() -> None:
+def test_find_markers_keeps_both_halves_of_a_mixed_citation() -> None:
+    # OPEN-ITEMS 9.2: v0.1 let the numeric marker win the overlap and the author-year
+    # half was reported nowhere. Both are markers now; the parenthesis is one citation
+    # to a reader, so the author-year marker keeps the whole of it as its text.
     document = _document("A mixed citation (see Smith, 2020; [12]) appears here.")
     markers = find_markers(document)
-    assert [(marker.style, marker.text) for marker in markers] == [("numeric", "[12]")]
+    assert [(marker.style, marker.text) for marker in markers] == [
+        ("author-year", "(see Smith, 2020; [12])"),
+        ("numeric", "[12]"),
+    ]
+
+
+def test_a_parenthesis_holding_only_numbers_is_not_an_author_year_marker() -> None:
+    # "(see [20])" names no author: it is the numeric marker's parenthesis, not a second
+    # citation, and emitting one would report a style the passage never used.
+    document = _document("Only one model reproduces the observed rate (see [20]).")
+    assert [(marker.style, marker.text) for marker in find_markers(document)] == [
+        ("numeric", "[20]")
+    ]
 
 
 # --- Pairing rules ---------------------------------------------------------------------
@@ -304,20 +319,24 @@ def test_rule_6_an_unnumbered_first_entry_leaves_its_citation_unresolved() -> No
     assert [marker.text for marker in result.unresolved] == ["[1]"]
 
 
-def test_rule_7_author_year_markers_are_unsupported_and_make_no_claim() -> None:
+def test_rule_7_an_author_year_marker_no_entry_answers_is_unresolved_never_guessed() -> None:
+    # The bibliography here is "Author, A. Title number n. Journal, 2020." throughout, so
+    # no surname matches. v0.1 reported these as an unsupported *style*; v0.2 pairs the
+    # style and reports the marker instead, which is the difference between "this tool
+    # cannot read that" and "this document names something its list does not hold".
     document = _document(
         "Earlier work (Smith et al., 2020) showed this. Jones et al. (2021) reported the same. "
         "A third group (Brown and Green, 2019) agreed."
     )
     result = extract(document)
     assert result.claims == ()
-    assert [marker.text for marker in result.unsupported] == [
+    assert [marker.text for marker in result.unresolved] == [
         "(Smith et al., 2020)",
         "Jones et al. (2021)",
         "(Brown and Green, 2019)",
     ]
-    assert {marker.style for marker in result.unsupported} == {"author-year"}
-    assert {marker.refs for marker in result.unsupported} == {()}
+    assert {marker.style for marker in result.unresolved} == {"author-year"}
+    assert result.unsupported == ()
 
 
 def test_rule_8_claim_text_drops_every_marker_and_keeps_the_sentence_locator() -> None:
@@ -434,3 +453,277 @@ def test_a_sentence_that_is_only_punctuation_and_a_marker_makes_no_claim() -> No
 def test_a_marker_alone_in_a_single_sentence_paragraph_makes_no_claim() -> None:
     document = _document("([5])")
     assert extract(document).claims == ()
+
+
+# --- Author-year pairing (v0.2, spec section 9 step 2) ----------------------------------
+
+# The entries are written the way an author-year bibliography prints them: no numbers, one
+# entry per paragraph, so ingest's ordinal fallback numbers them 1..N in list order.
+SMITH = "Smith, J. and Roe, B. Coastal subsidence in three deltas. Journal of Things, 2020."
+JONES = "Jones, K. Memory consolidation during slow-wave sleep. Neuroscience, 2019."
+RUIZ = "Ruiz, M. and Jones, K. A replication at larger scale. Neuroscience, 2021."
+JONES_A = "Jones, K. An early note on consolidation. Neuroscience Letters, 2019."
+BERG = "van der Berg, P. Soil carbon under no-till management. Soil Science, 2018."
+MULLER = "Müller, H. Thermal tolerance of alpine plants. Alpine Botany, 2017."
+
+
+def _author_year_document(body: str, entries: Sequence[str]) -> Document:
+    """A document whose bibliography is an unnumbered, author-year reference list."""
+    block = "\n\n".join(entries)
+    return ingest.from_text(f"{body}\n\nReferences\n\n{block}\n", name="paper.txt", kind="text")
+
+
+def test_author_year_a_single_author_parenthetical_pairs_with_its_entry() -> None:
+    document = _author_year_document(
+        "Subsidence outpaces sea level rise in several deltas (Smith et al., 2020).",
+        [SMITH, JONES],
+    )
+    result = extract(document)
+    assert [(claim.cited_refs, claim.text) for claim in result.claims] == [
+        ((1,), "Subsidence outpaces sea level rise in several deltas.")
+    ]
+    assert result.unresolved == ()
+    assert result.unsupported == ()
+
+
+def test_author_year_two_author_and_ampersand_forms_pair_on_the_first_surname() -> None:
+    for marker in ("(Smith and Roe, 2020)", "(Smith & Roe, 2020)", "(Smith, Roe, 2020)"):
+        document = _author_year_document(f"The deltas are sinking {marker}.", [SMITH, JONES])
+        result = extract(document)
+        assert [claim.cited_refs for claim in result.claims] == [(1,)], marker
+        assert result.unresolved == (), marker
+
+
+def test_author_year_a_semicolon_list_is_one_marker_naming_every_entry() -> None:
+    document = _author_year_document(
+        "Two independent groups agree (Smith et al., 2020; Jones, 2019).",
+        [SMITH, JONES],
+    )
+    result = extract(document)
+    assert [marker.text for marker in result.markers] == ["(Smith et al., 2020; Jones, 2019)"]
+    assert [(claim.cited_refs, claim.text) for claim in result.claims] == [
+        ((1, 2), "Two independent groups agree.")
+    ]
+    assert result.unresolved == ()
+
+
+def test_author_year_the_narrative_form_cites_the_sentence_it_opens() -> None:
+    # The names are the subject of the sentence, so the citation belongs to that
+    # sentence -- not to the one before it, which is where a bracketed marker would go.
+    document = _author_year_document(
+        "Sleep research has moved on. Jones (2019) reported the same effect in humans.",
+        [SMITH, JONES],
+    )
+    result = extract(document)
+    assert [(claim.sentence, claim.cited_refs, claim.text) for claim in result.claims] == [
+        (1, (2,), "reported the same effect in humans.")
+    ]
+
+
+def test_author_year_a_collision_is_resolved_by_the_printed_letter() -> None:
+    document = _author_year_document(
+        "The first report (Jones, 2019a) was extended a year later (Jones, 2019b).",
+        [JONES, JONES_A],
+    )
+    result = extract(document)
+    assert [claim.cited_refs for claim in result.claims] == [(1,), (2,)]
+    assert result.unresolved == ()
+
+
+def test_author_year_a_collision_without_a_letter_is_unresolved_never_guessed() -> None:
+    # Two entries answer "Jones, 2019" equally well. Picking the first would point the
+    # claim at a source the sentence may never have meant, in silence.
+    document = _author_year_document(
+        "An earlier report (Jones, 2019) said otherwise.", [JONES, JONES_A]
+    )
+    result = extract(document)
+    assert result.claims == ()
+    assert [marker.text for marker in result.unresolved] == ["(Jones, 2019)"]
+
+
+def test_author_year_a_letter_past_the_end_of_the_collision_is_unresolved() -> None:
+    document = _author_year_document(
+        "A third note (Jones, 2019c) is cited but never listed.", [JONES, JONES_A]
+    )
+    result = extract(document)
+    assert result.claims == ()
+    assert [marker.text for marker in result.unresolved] == ["(Jones, 2019c)"]
+
+
+def test_author_year_ibid_takes_the_refs_of_the_previous_marker() -> None:
+    document = _author_year_document(
+        "The deltas are sinking (Smith et al., 2020). The same survey reports salinity. Ibid.",
+        [SMITH, JONES],
+    )
+    result = extract(document)
+    # "Ibid." stands between two full stops, so it is a mark on the sentence before it
+    # and, sitting at the end of the paragraph, scopes the whole paragraph (rule 4).
+    assert [
+        (claim.sentence, claim.cited_refs, claim.paragraph_scoped) for claim in result.claims
+    ] == [
+        (0, (1,), False),
+        (0, (1,), True),
+        (1, (1,), True),
+    ]
+    assert result.unresolved == ()
+
+
+def test_author_year_ibid_reaches_back_one_paragraph_but_no_further() -> None:
+    near = _author_year_document(
+        "The deltas are sinking (Smith et al., 2020).\n\nThe rate has not changed (ibid.).",
+        [SMITH, JONES],
+    )
+    assert [claim.cited_refs for claim in extract(near).claims] == [(1,), (1,)]
+
+    far = _author_year_document(
+        "The deltas are sinking (Smith et al., 2020).\n\nAn unrelated paragraph sits here.\n\n"
+        "The rate has not changed (ibid.).",
+        [SMITH, JONES],
+    )
+    result = extract(far)
+    assert [claim.cited_refs for claim in result.claims] == [(1,)]
+    assert [marker.text for marker in result.unresolved] == ["(ibid.)"]
+
+
+def test_author_year_ibid_after_a_numeric_marker_takes_its_numbers() -> None:
+    # "ibid." means "the citation just before this one", whatever style that one was
+    # written in. A numbered list and a named citation in one paper is the normal case,
+    # not an exotic one, and refusing the numeric marker lost the back-reference.
+    body = (
+        "The delta survey puts subsidence at eight millimetres (Smith, 2020). "
+        "A second source gives a lower figure [2]. The same source reports salinity "
+        "(ibid.). Neither figure has been revised."
+    )
+    document = ingest.from_text(
+        f"{body}\n\nReferences\n\n[1] {SMITH}\n[2] {JONES}\n",
+        name="paper.txt",
+        kind="text",
+    )
+    result = extract(document)
+    assert [(claim.sentence, claim.cited_refs) for claim in result.claims] == [
+        (0, (1,)),
+        (1, (2,)),
+        (2, (2,)),
+    ]
+    assert result.unresolved == ()
+
+
+def test_author_year_ibid_never_reaches_back_past_an_unresolved_marker() -> None:
+    # The marker immediately before the "ibid." names nothing this list holds, so what
+    # "ibid." means is unknown. Skipping over it to the Smith before would point the
+    # claim at a source the sentence never meant, which is the guess product rule 3 is
+    # about; the back-reference is reported instead.
+    document = _author_year_document(
+        "The delta survey puts subsidence at eight millimetres (Smith, 2020). A result "
+        "nobody listed says otherwise (Okonkwo, 2022). The same source reports salinity "
+        "(ibid.). Neither figure has been revised.",
+        [SMITH, JONES],
+    )
+    result = extract(document)
+    assert [(claim.sentence, claim.cited_refs) for claim in result.claims] == [(0, (1,))]
+    assert [marker.text for marker in result.unresolved] == ["(Okonkwo, 2022)", "(ibid.)"]
+
+
+def test_author_year_op_cit_takes_the_last_entry_cited_under_that_surname() -> None:
+    document = _author_year_document(
+        "The deltas are sinking (Smith et al., 2020). Sleep is different (Jones, 2019). "
+        "The subsidence figure is the one to use (Smith, op. cit.).",
+        [SMITH, JONES],
+    )
+    result = extract(document)
+    # The last marker ends the paragraph, so it also scopes it: what this test is about
+    # is the ref it carries -- entry 1, the Smith already cited, not the Jones next to it.
+    op_cit = [claim for claim in result.claims if claim.paragraph_scoped]
+    assert {claim.cited_refs for claim in op_cit} == {(1,)}
+    assert [claim.cited_refs for claim in result.claims if not claim.paragraph_scoped] == [
+        (1,),
+        (2,),
+    ]
+    assert result.unresolved == ()
+
+
+def test_author_year_a_bare_op_cit_names_no_author_and_is_unresolved() -> None:
+    document = _author_year_document(
+        "The deltas are sinking (Smith et al., 2020). The figure stands (op. cit.).",
+        [SMITH, JONES],
+    )
+    result = extract(document)
+    assert [claim.cited_refs for claim in result.claims] == [(1,)]
+    assert [marker.text for marker in result.unresolved] == ["(op. cit.)"]
+
+
+def test_author_year_a_page_tail_is_part_of_the_marker_and_not_a_second_source() -> None:
+    document = _author_year_document(
+        "The survey puts the figure at eight millimetres (Smith et al., 2020, p. 12).",
+        [SMITH, JONES],
+    )
+    result = extract(document)
+    assert [marker.text for marker in result.markers] == ["(Smith et al., 2020, p. 12)"]
+    assert [(claim.cited_refs, claim.text) for claim in result.claims] == [
+        ((1,), "The survey puts the figure at eight millimetres.")
+    ]
+
+
+def test_author_year_a_surname_with_a_particle_matches_its_entry() -> None:
+    document = _author_year_document(
+        "No-till management raises soil carbon slowly (van der Berg, 2018).", [SMITH, BERG]
+    )
+    result = extract(document)
+    assert [claim.cited_refs for claim in result.claims] == [(2,)]
+    assert result.unresolved == ()
+
+
+def test_author_year_diacritics_are_folded_before_the_surnames_are_compared() -> None:
+    document = _author_year_document(
+        "Alpine species tolerate frost to a point (Muller, 2017).", [SMITH, MULLER]
+    )
+    result = extract(document)
+    assert [claim.cited_refs for claim in result.claims] == [(2,)]
+    assert result.unresolved == ()
+
+
+def test_author_year_a_name_no_entry_carries_is_unresolved_and_makes_no_claim() -> None:
+    document = _author_year_document(
+        "A result nobody listed (Okonkwo, 2022) is cited here.", [SMITH, JONES]
+    )
+    result = extract(document)
+    assert result.claims == ()
+    assert [marker.text for marker in result.unresolved] == ["(Okonkwo, 2022)"]
+    assert result.unsupported == ()
+
+
+def test_author_year_a_year_no_entry_prints_is_unresolved_even_when_the_name_matches() -> None:
+    document = _author_year_document(
+        "The survey is older than that (Smith et al., 1998).", [SMITH, JONES]
+    )
+    result = extract(document)
+    assert result.claims == ()
+    assert [marker.text for marker in result.unresolved] == ["(Smith et al., 1998)"]
+
+
+def test_a_mixed_citation_yields_the_numeric_and_the_author_year_refs_on_one_sentence() -> None:
+    # OPEN-ITEMS 9.2. Both markers sit in the same sentence, so neither scopes the
+    # paragraph, and the claim text closes up over the whole parenthesis.
+    document = _author_year_document(
+        "A mixed style survives in some journals (see Smith, 2020; [2]) and confuses tools. "
+        "The list itself is unnumbered.",
+        [SMITH, JONES],
+    )
+    result = extract(document)
+    assert [(claim.cited_refs, claim.text) for claim in result.claims] == [
+        ((1,), "A mixed style survives in some journals and confuses tools."),
+        ((2,), "A mixed style survives in some journals and confuses tools."),
+    ]
+    assert not any(claim.paragraph_scoped for claim in result.claims)
+    assert result.unresolved == ()
+
+
+def test_author_year_a_paragraph_final_marker_scopes_every_sentence() -> None:
+    document = _author_year_document(
+        "Soil carbon responds slowly to management. Most trials are too short to see it. "
+        "The longest experiment is the exception (van der Berg, 2018).",
+        [SMITH, BERG],
+    )
+    result = extract(document)
+    assert all(claim.paragraph_scoped for claim in result.claims)
+    assert [claim.cited_refs for claim in result.claims] == [(2,), (2,), (2,)]

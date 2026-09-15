@@ -17,11 +17,41 @@ Runs locally and free: no API key, no Docker, no server. Windows, Linux, macOS.
 
 ```bash
 uv tool install proofpath
-
-proofpath check paper.pdf          # one-shot report → report.md, exit 0/1/2
-proofpath check draft.md --format json | jq '.coverage'
-proofpath -q check - < draft.md    # stdin; findings and coverage only
+proofpath
 ```
+
+```
+   ,_,
+  (o.o)~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~[PROOF]
+   " "    proofpath v0.2.0                                              academic . online . coreml
+          paste a file path, a URL, or a claim.            /help  /config  /quit
+```
+
+Bare `proofpath` opens the terminal UI ([a recorded session](docs/eval/2026-09-15-v0.2-live.md)).
+Paste a path and it runs; every one-shot verb is a slash command (`/check`, `/resolve`,
+`/fetch`, `/config`, `/cache`), runs can be started while others are in flight and
+stopped with `/cancel #n` — a stopped run keeps what it had decided — and the
+coverage footer never scrolls away. Click (or press `enter` on) a finding to read the
+whole quoted passage; `⧉` copies it; a finding's reference is a link to its source.
+When a publisher blocks the plain fetch, the permission question is asked **inline,
+under the stage that hit the wall**, with `[allow once] [always] [no] [never]`.
+
+The same engine behind a pipe or in CI:
+
+```bash
+proofpath check paper.pdf                       # report → report.md, exit 0/1/2
+proofpath check draft.md --format json | jq '.coverage'
+proofpath check draft.md --format sarif --out draft.sarif   # any SARIF 2.1.0 viewer (VS Code's SARIF Viewer, …)
+proofpath -q check - < draft.md                 # stdin; findings and coverage only
+```
+
+`--format sarif` writes a SARIF 2.1.0 log: one result per finding on its line, the
+quoted passage in the message, the exact honesty state in `properties`, and the run's
+coverage in the run's properties, so a log opened without the terminal still says how
+much was read. Exit codes are the interface: `0` clean, `1` findings (every
+`UNVERIFIED` and `LOW CONFIDENCE` counts), `2` the run itself failed — no text
+parsing needed to gate a job. Piped or in CI there is **no prompt**: an `ask`
+permission is treated as `deny` and reported.
 
 The install carries **no browser engine**. When a publisher blocks the plain fetch,
 proofpath asks once before downloading one — about 280 MB, into its own environment
@@ -45,7 +75,9 @@ unverified 14%
 ```
 
 When a quarter or more of the sources could not be read, a further line says so:
-`coverage is weak: unread sources may hold more, so this is a lower bound`.
+`coverage is weak: unread sources may hold more, so this is a lower bound`. When the
+browser step was not permitted, a line counts the sources it cost:
+`skipped N source(s) because the browser was not permitted`.
 
 **No verdict without its passage.** `SUPPORTED` and `REFUTED` cannot exist without
 the quoted sentence they rest on — the cache schema itself refuses to store one.
@@ -58,6 +90,19 @@ least 18 correct — roughly 0.65–0.95 at 95 % confidence), so read it as "the
 was near-certain here", not as a guarantee of 85 % precision. And `medium` lands
 almost exactly on `decide`, so `low` is practically empty among asserted verdicts —
 the display is effectively **two tiers**: near-certain, and asserted at all.
+
+## Citations it reads
+
+Numeric markers — `[12]`, `[12,15]`, `[12-15]`, Nature-style superscripts — and, since
+v0.2, **author-year**: `(Smith et al., 2020)`, `Smith (2020)`, `(Smith, 2020; Jones,
+2019)`, `2020a`/`2020b` collisions, `ibid.` and `op. cit.`, and a mixed
+`(Smith, 2020; [12])`. Pairing rate on the hand-built author-year set: **0.940**
+(83 expectations over 55 passages, [details](docs/eval/2026-09-12-pairing-author-year.md));
+the numeric set is at 108 of 109. Still unpaired, and reported rather than guessed:
+a surname that is not the entry's *first* author, a year off by one, two surnames
+sharing a last word (`Berg` / `van der Berg`), `Smith 2020` with no comma, and an
+initialism such as `(WHO, 2020)` against "World Health Organization". A marker no
+entry matches is listed as an unresolved marker.
 
 ## What the states mean
 
@@ -73,65 +118,68 @@ distinct, printed state (spec §15), never collapsed into a verdict:
 | `UNVERIFIED (unreachable)` | dead link, Wayback miss |
 | `UNVERIFIED (reached, no text extracted)` | 200 answered, nothing readable came back |
 | `UNVERIFIED (network not permitted)` | `permissions.network = deny` |
-| `UNVERIFIED (provider unavailable)` | API down or rate limited after backoff |
+| `UNVERIFIED (provider unavailable)` | API down, rate limited after backoff, or answering with a page instead of a record |
 | `UNVERIFIED (not in bibliographic indexes)` | web page, blog, report — indexes do not cover it, so absence proves nothing |
 | `AMBIGUOUS` | several plausible records, all listed |
 | `NEI` | the source was read and neither supports nor contradicts |
 | `PARAGRAPH-SCOPED` | the citation covers a paragraph; each sentence is judged separately |
-| `UNSUPPORTED CITATION STYLE` | an author–year marker; v0.1 pairs numeric markers only |
+| `UNSUPPORTED CITATION STYLE` | reserved; no detected style produces it in v0.2 |
 
-Exit codes: `0` clean, `1` findings (every `UNVERIFIED` and `LOW CONFIDENCE` counts),
-`2` the run itself failed — no text parsing needed to gate a CI job. An earlier build
-sometimes aborted with `134` after printing a complete report (ONNX runtime
-teardown); fixed in this release — 20 of 20 piped runs exit `1` ([live runs](docs/eval/2026-09-12-v0.1-live.md)).
+An earlier build sometimes aborted with `134` after printing a complete report (ONNX
+runtime teardown); fixed in v0.1 — 20 of 20 piped runs exit `1`
+([live runs](docs/eval/2026-09-12-v0.1-live.md)).
 
-## What v0.1 cannot do yet
+## Known limitations
 
-- **Numeric citation markers only** — `[12]`, `[12,15]`, `[12-15]`; an author–year
-  citation is listed as `UNSUPPORTED CITATION STYLE`, not judged.
 - **Superscript citations only when the PDF marks them as superscript**; a PDF that
   draws them as ordinary digits loses them, and `km²` can be read as `[2]`.
 - **Abstract fallback**: when only an abstract is reachable the verdict is labelled
   `LOW CONFIDENCE (abstract only)`. Three sentences is not a source.
-- **A reference list without a `References` heading is not found at all**, so its
-  markers are reported as uncheckable rather than checked.
-- **Resolution and the retraction check are not cached**, so even a warm re-run goes
-  to the network for them.
-- **The 0 % false-ghost rate is a property of the hand set's citation style.** Live
-  runs hit styles that set does not contain, and misjudged real references because of
-  it ([the live runs](docs/eval/2026-09-12-v0.1-live.md)).
+- **An unnumbered two-column bibliography is cut at line breaks** (RoBERTa's ACL
+  list: 103 entries for ~50, half of them with no author), so author-year pairing over
+  such a list resolves few items — 15 claims where a rejoined list would give 65. The
+  largest open item for author-year pairing.
+- **A reference list without a `References` heading** is read by its shape in paged
+  formats — the last contiguous run of numbered paragraphs — which recovers only that
+  last block (AlphaFold: 17 of 84 entries) and drops the prose printed before a
+  block's first entry.
+- **The 0 % false-ghost rate is measured on 274 hand-built references**, and rule 3
+  is paid for in recall: a fabricated `First Last and First Last. Title. Venue.` with
+  no year between the names and the title is reported as `not in bibliographic
+  indexes`, not as a ghost, and a proceedings-*volume* record can accept a fabricated
+  paper cited into that volume as `RESOLVED (low confidence)` — the set's one
+  fabricated acceptance (0.9 %) ([details](docs/eval/2026-09-12-ghosts.md)).
+- **A cold run of a long bibliography is still serial** through the providers (129
+  references: minutes). Only the TUI runs several documents' network stages at once.
 - **A refused or failed browser install is reported, not hidden**: the source is
   `UNVERIFIED (blocked, browser not permitted)` with the install log, never silently
   counted as unreachable.
 - **Coverage is not perfectly reproducible**: two runs minutes apart can read a
   different number of sources, depending on which providers answered.
-- The TUI and `--format sarif` arrive in **v0.2**; the LLM judge and `--summarize`
-  in **v0.3**.
+- The LLM judge and `--summarize` arrive in **v0.3**.
 
 ## Speed
 
-Apple Silicon Mac, models already downloaded ([live runs](docs/eval/2026-09-12-v0.1-live.md)):
+Apple Silicon Mac, models already downloaded:
 
 | document | first run | cached re-run |
 |---|---|---|
-| 1-page markdown draft, 7 references | 79.3 s | 15.8 s * |
-| 19-page arXiv PDF, 68 references | 12 m 57 s | 3 m 42 s |
+| 1-page markdown draft, 7 references | 79.3 s (v0.1 cold) | **1.35 s** ([v0.2](docs/eval/2026-09-15-v0.2-live.md)) — 15.8 s in v0.1 |
+| 19-page arXiv PDF, 68 references | 12 m 57 s | 3 m 42 s ([v0.1](docs/eval/2026-09-12-v0.1-live.md)) |
 
- * the draft's cached re-run followed the earlier of the two recorded cold runs; the live doc keeps both.
-
-The **first ever** run also downloads about 250 MB of ONNX models. A cached re-run
-reads its chunks and verdicts back from the cache instead of recomputing them, but it
-is not a no-op: both models are still loaded, reference resolution and the retraction
-check still query the network, and any source whose text has expired or was never
-read is fetched again — the PDF re-run above still spent 22 s fetching (it went out to
-Wayback and arXiv) and re-scored 3 of 102 claims.
+The **first ever** run also downloads about 250 MB of ONNX models. Since v0.2 a
+cached re-run asks the network for nothing: reference resolution and the retraction
+check are cached (resolutions 30 days; a retraction hit 30 days, a miss 7 days), the
+fetched text for 7 days, and chunks and verdicts for as long as the text is unchanged. The models are still loaded, and any source whose text
+has expired or was never read is fetched again — the PDF re-run above (v0.1) still
+spent 22 s fetching and re-scored 3 of 102 claims.
 
 ## Looking inside the cache
 
 Everything proofpath fetches, embeds and decides lands in one plain SQLite file:
 
 ```bash
-proofpath cache            # where it is and what it holds
+proofpath cache            # where it is, what it holds, how many lookups it remembers
 proofpath cache ls         # sources, chunk/verdict counts, text expiry
 proofpath cache show <id>  # one source's chunks and verdicts
 proofpath cache clear --expired
@@ -139,8 +187,8 @@ proofpath cache clear --expired
 
 Open `proofpath cache path` in [DB Browser for SQLite](https://sqlitebrowser.org/),
 TablePlus or DBeaver — plain tables, no extension. Raw publisher text expires after
-7 days; verdicts keep the passage they quote. `proofpath resolve REF` and `proofpath
-fetch URL|DOI` run either half on its own.
+7 days; verdicts keep the passage they quote; a provider outage is never stored.
+`proofpath resolve REF` and `proofpath fetch URL|DOI` run either half on its own.
 
 ## Optional LLM judge — arrives in v0.3
 
@@ -155,9 +203,10 @@ comes from the environment or a `.env` file, never from config, and is never pri
 | What | Set | Result |
 |---|---|---|
 | Retrieval + entailment | SciFact dev, 340 pairs | 0.609 accuracy, 0.597 macro-F1, against a 0.406 trivial baseline ([details](docs/eval/2026-09-12-scifact-dev.md)) |
-| Reference resolution | hand-built ghost set, 258 references | 0 % false-ghost, 100 % ghost recall ([details](docs/eval/2026-09-12-ghosts.md)) — but see the live-run caveat above |
+| Reference resolution | hand-built ghost set, 274 references | 0.0 % false-ghost, 99.1 % ghost recall ([details](docs/eval/2026-09-12-ghosts.md)) |
 | Source access | 50 DOIs | 72 % full text, 18 % abstract only, 10 % nothing ([details](docs/eval/2026-09-11-coverage.md)) — a real biomedical paper in the live runs reached 33 % full text |
-| Citation pairing | 61 hand-built passages | 0.98 ([details](docs/eval/2026-09-11-pairing.md)) |
+| Citation pairing, numeric | 61 hand-built passages | 0.99 ([details](docs/eval/2026-09-11-pairing.md)) |
+| Citation pairing, author-year | 55 hand-built passages, 83 expectations | 0.940 ([details](docs/eval/2026-09-12-pairing-author-year.md)) |
 
 Published SciFact results sit around 70–75 F1, not 95. Nothing is tuned on a test
 split, and no number is quoted without the run that produced it.

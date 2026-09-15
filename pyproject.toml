@@ -65,6 +65,10 @@ dev = [
     "pytest-cov>=6.0",
     "mypy>=1.14",
     "respx>=0.22",
+    # Validates the SARIF writer's output against the vendored 2.1.0 schema.
+    "jsonschema>=4.23",
+    # The TUI's widgets are async; pytest-asyncio runs their tests (spec 13.1).
+    "pytest-asyncio>=0.24",
 ]
 
 [project.scripts]
@@ -97,6 +101,8 @@ ignore = ["ANN401"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+# Textual's widgets are async, so async test functions run without a per-test marker.
+asyncio_mode = "auto"
 filterwarnings = [
     # Third-party noise from the fetch ladder's parsers, not ours to fix:
     # scrapling passes lxml a no-op option; pymupdf's SWIG layer trips a CPython check.

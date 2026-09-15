@@ -828,17 +828,19 @@ def test_a_doi_agreeing_on_author_and_year_is_never_a_ghost() -> None:
 
 def test_a_two_author_list_no_longer_zeroes_a_correctly_cited_paper() -> None:
     # Run 2 of the live doc: "First Last and First Last" has one comma too few for
-    # `_looks_like_authors`, so the author pair takes the first segment. It still
-    # does — but the candidate that agrees with the *second* segment is now
-    # AMBIGUOUS, not GHOST (product rule 3: uncertainty never resolves to ghost).
+    # `_looks_like_authors`, so the author pair took the first segment and the
+    # reference scored 0.0. Task 7.3 made that AMBIGUOUS rather than GHOST; task 8.7
+    # strips the pair, so the paper resolves outright (OPEN-ITEMS 11.1).
     raw = (
         "[7] Christopher Clark and Matt Gardner. Simple and Effective Multi-Paragraph Reading "
         "Comprehension. In Proceedings of ACL, pages 845-855, 2018. arXiv:1710.10723"
     )
-    assert rs.title_segments(raw)[0] == "Christopher Clark and Matt Gardner"
+    assert rs.title_segments(raw)[0] == (
+        "Simple and Effective Multi-Paragraph Reading Comprehension"
+    )
     c = cand("Simple and Effective Multi-Paragraph Reading Comprehension", "Clark", 2018)
-    assert rs.title_score(c.title, raw) > 0.0
-    assert rs.classify([c], raw).state is rs.State.AMBIGUOUS
+    assert rs.title_score(c.title, raw) == pytest.approx(1.0)
+    assert rs.classify([c], raw).state is rs.State.RESOLVED
 
 
 # --- review of task 7.3: what the marker rule and the particles must not do --------
@@ -855,7 +857,7 @@ def test_a_leading_year_is_never_mistaken_for_a_marker() -> None:
     # `classify` sees, the reference lost the year it is matched on and dropped
     # from RESOLVED to GHOST.
     assert rs.strip_marker(YEAR_FIRST) == YEAR_FIRST
-    assert rs._years(rs.strip_marker(YEAR_FIRST)) == rs._years(YEAR_FIRST) == {2020}
+    assert rs.years(rs.strip_marker(YEAR_FIRST)) == rs.years(YEAR_FIRST) == {2020}
     c = cand("Array programming with NumPy", "Harris", 2020, "10.1038/s41586-020-2649-2")
     assert rs.year_matches(2020, rs.strip_marker(YEAR_FIRST)) is True
     assert rs.classify([c], rs.strip_marker(YEAR_FIRST)).state is rs.State.RESOLVED
@@ -880,7 +882,7 @@ def test_stripping_a_marker_never_strips_a_second_one() -> None:
     ):
         once = rs.strip_marker(raw)
         assert rs.strip_marker(once) == once, raw
-        assert rs._years(once) == rs._years(raw), raw
+        assert rs.years(once) == rs.years(raw), raw
     assert rs.strip_marker(f"[3] {NUMERAL_TITLE}") == NUMERAL_TITLE
 
 
@@ -901,3 +903,284 @@ def test_hyphenated_lowercase_particles_are_part_of_the_surname(authors: str) ->
 
 def test_full_name_lists_with_hyphenated_particles_look_like_authors() -> None:
     assert rs._looks_like_authors("Jim al-Khalili, Mostafa el-Sayed, Rami Al-Rfou")
+
+
+# --- task 8.7: two-author full-name lists and the arXiv rescue ---------------------
+
+TWO_AUTHORS = (
+    "[7] Christopher Clark and Matt Gardner. Simple and Effective Multi-Paragraph Reading "
+    "Comprehension. In Proceedings of ACL, pages 845-855, 2018. arXiv:1710.10723"
+)
+
+
+def test_a_two_author_full_name_list_is_stripped() -> None:
+    """OPEN-ITEMS 11.1: the ordinary two-author form of every CS bibliography."""
+    assert rs.title_segments(TWO_AUTHORS)[0] == (
+        "Simple and Effective Multi-Paragraph Reading Comprehension"
+    )
+    c = cand("Simple and Effective Multi-Paragraph Reading Comprehension", "Clark", 2018)
+    assert rs.classify([c], TWO_AUTHORS).state is rs.State.RESOLVED
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (
+            "Stephen Robertson and Hugo Zaragoza. The Probabilistic Relevance Framework: BM25 "
+            "and Beyond. Foundations and Trends in Information Retrieval, 2009.",
+            "The Probabilistic Relevance Framework: BM25 and Beyond",
+        ),
+        (
+            "Yuhao Zhang, Mohit Bansal. Addressing Semantic Drift in Question Generation. "
+            "In EMNLP, 2019.",
+            "Addressing Semantic Drift in Question Generation",
+        ),
+        (
+            "James Thorne & Andreas Vlachos. Avoiding Catastrophic Forgetting in Fact "
+            "Verification. In Proceedings of the Third FEVER Workshop, 2020.",
+            "Avoiding Catastrophic Forgetting in Fact Verification",
+        ),
+        (
+            "Ashish Vaswani, Noam Shazeer, Niki Parmar, and Jakob Uszkoreit. Attention Is All "
+            "You Need. In NeurIPS, 2017.",
+            "Attention Is All You Need",
+        ),
+    ],
+)
+def test_full_name_lists_joined_by_comma_and_or_ampersand(raw: str, expected: str) -> None:
+    assert rs.title_segments(raw)[0] == expected
+
+
+def test_a_title_is_never_eaten_as_an_author_list() -> None:
+    """The two guards: the list must be closed by a full stop that something follows,
+    and one name is not a list."""
+    unclosed = "Marie Curie and Pierre Curie, 1903"
+    assert rs.title_segments(unclosed)[0] == unclosed
+    # One name, so the pattern does not fire; the entry keeps every segment it had.
+    # (A lone full-name author is still not stripped -- the initials patterns above
+    # want an initial and this one wants a second name -- which costs a segment, not
+    # a title: `title_score` takes the best agreement over all three.)
+    assert rs.title_segments("Herbert Clark. Using Language. Cambridge University Press.") == [
+        "Herbert Clark",
+        "Using Language",
+        "Cambridge University Press.",
+    ]
+
+
+def test_a_numeral_title_survives_the_full_name_pattern() -> None:
+    assert rs.title_segments(NUMERAL_TITLE)[0] == "12 Angry Men"
+
+
+ROBERTA_PARAPHRASED = (
+    "Liu, Y. et al. A robustly optimised pretraining recipe. arXiv:1907.11692 (2019)."
+)
+
+
+@respx.mock
+def test_an_arxiv_id_agreeing_on_author_and_year_is_never_a_ghost() -> None:
+    """OPEN-ITEMS 11.2: the mirror of the DOI rescue. The identifier is the author's
+    own and it resolves to a paper by the same first author in the same year, so a
+    title comparison that fails is not evidence of fabrication (product rule 3)."""
+    _mock(arxiv="arxiv_id_roberta.xml")
+    result = rs.Resolver().resolve(ROBERTA_PARAPHRASED)
+    assert result.state is rs.State.RESOLVED_LOW
+    assert result.best is not None and result.best.provider == "arxiv"
+    assert any("title could not be matched" in note for note in result.notes)
+    assert any("arXiv:1907.11692 resolved" in note for note in result.notes)
+
+
+@respx.mock
+def test_an_arxiv_id_disagreeing_on_the_author_is_not_rescued() -> None:
+    """The rescue needs both fields. A wrong author is exactly what a fabricated
+    identifier looks like, and it must stay in the pool for the normal classifier."""
+    _mock(arxiv="arxiv_id_roberta.xml")
+    raw = "Nobody, N. A robustly optimised pretraining recipe. arXiv:1907.11692 (2019)."
+    result = rs.Resolver().resolve(raw)
+    assert result.state is not rs.State.RESOLVED_LOW
+    assert any("resolves to a different work" in note for note in result.notes)
+
+
+# --- fix round 1: a retraction outage is not "not retracted" ----------------------
+
+
+@respx.mock
+def test_retraction_raises_when_every_provider_is_down() -> None:
+    """Product rule 2: "nobody answered" is not "there is no notice". Returning
+    ``None`` for both would let the caller cache an outage as a clean record."""
+    respx.get(f"https://api.crossref.org/works/{NUMPY_DOI}").mock(
+        side_effect=httpx.ConnectError("no route")
+    )
+    respx.get(f"https://api.openalex.org/works/https://doi.org/{NUMPY_DOI}").mock(
+        side_effect=httpx.ConnectError("no route")
+    )
+    with pytest.raises(rs.ProviderError, match="crossref and openalex unavailable"):
+        rs.Resolver().retraction(NUMPY_DOI)
+
+
+@respx.mock
+def test_a_crossref_404_plus_an_openalex_outage_is_an_outage() -> None:
+    """A 404 is Crossref saying it has never heard of the DOI, which is nothing to say
+    about a retraction notice. With the fallback down too, nobody checked."""
+    respx.get(f"https://api.crossref.org/works/{NUMPY_DOI}").mock(return_value=httpx.Response(404))
+    respx.get(f"https://api.openalex.org/works/https://doi.org/{NUMPY_DOI}").mock(
+        side_effect=httpx.ConnectError("no route")
+    )
+    with pytest.raises(rs.ProviderError, match="crossref and openalex unavailable"):
+        rs.Resolver().retraction(NUMPY_DOI)
+
+
+@respx.mock
+def test_a_crossref_404_with_openalex_answering_is_a_clean_check() -> None:
+    respx.get(f"https://api.crossref.org/works/{NUMPY_DOI}").mock(return_value=httpx.Response(404))
+    respx.get(f"https://api.openalex.org/works/https://doi.org/{NUMPY_DOI}").mock(
+        return_value=httpx.Response(200, json={"is_retracted": False})
+    )
+    assert rs.Resolver().retraction(NUMPY_DOI) is None
+
+
+@respx.mock
+def test_a_clean_crossref_answer_is_still_clean_when_openalex_is_down() -> None:
+    """Crossref carries the Retraction Watch data; it answered, and it said nothing.
+    OpenAlex is the fallback, not a second required opinion."""
+    respx.get(f"https://api.crossref.org/works/{NUMPY_DOI}").mock(
+        return_value=httpx.Response(200, json=fixture("crossref_work_numpy.json"))
+    )
+    respx.get(f"https://api.openalex.org/works/https://doi.org/{NUMPY_DOI}").mock(
+        side_effect=httpx.ConnectError("no route")
+    )
+    assert rs.Resolver().retraction(NUMPY_DOI) is None
+
+
+# --- fix round 1: a title-first entry is never eaten as an author list ------------
+
+TITLE_FIRST = [
+    "Pattern Recognition and Machine Learning. Springer Verlag, Berlin, 2006.",
+    "Neural Networks and Deep Learning. Determination Press, 2015.",
+    "Computer Vision and Image Understanding. Academic Press, San Diego, 2011.",
+]
+
+
+@pytest.mark.parametrize("raw", TITLE_FIRST)
+def test_a_title_first_book_keeps_its_title_as_the_first_segment(raw: str) -> None:
+    """Two capitalised pairs joined by "and" are a title as often as a pair of
+    authors. What is left after the names decides: a real entry still has a title
+    *and* a venue, a title-first book has only its imprint."""
+    assert rs.title_segments(raw)[0] == raw.split(". ")[0]
+
+
+@pytest.mark.parametrize("raw", TITLE_FIRST)
+def test_a_title_first_book_is_not_indexed_rather_than_a_ghost(raw: str) -> None:
+    """Product rule 3. ``looks_unindexed`` asks whether a *person-style* author list
+    was found, so the full-name pattern must not answer it."""
+    assert rs.looks_unindexed(raw) is True
+    assert rs.classify([], raw).state is rs.State.NOT_INDEXED
+
+
+def test_a_title_first_book_still_resolves_against_its_own_record() -> None:
+    # The entry prints no author, so the author field cannot agree and the state is
+    # the low-confidence one. Resolved either way, and never a ghost.
+    raw = TITLE_FIRST[0]
+    c = cand("Pattern Recognition and Machine Learning", "Bishop", 2006)
+    assert rs.classify([c], raw).state is rs.State.RESOLVED_LOW
+    assert rs.title_score(c.title, raw) == pytest.approx(1.0)
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "Christopher Clark and Matt Gardner. Simple and Effective Multi-Paragraph Reading "
+        "Comprehension. In Proceedings of ACL, pages 845-855, 2018.",
+        "Sepp Hochreiter and Jurgen Schmidhuber. Long Short-Term Memory. Neural Computation, "
+        "9(8):1735-1780, 1997.",
+    ],
+)
+def test_a_real_two_author_entry_keeps_a_title_and_a_venue_and_is_stripped(raw: str) -> None:
+    assert rs.title_segments(raw)[0] == raw.split(". ")[1]
+
+
+def test_the_full_name_pattern_never_decides_looks_unindexed() -> None:
+    """The cost of the guard, recorded rather than hidden: a full-name list is not an
+    initials-style one, so an entry in that form that matches no record reaches
+    `NOT_INDEXED` instead of `GHOST`. Rule 3 outranks ghost recall (OPEN-ITEMS 7.10)."""
+    raw = (
+        "Christopher Clark and Matt Gardner. Simple and Effective Multi-Paragraph Reading "
+        "Comprehension. In Proceedings of ACL, pages 845-855, 2018."
+    )
+    assert rs.looks_unindexed(raw) is True
+    assert rs.classify([], raw).state is rs.State.NOT_INDEXED
+
+
+# --- fix round 2: what the looks_unindexed guard actually costs -------------------
+
+FABRICATED_PAIR = (
+    "Daniel Okonkwo and Hiroshi Tanabe. Sparse attention routing for long-document "
+    "summarisation. In Proceedings of NAACL."
+)
+
+
+def test_a_year_after_the_names_keeps_the_ghost_call_available() -> None:
+    """`First Last and First Last. YEAR. Title.` is consumed by `_AUTHORS_THEN_YEAR`,
+    which is an initials-path pattern, so `looks_unindexed` still sees an author list
+    and a fabricated entry in that form is still callable as a ghost. Measured on the
+    ghost set: 3 of 3 such rows, 2 `GHOST` and 1 accepted for an unrelated reason
+    (see the proceedings-volume note in docs/eval/2026-09-12-ghosts.md)."""
+    dated = (
+        "Daniel Okonkwo and Hiroshi Tanabe. 2020. Sparse attention routing for "
+        "long-document summarisation. In Proceedings of NAACL."
+    )
+    assert rs.looks_unindexed(dated) is False
+    assert rs.classify([], dated).state is rs.State.GHOST
+
+
+def test_without_that_year_the_same_entry_is_not_indexed_instead() -> None:
+    """The exact and only shape OPEN-ITEMS 11.13 is about: no initial and no year
+    between the names and the title, so nothing on the initials path matches and the
+    entry reads like a document the indexes never held. Rule 3 outranks recall."""
+    assert rs.looks_unindexed(FABRICATED_PAIR) is True
+    assert rs.classify([], FABRICATED_PAIR).state is rs.State.NOT_INDEXED
+
+
+# --- a non-JSON provider body is an outage, not a traceback (task 8.6b) -----------
+
+
+@respx.mock
+def test_a_non_json_provider_body_is_a_provider_error() -> None:
+    """A bot wall, a maintenance page or a truncated answer arrives as HTML with a
+    200. ``Response.json`` raises ``JSONDecodeError`` for it, which is a parser's
+    complaint, not a provider state — and it escaped ``resolve`` as a traceback.
+    Every body this module parses goes through one place, and that place says what
+    the caller's vocabulary already has a word for."""
+    respx.get("https://api.crossref.org/works").mock(
+        return_value=httpx.Response(200, text="<html><body>Just a moment…</body></html>")
+    )
+    with pytest.raises(rs.ProviderError, match="non-JSON"):
+        rs.Resolver(retries=0).crossref_bibliographic(FABRICATED)
+
+
+@respx.mock
+def test_a_non_json_body_is_never_evidence_that_a_work_does_not_exist() -> None:
+    """Product rule 2, end to end: the one required provider that answered with a
+    page instead of a record is reported as unavailable, and the reference the other
+    providers also failed to find is ``UNVERIFIED (provider unavailable)``, never a
+    ghost."""
+    _mock()
+    respx.get("https://api.crossref.org/works").mock(
+        return_value=httpx.Response(200, text="<html><body>Attention Required!</body></html>")
+    )
+    result = rs.Resolver(retries=0).resolve(FABRICATED)
+    assert result.state is rs.State.UNAVAILABLE
+    assert any("crossref unavailable" in note and "non-JSON" in note for note in result.notes)
+
+
+@respx.mock
+def test_a_non_json_retraction_body_leaves_the_check_unmade() -> None:
+    """The same rule one level up: neither provider said "no notice", so nothing was
+    checked and the caller must not be handed a clean record it never earned."""
+    respx.get(f"https://api.crossref.org/works/{NUMPY_DOI}").mock(
+        return_value=httpx.Response(200, text="<html>maintenance</html>")
+    )
+    respx.get(f"https://api.openalex.org/works/https://doi.org/{NUMPY_DOI}").mock(
+        return_value=httpx.Response(200, text="<html>maintenance</html>")
+    )
+    with pytest.raises(rs.ProviderError):
+        rs.Resolver(retries=0).retraction(NUMPY_DOI)

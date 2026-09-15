@@ -996,3 +996,126 @@ def test_a_superscript_after_a_closing_quote_is_still_a_footnote_marker() -> Non
 def test_a_superscript_after_a_closing_bracket_is_still_a_citation() -> None:
     spans = [_span("the Protein Data Bank (PDB)"), _span("5", superscript=True)]
     assert _line_text(spans) == "the Protein Data Bank (PDB)[5]"
+
+
+# --- a bibliography with no heading at all (OPEN-ITEMS 11.4 / 9.3) ---------------
+
+NATURE_ENTRIES = [
+    "1. Jumper, J. et al. Highly accurate protein structure prediction. Nature 596, 583 (2021).",
+    "2. Senior, A. W. et al. Improved protein structure prediction. Nature 577, 706 (2020).",
+    "3. Shindyalov, I. N. et al. Can three-dimensional contacts be predicted? Prot. Eng. 7 (1994).",
+    "4. Mirabello, C. & Wallner, B. rawMSA: end-to-end deep learning. PLoS ONE 14 (2019).",
+    "5. Li, J. Universal transforming geometric network. arXiv:1908.00723 (2019).",
+    "6. Yang, J. et al. Improved protein structure prediction. PNAS 117, 1496 (2020).",
+]
+
+
+def _numbered_page(entries: Sequence[str], *, top: float = 100.0) -> Blocks:
+    return tuple(((72, top + 20 * index), text) for index, text in enumerate(entries))
+
+
+def test_a_pdf_without_a_references_heading_falls_back_to_the_last_numbered_run(
+    tmp_path: Path,
+) -> None:
+    """Nature prints its reference list with no heading, so the paper used to arrive
+    with no references at all and its markers could be checked against nothing."""
+    path = tmp_path / "nature.pdf"
+    _write_pdf(
+        path,
+        [
+            (((72, 100), "The method is accurate [1]. It beats the baseline [2]."),),
+            _numbered_page(NATURE_ENTRIES),
+        ],
+    )
+    document = from_pdf(path)
+    assert [reference.number for reference in document.references] == [1, 2, 3, 4, 5, 6]
+    assert document.references[0].raw.startswith("1. Jumper")
+    # The body keeps its prose and loses the entries.
+    assert any("beats the baseline" in p.text for p in document.paragraphs)
+    assert not any("rawMSA" in p.text for p in document.paragraphs)
+
+
+def test_a_heading_still_wins_over_the_fallback(tmp_path: Path) -> None:
+    path = tmp_path / "headed.pdf"
+    _write_pdf(
+        path,
+        [
+            (((72, 100), "A claim [1]."),),
+            (((72, 100), "References"), *_numbered_page(NATURE_ENTRIES, top=140.0)),
+        ],
+    )
+    document = from_pdf(path)
+    assert len(document.references) == len(NATURE_ENTRIES)
+    assert not any(p.text.strip() == "References" for p in document.paragraphs)
+
+
+def test_too_few_numbered_paragraphs_are_left_in_the_body(tmp_path: Path) -> None:
+    """Four numbered lines are a numbered list, not a bibliography. Calling them
+    references would point every citation at the wrong source."""
+    path = tmp_path / "list.pdf"
+    _write_pdf(
+        path,
+        [
+            (((72, 100), "The method works [1]."),),
+            _numbered_page(NATURE_ENTRIES[:4]),
+        ],
+    )
+    document = from_pdf(path)
+    assert document.references == ()
+    assert any("Jumper" in p.text for p in document.paragraphs)
+
+
+def test_numbers_that_do_not_ascend_are_not_a_bibliography(tmp_path: Path) -> None:
+    path = tmp_path / "steps.pdf"
+    scrambled = [
+        "3. Mix the buffer.",
+        "1. Warm the sample.",
+        "9. Wait an hour.",
+        "2. Read the plate.",
+        "7. Record the result.",
+        "4. Discard the tube.",
+    ]
+    _write_pdf(path, [(((72, 100), "A claim [1]."),), _numbered_page(scrambled)])
+    assert from_pdf(path).references == ()
+
+
+def test_the_fallback_takes_the_last_run_not_the_first(tmp_path: Path) -> None:
+    path = tmp_path / "two-runs.pdf"
+    steps = [f"{index}. Step {index} of the protocol." for index in range(1, 7)]
+    _write_pdf(
+        path,
+        [
+            (((72, 100), "A claim [1]."), *_numbered_page(steps, top=140.0)),
+            (((72, 100), "We thank the reviewers."), *_numbered_page(NATURE_ENTRIES, top=140.0)),
+        ],
+    )
+    document = from_pdf(path)
+    assert [reference.raw[:10] for reference in document.references] == [
+        entry[:10] for entry in NATURE_ENTRIES
+    ]
+    # The protocol's own numbered steps stay prose.
+    assert any("Step 1 of the protocol" in p.text for p in document.paragraphs)
+
+
+def test_two_numbered_runs_that_touch_are_left_alone(tmp_path: Path) -> None:
+    """Nothing separates the protocol's steps from the reference list, so the run is
+    one block whose numbers restart. Cutting it anywhere would number half the
+    entries wrong, and a citation pointed at the wrong source is worse than one
+    reported as unchecked (product rule 2)."""
+    path = tmp_path / "touching.pdf"
+    steps = [f"{index}. Step {index} of the protocol." for index in range(1, 7)]
+    _write_pdf(
+        path,
+        [
+            (((72, 100), "A claim [1]."), *_numbered_page(steps, top=140.0)),
+            _numbered_page(NATURE_ENTRIES),
+        ],
+    )
+    assert from_pdf(path).references == ()
+
+
+def test_pasted_text_without_a_heading_keeps_its_numbered_list(tmp_path: Path) -> None:
+    """The fallback is a paged-document rule: a markdown draft that prints a
+    numbered list is not silently turned into a bibliography."""
+    body = "Do it [1].\n\n" + "\n\n".join(NATURE_ENTRIES) + "\n"
+    assert from_text(body, name="draft.md", kind="markdown", markdown=True).references == ()

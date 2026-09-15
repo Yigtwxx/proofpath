@@ -142,8 +142,13 @@ class SourceStatus:
     state: str
     fetch_step: int | None
     url: str
-    from_cache: bool
+    from_cache: bool  # the *text* came from the cache rather than from the wire
     notes: tuple[str, ...] = ()
+    # The *resolution* came from the cache. Kept apart from ``from_cache`` because
+    # the two are different facts about different stages: a warm run can resolve a
+    # reference from the cache and still fetch its text over the network, and a
+    # report that collapsed them could not say which half was free.
+    resolve_from_cache: bool = False
 
 
 @dataclass(frozen=True)
@@ -337,6 +342,10 @@ MEMBER_INDENT = 2
 # The section 15 coverage block, label column and all.
 COVERAGE_LABELS = ("verified against full text", "abstract only", "unverified")
 COVERAGE_WIDTH = 29
+# The section 7.1 aggregate: every source the browser consent gate stopped is already
+# named one by one, but a reader scanning the footer has to be told how many there
+# were without counting them (product rule 6). One wording for both surfaces.
+BROWSER_SKIPPED_REASON = "because the browser was not permitted"
 
 # ``pipeline.py`` writes this reason when a rule, not the model, refuted a claim. It
 # is parsed back out rather than re-derived, so the caret line and the verdict can
@@ -395,6 +404,10 @@ class Footer:
     # ``Report.tier_note`` when the calibration left no reachable ``high`` band, so
     # a run never shows `medium` as if a stronger tier existed and was withheld.
     note: str | None = None
+    # Sources that stopped at the section 7.1 consent gate, from
+    # ``Coverage.browser_skipped``. The reason they are unread is a permission, not a
+    # failure of the source, and the footer has to say which.
+    browser_skipped: int = 0
 
 
 def render_diagnostics(report: Report) -> list[Diagnostic]:
@@ -441,6 +454,7 @@ def render_footer(report: Report, *, written: str | None = None) -> Footer:
         cancelled=report.cancelled,
         note=report.tier_note or None,
         unchecked_markers=_unchecked(report),
+        browser_skipped=report.coverage.browser_skipped,
     )
 
 
@@ -650,7 +664,16 @@ def _markdown_sources(report: Report) -> list[str]:
         return [*lines, "No reference was looked up.", ""]
     lines.extend(["| ref | state | text | step | url |", "| --- | --- | --- | --- | --- |"])
     for status in report.sources:
-        step = str(status.fetch_step) if status.fetch_step is not None else "—"
+        # The ladder's step when one ran. A reference that was never fetched still has
+        # something to say when its resolution was served from the cache: the run
+        # learned what it knows about this source without asking anyone (OPEN-ITEMS
+        # 10.8), and a bare dash would read as "nothing happened".
+        if status.fetch_step is not None:
+            step = str(status.fetch_step)
+        elif status.resolve_from_cache:
+            step = "cache"
+        else:
+            step = "—"
         lines.append(
             f"| [{status.reference.number}] | {_cell(status.state or 'ok')} "
             f"| {status.text_kind} | {step} | {_cell(status.url or '—')} |"
@@ -682,6 +705,10 @@ def _markdown_coverage(report: Report) -> list[str]:
         for label, share in zip(COVERAGE_LABELS, coverage.pct(), strict=True)
     )
     lines.extend(["```", ""])
+    if coverage.browser_skipped:
+        lines.extend(
+            [f"Skipped {coverage.browser_skipped} source(s) {BROWSER_SKIPPED_REASON}.", ""]
+        )
     unchecked = _unchecked(report)
     if unchecked:
         lines.extend([no_bibliography(unchecked), ""])

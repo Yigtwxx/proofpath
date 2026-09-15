@@ -2,10 +2,13 @@
 
 Two halves, like ``scripts/eval_coverage.py``:
 
-* the **hand set** (``tests/data/pairing_set.jsonl``): ~60 hand-written passages whose
-  expected ``(marker, sentence, refs, paragraph-scoped)`` pairs were written by reading
-  the prose, not by running the code. Scoring it needs no network and is the gate the
-  unit tests enforce (``tests/test_eval_pairing.py``, rate >= 0.95);
+* the **hand sets**, one per citation style and chosen with ``--style``:
+  ``tests/data/pairing_set.jsonl`` (numeric, ~60 passages) and
+  ``tests/data/pairing_author_year.jsonl`` (author-year, ~50). Both were written by
+  reading the prose, not by running the code. Scoring needs no network and is the gate
+  the unit tests enforce (``tests/test_eval_pairing.py``: numeric >= 0.95, author-year
+  >= 0.90, the harder style). The set this run was *not* asked about is scored too and
+  printed beside the one it was, so the report can say the other style did not move;
 * the **real PDFs** (``--pdf``): each fetched through ``oa.OpenAccess`` and cached under
   ``cache_dir()/datasets/pairing/``, ingested with ``ingest.from_pdf`` and extracted, so
   the report can state what the same code does on printed two-column text. Those rows
@@ -15,14 +18,16 @@ Two halves, like ``scripts/eval_coverage.py``:
 A row expects three things, and every one of them is scored. ``expected`` holds the
 (marker, sentence, refs, paragraph-scoped) pairs. ``expected_unsupported`` and
 ``expected_unresolved`` hold the markers that must be **reported** instead of paired --
-an author-year marker (v0.1 never guesses which entry it names) and a number no
-bibliography answers. A marker the extractor reports that the row did not declare is an
-``extra`` miss: a report nobody asked for is as much a defect as a missing one, and
-letting it pass would hide the day the patterns start seeing citations that are not
-there.
+a style the version cannot pair at all, and a marker naming something no bibliography
+entry answers. The scorer closes the set in both directions: a claim no expectation
+accounts for, and a reported marker the row declares in *neither* list, are ``extra``
+misses -- a report nobody asked for is as much a defect as a missing one. A marker
+declared under the other heading counts once, as ``missing``: it was reported, just not
+where the row said it would be.
 
-Usage: uv run python scripts/eval_pairing.py [--set PATH] [--pdf DOI_OR_ARXIV ...]
-                                             [--out PATH] [--samples N] [--refresh]
+Usage: uv run python scripts/eval_pairing.py [--style numeric|author-year] [--set PATH]
+                                             [--pdf DOI_OR_ARXIV ...] [--out PATH]
+                                             [--samples N] [--refresh]
 """
 
 from __future__ import annotations
@@ -43,9 +48,25 @@ from proofpath.document import Document
 from proofpath.paths import cache_dir
 from proofpath.polite import PoliteClient
 
-DEFAULT_SET = Path(__file__).resolve().parents[1] / "tests" / "data" / "pairing_set.jsonl"
+_DATA = Path(__file__).resolve().parents[1] / "tests" / "data"
+DEFAULT_SET = _DATA / "pairing_set.jsonl"
+# One hand set per citation style the tool pairs. They are scored separately and
+# reported separately: an author-year set folded into the numeric one would let a weak
+# rate in either hide behind the other's rows, and the two have different gates.
+SETS: dict[str, Path] = {
+    "numeric": DEFAULT_SET,
+    "author-year": _DATA / "pairing_author_year.jsonl",
+}
 PDF_DIR = "pairing"  # under cache_dir()/datasets/
-STYLES: tuple[str, ...] = ("numeric", "ranges", "paragraph", "mixed")
+STYLES: tuple[str, ...] = (
+    "numeric",
+    "ranges",
+    "paragraph",
+    "mixed",
+    "author-year",
+    "collision",
+    "back-reference",
+)
 SAMPLES = 20
 SAMPLE_WIDTH = 100  # characters of claim text printed per sampled pair
 
@@ -355,10 +376,17 @@ def render_report(
     by_style: dict[str, tuple[int, int]],
     live: Sequence[LiveRow] = (),
     date: str,
+    name: str = "numeric",
+    other: tuple[str, PairingResult] | None = None,
 ) -> str:
     """The markdown pairing report. ``## Notes`` is not written here: it is the one
-    section a human has to write, and a generated placeholder would read like one."""
-    lines = [f"# Citation pairing — {date}", ""]
+    section a human has to write, and a generated placeholder would read like one.
+
+    ``other`` is the hand set this run did *not* measure, scored anyway and printed as a
+    second table. A change made for one style can move the other, and a report that shows
+    only the set it was asked about cannot say whether it did.
+    """
+    lines = [f"# Citation pairing ({name}) — {date}", ""]
     lines.append(f"- rows: {result.rows}")
     lines.append(
         f"- expectations: {result.expected} ({result.pairs} pairs, "
@@ -369,7 +397,7 @@ def render_report(
     lines.append(f"- pairing rate: **{result.rate:.2f}** ({result.correct}/{result.expected})")
     lines.append("")
 
-    lines.append("## Hand set")
+    lines.append(f"## Hand set ({name})")
     lines.append("")
     lines.append("| style | checks | correct | rate |")
     lines.append("|---|---|---|---|")
@@ -378,6 +406,18 @@ def render_report(
         lines.append(f"| {style} | {checks} | {correct} | {rate} |")
     lines.append(f"| **all** | {result.expected} | {result.correct} | {result.rate:.2f} |")
     lines.append("")
+
+    if other is not None:
+        other_name, other_result = other
+        lines.append(f"## Hand set ({other_name}) — unchanged by this run")
+        lines.append("")
+        lines.append("| set | rows | checks | correct | rate |")
+        lines.append("|---|---|---|---|---|")
+        lines.append(
+            f"| {other_name} | {other_result.rows} | {other_result.expected} | "
+            f"{other_result.correct} | {other_result.rate:.2f} |"
+        )
+        lines.append("")
 
     lines.append("## Misses")
     lines.append("")
@@ -527,7 +567,13 @@ def measure_target(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--set", default=str(DEFAULT_SET), help="the hand-built JSONL set")
+    parser.add_argument(
+        "--style",
+        default="numeric",
+        choices=sorted(SETS),
+        help="which hand set to score; the other one is scored too and reported beside it",
+    )
+    parser.add_argument("--set", default="", help="a JSONL set to score instead of --style's")
     parser.add_argument(
         "--pdf",
         nargs="*",
@@ -542,7 +588,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--refresh", action="store_true", help="re-download cached PDFs")
     args = parser.parse_args(argv)
 
-    set_path = Path(args.set)
+    set_path = Path(args.set) if args.set else SETS[args.style]
     if not set_path.exists():
         print(f"error: {set_path} not found", file=sys.stderr)
         return 2
@@ -556,6 +602,20 @@ def main(argv: list[str] | None = None) -> int:
     )
     for miss in result.misses:
         print(f"  miss   {miss.row_id} {miss.marker}: {miss.reason}", file=sys.stderr)
+
+    # The set this run was not asked about, scored anyway: the report has to be able to
+    # say that the other style did not move, and quoting a number from an older run
+    # would be saying it without checking.
+    other: tuple[str, PairingResult] | None = None
+    if not args.set:
+        other_name = next(name for name in SETS if name != args.style)
+        other_result = score(load_rows(SETS[other_name]))
+        other = (other_name, other_result)
+        print(
+            f"other set {other_name}: rate {other_result.rate:.3f} "
+            f"({other_result.correct}/{other_result.expected})",
+            file=sys.stderr,
+        )
 
     live: list[LiveRow] = []
     if args.pdf:
@@ -584,10 +644,14 @@ def main(argv: list[str] | None = None) -> int:
             fetcher.close()
 
     date_str = date.today().isoformat()
-    report = render_report(result, by_style=breakdown, live=live, date=date_str)
+    report = render_report(
+        result, by_style=breakdown, live=live, date=date_str, name=args.style, other=other
+    )
     print(report)
     if args.out:
-        out = Path("docs/eval") / f"{date_str}-pairing.md" if args.out == "docs" else Path(args.out)
+        suffix = "" if args.style == "numeric" else f"-{args.style}"
+        default_out = Path("docs/eval") / f"{date_str}-pairing{suffix}.md"
+        out = default_out if args.out == "docs" else Path(args.out)
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(report, encoding="utf-8")
         print(f"written   {out}", file=sys.stderr)

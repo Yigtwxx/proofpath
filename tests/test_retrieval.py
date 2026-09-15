@@ -170,3 +170,37 @@ def test_fast_embedder_close_drops_the_model_and_is_idempotent() -> None:
     embedder.close()
     assert embedder._model is None
     assert embedder.close() is None
+
+
+def test_split_sentences_keeps_a_citation_page_or_chapter_tail_whole() -> None:
+    # "(Smith, 2020, p. 12)" is one citation marker; cutting the sentence at "p." put
+    # half of it in the next sentence and left the claim without its full stop.
+    text = "The figure is eight millimetres (Smith, 2020, p. 12). Later work disagreed."
+    assert split_sentences(text) == [
+        "The figure is eight millimetres (Smith, 2020, p. 12).",
+        "Later work disagreed.",
+    ]
+    assert split_sentences("See pp. 12-15 and ch. 4. The rest follows.") == [
+        "See pp. 12-15 and ch. 4.",
+        "The rest follows.",
+    ]
+    # A word that merely ends in those letters is still a sentence end.
+    assert split_sentences("She drew the map. The next one was better.") == [
+        "She drew the map.",
+        "The next one was better.",
+    ]
+
+
+def test_a_page_abbreviation_only_holds_a_sentence_together_in_front_of_a_number() -> None:
+    # "p." and "pp." are a locator only when a number follows. "5 pp." is a unit ending a
+    # sentence, and swallowing the boundary there would glue two sentences of prose
+    # together for every percentage point in an economics paper.
+    assert split_sentences("It rose by 5 pp. The trend continued into autumn.") == [
+        "It rose by 5 pp.",
+        "The trend continued into autumn.",
+    ]
+    assert split_sentences("The reform is set out in ch. The next section applies it.") == [
+        "The reform is set out in ch.",
+        "The next section applies it.",
+    ]
+    assert split_sentences("See p. 12. The rest follows.") == ["See p. 12.", "The rest follows."]

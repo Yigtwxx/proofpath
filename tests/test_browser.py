@@ -184,7 +184,114 @@ def test_is_installed_needs_patchright_and_scrapling(
     monkeypatch.setattr(
         bw.importlib.util, "find_spec", lambda name: object() if name in present else None
     )
+    monkeypatch.setattr(bw, "browser_binary_present", lambda: True)
     assert bw.is_installed() is expected
+
+
+def _chromium_in(path: Path) -> None:
+    (path / "chromium-1140" / "chrome-mac").mkdir(parents=True)
+
+
+def test_is_installed_needs_a_browser_binary_too(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A venv with the wheels but no downloaded chromium used to skip the installer
+    and fail inside ``fetch_with_browser`` (OPEN-ITEMS 11.6)."""
+    monkeypatch.setattr(bw.importlib.util, "find_spec", lambda name: object())
+    monkeypatch.setenv(bw.BROWSERS_PATH_ENV, str(tmp_path))
+    assert bw.is_installed() is False
+    _chromium_in(tmp_path)
+    assert bw.is_installed() is True
+
+
+def test_the_browsers_path_env_replaces_the_platform_defaults(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """playwright and patchright look **only** where the variable points, so neither
+    may proofpath: a browser found in a default the driver will not read would let the
+    gate skip an install the fetch then needs."""
+    monkeypatch.setenv(bw.BROWSERS_PATH_ENV, str(tmp_path))
+    assert bw.browser_cache_dirs() == [tmp_path]
+    assert bw.browser_binary_present() is False
+    _chromium_in(tmp_path)
+    assert bw.browser_binary_present() is True
+
+
+def test_a_browsers_path_of_zero_falls_back_to_the_platform_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """playwright reads ``0`` as "next to the package", not as a directory."""
+    monkeypatch.setenv(bw.BROWSERS_PATH_ENV, "0")
+    assert all(directory.name == "ms-playwright" for directory in bw.browser_cache_dirs())
+
+
+@pytest.mark.parametrize(
+    ("platform", "expected"),
+    [
+        ("darwin", "Library/Caches/ms-playwright"),
+        ("linux", ".cache/ms-playwright"),
+        ("win32", "ms-playwright"),
+    ],
+)
+def test_the_platform_default_cache_is_where_playwright_puts_it(
+    monkeypatch: pytest.MonkeyPatch, platform: str, expected: str
+) -> None:
+    monkeypatch.delenv(bw.BROWSERS_PATH_ENV, raising=False)
+    monkeypatch.setattr(bw.sys, "platform", platform)
+    directories = bw.browser_cache_dirs()
+    # With no variable to obey, this platform's own default leads and the other two
+    # follow: a venv carried between machines still finds what it downloaded.
+    assert directories[0].as_posix().endswith(expected)
+    assert len(directories) == 3
+    assert len(set(directories)) == 3
+
+
+def test_a_missing_cache_directory_is_simply_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(bw.BROWSERS_PATH_ENV, str(tmp_path / "nowhere"))
+    assert bw.browser_binary_present() is False
+
+
+def test_a_file_named_chromium_is_not_an_installed_browser(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(bw.BROWSERS_PATH_ENV, str(tmp_path))
+    (tmp_path / "chromium-1140").write_text("not a directory", encoding="utf-8")
+    assert bw.browser_binary_present() is False
+
+
+def test_the_consent_log_records_whether_the_binary_was_there() -> None:
+    """The line is about the ~200 MB download, so it reads ``browser_binary_present``
+    and not the combined ``is_installed`` -- otherwise a venv missing only the wheels
+    would be logged as missing a browser it has."""
+    gate = bw.ConsentGate(
+        "allow",
+        interactive=False,
+        installed=lambda: False,
+        binary=lambda: False,
+        installer=lambda _: True,
+    )
+    assert gate.allow("example.test", 403) is True
+    assert "browser binary: missing" in gate.install_log
+
+    ready = bw.ConsentGate("allow", interactive=False, installed=lambda: True, binary=lambda: True)
+    assert ready.allow("example.test", 403) is True
+    assert "browser binary: found" in ready.install_log
+
+
+def test_the_binary_line_does_not_repeat_the_wheels_verdict() -> None:
+    """Wheels missing, browser already downloaded: the installer runs for the wheels
+    and the log still says the binary was found."""
+    gate = bw.ConsentGate(
+        "allow",
+        interactive=False,
+        installed=lambda: False,
+        binary=lambda: True,
+        installer=lambda _: True,
+    )
+    assert gate.allow("example.test", 403) is True
+    assert "browser binary: found" in gate.install_log
 
 
 # --- install() -----------------------------------------------------------
@@ -274,6 +381,18 @@ def test_prompt_text_matches_spec() -> None:
         "[never] never ask again"
     )
     assert "no HTTP status" in bw.prompt_text("nature.com", None)
+
+
+def test_prompt_text_does_not_call_a_200_a_block() -> None:
+    """The empty-body bot wall answers 200 and hands over nothing readable.
+
+    Calling that "blocked this request (HTTP 200)" reads like a contradiction to
+    anyone looking at the status line, and it describes something the host did not
+    say. The first line states what actually happened; the offer below it is the same.
+    """
+    first = bw.prompt_text("cell.com", 200).splitlines()[0]
+    assert first == "  \u26a0 cell.com answered without readable text (HTTP 200)."
+    assert "blocked" not in first
 
 
 def test_ask_terminal_maps_choices(monkeypatch: pytest.MonkeyPatch) -> None:

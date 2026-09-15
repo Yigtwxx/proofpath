@@ -190,7 +190,7 @@ def test_format_sarif_is_refused_rather_than_rendered_as_text() -> None:
     """The value parses everywhere the enum does; only Phase 8 makes it mean something."""
     result = runner.invoke(app, ["fetch", "--format", "sarif", URL])
     assert result.exit_code == 2
-    assert "error: --format sarif arrives in v0.2" in result.output
+    assert "error: --format sarif applies to check only" in result.output
 
 
 def test_bad_target_exits_2() -> None:

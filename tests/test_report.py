@@ -12,6 +12,7 @@ from proofpath.fetch import Outcome
 from proofpath.models import Label, Passage, Verdict
 from proofpath.oa import ABSTRACT_ONLY
 from proofpath.report import (
+    BROWSER_SKIPPED_REASON,
     LEVELS,
     SNIPPET_LIMIT,
     STATE_WORDS,
@@ -1177,3 +1178,75 @@ def test_markdown_prefers_the_weak_sentence_when_references_were_found() -> None
     text = render_markdown(covered(4, 3, 0, 1), written_at=WHEN)
     assert "no bibliography was found" not in text
     assert "Coverage is weak" in text
+
+
+# --- the section 7.1 aggregate skipped line (OPEN-ITEMS 11.7) ---------------------
+
+
+def skipped_at_the_gate(count: int) -> Report:
+    report = covered(4, 2, 0, 2)
+    return dataclasses.replace(
+        report, coverage=dataclasses.replace(report.coverage, browser_skipped=count)
+    )
+
+
+def test_footer_carries_the_browser_skipped_count() -> None:
+    assert render_footer(skipped_at_the_gate(3)).browser_skipped == 3
+    assert render_footer(covered(4, 4, 0, 0)).browser_skipped == 0
+
+
+def test_markdown_coverage_names_the_sources_the_browser_gate_stopped() -> None:
+    text = render_markdown(skipped_at_the_gate(3), written_at=WHEN)
+    assert f"Skipped 3 source(s) {BROWSER_SKIPPED_REASON}." in text
+
+
+def test_markdown_says_nothing_when_the_browser_stopped_nothing() -> None:
+    assert "Skipped" not in render_markdown(covered(4, 4, 0, 0), written_at=WHEN)
+
+
+# --- fix round 1: a resolution served from the cache is visible in the report -----
+
+
+def cached_source(**overrides: object) -> SourceStatus:
+    base = {
+        "reference": REFERENCE,
+        "resolve": None,
+        "retraction": None,
+        "source_id": "doi:10.1/x",
+        "text_kind": "none",
+        "state": "",
+        "fetch_step": None,
+        "url": "",
+        "from_cache": False,
+        "resolve_from_cache": False,
+    }
+    return SourceStatus(**{**base, **overrides})  # type: ignore[arg-type]
+
+
+def test_markdown_sources_says_cache_when_the_resolution_came_from_it() -> None:
+    report = dataclasses.replace(
+        covered(1, 0, 0, 1), sources=(cached_source(resolve_from_cache=True),)
+    )
+    row = next(
+        line for line in render_markdown(report, written_at=WHEN).splitlines() if "[12]" in line
+    )
+    assert "| cache |" in row
+
+
+def test_a_fetched_source_still_shows_its_ladder_step() -> None:
+    report = dataclasses.replace(
+        covered(1, 1, 0, 0),
+        sources=(cached_source(resolve_from_cache=True, fetch_step=2, text_kind="fulltext"),),
+    )
+    row = next(
+        line for line in render_markdown(report, written_at=WHEN).splitlines() if "[12]" in line
+    )
+    assert "| 2 |" in row
+
+
+def test_a_source_nobody_cached_shows_a_dash() -> None:
+    report = dataclasses.replace(covered(1, 0, 0, 1), sources=(cached_source(),))
+    row = next(
+        line for line in render_markdown(report, written_at=WHEN).splitlines() if "[12]" in line
+    )
+    assert "| — |" in row

@@ -246,14 +246,19 @@ Findings from inspecting the installed base environment, and the decisions they 
 | # | Item | Note |
 |---|---|---|
 | 9.1 | Byline affiliation superscripts become claims | 34 of AlphaFold's 129 claims come from the author list; needs block-level filtering (a byline is not prose). Phase 6 or 8 |
-| 9.2 | Mixed `(Smith, 2020; [12])` loses its author-year half | `find_markers` lets the numeric marker win the overlap; fixing it changes paragraph scoping. Phase 8 with author-year pairing |
-| 9.3 | Nature PDF without a `References` heading | AlphaFold's list is not detected, so the paper has **no reference list at all** and its markers cannot be checked against anything: they are neither resolved nor reported. The 2026-09-11 re-run shows the row as 126 markers, 0 references, **0 unresolved** — the citations are visible and not yet checkable, which the coverage line has to say. (An earlier note here claimed every marker was reported unresolved; it never was.) Try the last numbered block as a fallback in Phase 8 |
+| 9.2 | ~~Mixed `(Smith, 2020; [12])` loses its author-year half~~ **Closed 2026-09-12 (Task 8.5)** | Both halves are markers now: the author-year marker keeps the whole parenthesis as its text and the numeric one keeps its brackets, and `strip_markers` drops the inner span it has already cut. Scoping changed as predicted — two markers in the carrying sentence block a paragraph-scoped citation — so `num-15`'s claim text closed up over the parenthesis. The numeric hand set went 107/109 → **108/109** (`docs/eval/2026-09-12-pairing-author-year.md`) |
+| 9.3 | ~~Nature PDF without a `References` heading~~ **Closed 2026-09-12 (Task 8.7, with 11.4)** | AlphaFold's list is not detected, so the paper has **no reference list at all** and its markers cannot be checked against anything: they are neither resolved nor reported. The 2026-09-11 re-run shows the row as 126 markers, 0 references, **0 unresolved** — the citations are visible and not yet checkable, which the coverage line has to say. (An earlier note here claimed every marker was reported unresolved; it never was.) Try the last numbered block as a fallback in Phase 8 |
 | 9.4 | Cross-bracket ranges `[1]-[3]` | paired as 1 and 3, an IEEE reader means 1–3 |
 | 9.5 | `km²` / `m³` read as citations `[2]` / `[3]` | accepted cost of the superscript rule; only when the PDF marks the digit as superscript |
-| 9.6 | `retrieval.sentence_spans` needs whitespace after a stop | `…cycles.[15] Later` stays one sentence. Not shared with the SciFact numbers as previously written — `sentence_spans` / `split_sentences` is used by `ingest` alone today. Left alone because a boundary before `[15]` with no whitespace after the stop would also split decimals and version strings (`v1.2`) |
+| 9.6 | `retrieval.sentence_spans` needs whitespace after a stop | `…cycles.[15] Later` stays one sentence. Not shared with the SciFact numbers as previously written, but not `ingest`-only either (as a later note here claimed): `verify._index_for` chunks fetched source text with `split_sentences` before embedding it, so a boundary change moves retrieval as well as claims. Left alone because a boundary before `[15]` with no whitespace after the stop would also split decimals and version strings (`v1.2`) |
 | 9.7 | An unnumbered first bibliography entry is dropped | Text standing before the first printed number is heading residue as often as it is an entry, so ingest drops it and the list starts at `[2]`. The `[1]` citing that entry is now reported as unresolved (fix round 3) rather than pointed at entry 2 — visible, but a real reference nobody can reach |
 | 9.8 | A decimal followed by a superscript reads as a citation | `0.5³` → `[3]`. The cost of keeping `OpenMM v.7.3.1⁶⁹`: a digit after a full stop no longer takes an exponent. Same trade as 9.5 — a false marker a reader can see, against a real citation nobody would |
 | 9.9 | .docx footnotes, endnotes, text boxes and nested tables are not read | `_docx_lines` walks body-level paragraphs and top-level table rows only; python-docx exposes neither the footnote/endnote parts nor drawing-anchored text, and `cell.text` stops at the cell's own paragraphs. A claim printed in any of them is invisible, not reported |
+| 9.10 | An unnumbered two-column bibliography is cut at line breaks | RoBERTa's ACL list yields **103 entries for ~50**: `split_references` falls back to one entry per paragraph, and the PDF hands each entry over as two paragraphs split at a hyphenated line break, so 54 of the 103 carry no author at all. Author-year pairing then resolves 5 of 96 items; rejoining an entry with the one before it whenever the first prints no year gives 47 entries and **65 claims instead of 15** (measured as a diagnostic, not shipped). The largest open item for author-year pairing |
+| 9.11 | Author-year pairing matches the first author and the exact year only | `(Lindqvist, 2019)` against "Okafor, C. and Lindqvist, S. …" and `(Smith, 2019)` against an entry printing 2020 are both reported unresolved. A ±1 year tolerance would not widen a score here, it would *pick* an entry; matching every author needs the entry's author list parsed, which §8 refuses to do locally. Rows `hd-01` and `hd-04` of `tests/data/pairing_author_year.jsonl` |
+| 9.12 | Two surnames sharing a last word collide | `(Berg, 2018)` against a list holding both "Berg, T." and "van der Berg, P." resolves to neither. The fold keeps only the last word so the body's `van der Berg` can meet the `Berg` that `author_hint` returns; the collision is paid as an ambiguous *report*, never a guess (row `hd-05`) |
+| 9.13 | ~~`ibid.` does not reach back to a numeric marker~~ **Closed 2026-09-12 (Task 8.5, fix round 1)** | `ibid.` now takes the refs of the marker **immediately before it in reading order**, whatever style it was written in, and never reaches back past it: if that marker resolved to nothing, or stands more than one paragraph back, the `ibid.` is reported instead of being pointed at the citation before that. `op. cit.` is unchanged — it names an author, so it still searches the surnames cited so far. Rows `bk-08`, `bk-09`, `hd-03` |
+| 9.14 | `Smith 2020` with no comma is not a marker | Inside a parenthesis the year must follow a comma or `et al.`, or `(Figure 2020)` becomes a citation. One citation missed in the styles that print no comma (row `hd-02`) |
 
 ### Next session
 
@@ -286,14 +291,14 @@ Findings from inspecting the installed base environment, and the decisions they 
 |---|---|---|
 | 10.1 | `oa._worst_outcome` labels "reached but no text" `UNVERIFIED (unreachable)` | `verify` uses `UNVERIFIED (reached, no text extracted)` for the same fact on URL sources; align `oa.py` in Phase 8 |
 | 10.2 | A fully cached re-run still loads both ONNX models | `model_id` needs the model names; expose names without loading (Phase 8, with the TUI's multi-run scheduler) |
-| 10.3 | `Cache` schema versions compare as strings | fine below v10; Phase 9 bumps to "3" |
+| 10.3 | ~~`Cache` schema versions compare as strings~~ **Closed 2026-09-12 (Task 8.7)** | `_version()` compares them as integers, and an unreadable version counts as the oldest file so the chain repairs it. Judgements become **v4** (`.superpowers/sdd/phase9/task-9.2-brief.md` updated) |
 | 10.4 | `cache ls` counts stale chunk rows after a digest change until the next write | cosmetic |
 | 10.5 | Exit code 1 for a document whose only finding is a `PARAGRAPH-SCOPED` note | spec §13.3 says every state counts; a `--fail-on` flag is the escape hatch if users object |
 | 10.6 | Unexpected non-`ProviderError` exceptions abort `prepare` | a per-unit guard turning them into `PROVIDER_UNAVAILABLE` would match rule 6 better |
 | 10.7 | Terminal and markdown word the weak-coverage warning differently | one voice, Phase 7 README pass |
-| 10.8 | Reference resolution and the retraction check are not cached | every run re-queries Crossref/S2/Retraction Watch, so a re-run is not offline however warm the cache is; a `resolutions` table (Phase 8) would make it truly offline |
+| 10.8 | ~~Reference resolution and the retraction check are not cached~~ **Closed 2026-09-12 (Task 8.7)** | cache schema v3 adds `resolutions` (30-day TTL, keyed by the marker-free folded entry) and `retractions` (30 days for a notice, 7 for its absence); neither `UNVERIFIED (provider unavailable)` nor a retraction check every provider failed is ever stored (`Resolver.retraction` raises `ProviderError` for that, `prepare` reports `retraction check unavailable` and the stage summary counts it). `scripts/zero_network_check.py` on the warm draft: **0 blocked calls, 1.3 s**, all three network stages attributed to `cache` (`docs/eval/2026-09-12-v0.1-live.md` §7b) |
 | 10.9 | For one run after the v1→v2 migration a changed source keeps its old verdicts | the digest set `put_chunks` reads is empty right after the migration, so it has nothing to compare the new text against and drops nothing; the run after that is correct |
-| 10.10 | Three concurrent TUI runs get three independent politeness limiters | `PoliteClient._last_call` is per instance; spec §13.1 wants one shared across the runs a single user has open |
+| 10.10 | ~~Three concurrent TUI runs get three independent politeness limiters~~ **Closed 2026-09-12 (Task 8.2, `polite.SHARED_THROTTLE`)** | `PoliteClient._last_call` was per instance; spec §13.1 wants one shared across the runs a single user has open, and `SHARED_THROTTLE` is that one |
 | 10.11 | `Cache` connections are thread-bound (`sqlite3.connect` is left at `check_same_thread=True`) | `prepare` and `decide_all` on different pool threads would fail; Phase 8's scheduler must give each run one dedicated thread, or `Cache` must become lock-protected |
 
 ### Next session
@@ -328,18 +333,72 @@ Findings from inspecting the installed base environment, and the decisions they 
 
 | # | Item | Note |
 |---|---|---|
-| 11.1 | Two-author lists `First Last and First Last` reach `AMBIGUOUS`, not `RESOLVED` | `_strip_authors` does not consume that form; Phase 8 with author-year pairing |
-| 11.2 | The arXiv-id branch has no author+year rescue | the DOI branch resolves `RESOLVED (low confidence)` on author+year agreement; mirror it for arXiv ids |
-| 11.3 | Resolution is the slow path of a cached re-run | 68 refs ≈ 3.7 min, 129 refs ≈ 24 min cold; a `resolutions` cache (10.8) and concurrent resolve in the TUI scheduler are the v0.2 fixes |
-| 11.4 | Nature PDFs expose no `References` heading | AlphaFold: 0 references, 84 unresolved markers, coverage 0/0/0 with the new hint; try "last numbered block" fallback in Phase 8 (9.3) |
+| 11.1 | ~~Two-author lists `First Last and First Last` reach `AMBIGUOUS`, not `RESOLVED`~~ **Closed 2026-09-12 (Task 8.7, fix round 1)** | `_AUTHORS_FULL_NAMES` consumes a full-name list joined by `,`/`and`/`&`, but only when a full stop closes it **and what remains still reads like a reference** — ≥ 2 title-like segments, the first ≥ 3 words — so a title-first book (`Pattern Recognition and Machine Learning. Springer Verlag, Berlin, 2006.`) keeps its title. `looks_unindexed` asks `_strip_initials_authors`, never this pattern. Ghost set 271 rows, false-ghost 0.0 % |
+| 11.2 | ~~The arXiv-id branch has no author+year rescue~~ **Closed 2026-09-12 (Task 8.7)** | mirrored from the DOI branch, same note (`title could not be matched in the reference string`); three real arXiv-id ghost-set rows now reach `RESOLVED (low confidence)`, and a mutated row with the wrong author and year still does not |
+| 11.3 | ~~Resolution is the slow path of a cached re-run~~ **Half closed 2026-09-12 (Task 8.7)** | the `resolutions` cache (10.8) removes it from a *re*-run entirely (the live draft: 28.5 s cold → 10.8 s warm → 1.3 s with the network gone). A **cold** run of 129 references is still serial and still minutes long; concurrent resolve in the TUI scheduler is what is left, tracked as 11.10 |
+| 11.4 | ~~Nature PDFs expose no `References` heading~~ **Closed 2026-09-12 (Task 8.7)** | `ingest.find_last_numbered_run` reads the list by its shape when no heading exists (paged formats only): last contiguous run of paragraphs whose lines open with a printed number, ≥ 5 entries, numbers ascending, bounded at the last numbered paragraph. AlphaFold: 0 → **17** references (59–75) and 0 → **97** reported unresolved markers (`docs/eval/2026-09-11-pairing.md`, 2026-09-12 re-run). Also closes 9.3 |
 | 11.5 | `stdin` decoding replaces undecodable bytes silently | a `\ufffd` in a claim should be noted (rule 2) |
-| 11.7 | The §7.1 aggregate line `skipped N source(s) because the browser was not permitted` is not printed by `check` | `FetchStats.browser_skipped` is counted but no `Footer` field or `ui` line consumes it; every such source is still named individually. Phase 8, with the footer work |
+| 11.7 | ~~The §7.1 aggregate line `skipped N source(s) because the browser was not permitted` is not printed by `check`~~ **Closed 2026-09-12 (Task 8.7)** | `Footer.browser_skipped` carries `Coverage.browser_skipped`; `ui.skipped` prints it with a yellow count (never dropped by `-q`) and `_markdown_coverage` prints the same sentence, whose wording both surfaces import from `report.BROWSER_SKIPPED_REASON` |
 | 11.8 | Bibliographies with ≥ 1000 entries lose ghost detection | `_MARKER` bare forms are capped at three digits, so `1024. Smith…` keeps its marker and exits as `NOT_INDEXED` (never a false ghost) |
 | 11.9 | `mypy` covers `src/` only | `scripts/` is ruff-linted and its pure halves are tested, but not type-checked; two pre-existing errors in `scripts/eval_ghosts.py` |
-| 11.6 | `browser.is_installed()` checks imports, not a browser binary | a half-installed venv skips the installer and fails inside `fetch_with_browser` (reported, not a crash); check the binary in Phase 8 |
+| 11.10 | Cold resolution is still serial | what is left of 11.3: 129 references cold is minutes of one-at-a-time provider calls. The TUI scheduler's concurrent resolve (spec §13.1, decision 8.14) is the fix, and `polite.SHARED_THROTTLE` is what keeps it polite |
+| 11.11 | The headless bibliography fallback takes only the *last* contiguous run | AlphaFold's two-column list is four blocks (1–29, 30–58, 59–75, 76–84) separated by body paragraphs, so 17 of 84 entries are recovered. Taking every dense block of ascending entries would recover all of them; a numbered table is the case that makes it harder |
+| 11.13 | A fabricated `First Last and First Last. Title. Venue.` — **with no year between the names and the title** — reaches `NOT_INDEXED`, not `GHOST` | the price of 11.1's guard, **measured** (task 8.7 fix round 2) rather than predicted: 3 fabricated rows in the dated form `… and … . 2019. Title.` came back **2 `GHOST`, 1 accepted for an unrelated reason, 0 `NOT_INDEXED`** — that form is consumed by `_AUTHORS_THEN_YEAR`, an initials-path pattern, so the ghost call survives. Only the undated form loses it, pinned by two offline tests in `tests/test_resolve.py`. OPEN-ITEMS 7.10's ceiling, one citation style wider; rule 3 outranks recall |
+| 11.14 | A proceedings **volume** record can resolve a fabricated paper cited into that volume | found by 11.13's first row: `Marcus Halvorsen and Priya Raghunathan. 2019. Latent drift correction for streaming recommender systems. In Proceedings of the 13th ACM Conference on Recommender Systems.` → `RESOLVED (low confidence)` against `10.1145/3298689`, title 1.0 / author false / year true. `title_score`'s proceedings-volume guard only fires when the candidate shares no token with `segments[0]`, and the volume title shares "recommender" and "systems" with the fabricated title. Pre-dates task 8.7; the ghost set's only fabricated acceptance (0.9 %) |
+| 11.12 | A mixed block loses the prose printed before its first entry | the AlphaFold block holding entries 59–75 opens with a Methods sentence, which `split_references` drops as heading residue (9.7's rule). Cheap only once the fallback knows where the list truly starts |
+| 11.6 | ~~`browser.is_installed()` checks imports, not a browser binary~~ **Closed 2026-09-12 (Task 8.7)** | `browser_binary_present()` looks for a `chromium*` directory under `PLAYWRIGHT_BROWSERS_PATH` or the platform default (`~/Library/Caches/ms-playwright`, `~/.cache/ms-playwright`, `%LOCALAPPDATA%\ms-playwright`); missing → the idempotent installer runs. The consent log gains `browser binary: found|missing` |
+| 11.15 | ~~A provider's non-JSON body escapes `resolve.py` as a raw `JSONDecodeError`~~ **Closed 2026-09-15 (Task 8.6b)** — `resolve._json()` is the one place a body is decoded; a `ValueError` there is a `ProviderError("<host> answered with a non-JSON body (…)")`, so the reference is `UNVERIFIED (provider unavailable)` and a retraction check stays unmade (three tests in `test_resolve.py`) | found by Task 8.4's manual session: `proofpath resolve "Scott JC. Against the Grain… Yale University Press; 2017. doi:10.2307/J.CTT1PWT9W5"` ends in an uncaught traceback (`Expecting value: line 1 column 1`) instead of the reported `UNVERIFIED (provider unavailable)` state and exit 1 that spec §13.3 requires; inside the TUI the run ends `failed` with the exception on its header, so the app survives it. Fix scheduled by the 8.6b brief |
+| 11.16 | ~~`browser.prompt_text` says `blocked this request (HTTP 200)` when the wall was a 200~~ **Closed 2026-09-15 (Task 8.6b)** — `answered without readable text (HTTP 200)` when the status is 200, unchanged otherwise | the ladder rightly classes a bot-wall page with a 200 status as blocked, but the §7.1 prompt then reads as a contradiction; wording only, shared by the CLI and the TUI. Fix scheduled by the 8.6b brief |
+| 11.17 | `tui/app.py` is ~1730 lines | Task 8.4 put the mirrored verbs' renderers (`verb_lines`, `_resolve_lines`, `_fetch_lines`, `_config_lines`, `_cache_lines` and helpers, ~250 lines of pure functions over result objects) in `app.py` because the brief named one new module. They belong in a `tui/lines.py` with their own tests; nothing else in `app.py` depends on where they live |
 
 ### Next session
 
 1. **Phase 8:** TUI (briefs 8.1–8.6 in `.superpowers/sdd/phase8/`), author-year pairing,
    SARIF, `commands.py` shared wiring, resolution cache → v0.2.0.
 
+---
+
+## 12. Phase 8 — v0.2.0, 2026-09-15
+
+- Shipped: the TUI (8.1 banner and slash commands, 8.2 `Scheduler`, 8.3 app, 8.4 inline
+  §7.1 prompt, mirrored verbs over `commands.py`, mouse/keyboard targets, the eyes),
+  author-year pairing (8.5; hand set 0.940, `docs/eval/2026-09-12-pairing-author-year.md`),
+  `sarif.py` (8.6a) wired as `check --format sarif` (8.6b), and the v0.1 field findings
+  (8.7: resolution + retraction cache, browser-binary check, resolver rescues,
+  headless-bibliography fallback; ghost set 274 rows at 0.0 % false-ghost).
+- 8.6b: bare `proofpath` opens the TUI (config loaded first, so a broken file exits 2 on
+  one line); `--format sarif` on `resolve`/`fetch` says `applies to check only`; 11.15
+  and 11.16 fixed; `ui.json_text` is the one JSON spelling stdout and `--out` share.
+- Live checks (`docs/eval/2026-09-15-v0.2-live.md`): the SARIF log validates against the
+  vendored schema (14 results); warm re-run **1.35 s** with every network stage `cache`;
+  the TUI driven in a real pty (`/check` → done → `/check` alone → `Esc` → `/cancel 1`
+  → `/quit`, exit 0); `tests/data/draft-author-year.md` paired 6 of 6 markers with an
+  offline smoke test.
+- Not done, by decision: the `code` CLI was absent, so the SARIF file was validated but
+  not opened in VS Code's viewer; the plan's "opens in VS Code" gate is carried by the
+  schema validation and 8.6a's location tests.
+
+### New open items
+
+| # | Item | Note |
+|---|---|---|
+| 12.1 | Two-column unnumbered bibliographies (9.10) | still the largest author-year item: RoBERTa yields 103 entries for ~50 and 15 claims where a rejoin would give 65. Rejoining an entry with the one before it whenever the first prints no year was measured, not shipped |
+| 12.2 | The undated fabricated pair form (11.13) and the proceedings-volume acceptance (11.14) | carried into v0.2 as Known issues; both are rule-3-first trades and stay open until a guard is found that does not cost a real reference |
+| 12.3 | Headless fallback limits (11.11, 11.12) | only the last numbered run is taken and the prose before a block's first entry is dropped; AlphaFold recovers 17 of 84 |
+| 12.4 | `tui/app.py` is 1798 lines (11.17) | the mirrored verbs' renderers belong in a `tui/lines.py` with their own tests |
+| 12.5 | `#n` in a run header is a click target, not a hyperlink | spec §13.1 says "a `#n` reference or a source URL" is an OSC 8 link; a run number has no address, so the header folds its block (`enter`) and the link went to the finding's reference instead (8.4 deviation 3). Either the spec wording or a `proofpath://run/n` scheme settles it |
+| 12.6 | ~~TUI finding rows print the entry's marker twice~~ **Closed 2026-09-15 (final review fix: `strip_marker` on the label)** | `[7] [7] Marchetti, …` in the pty session: `Reference.raw` keeps its printed marker (Phase 5) and `FindingLine` prefixes the number again. The CLI diagnostic prints the entry once. Cosmetic; `strip_marker` on the label is the fix |
+| 12.7 | `loading models …` is drawn under the `Verifying` row in the TUI, above it on the CLI | the true order: `verify` emits the note inside the stage, after `StageStart`, and the TUI draws the row on `StageStart` while the CLI prints only `StageEnd`. Moving the note before `StageStart` in `verify.py` would put it outside the stage it belongs to; a `StageLine` that shows notes as its own children is the tidier fix. Cosmetic, not a `report`/`ui` one-liner |
+| 12.8 | The SARIF artifact for `check -` is `-` | `to_sarif(report, artifact=target)` takes the target as typed; a stdin run has no file, and `-` under `%SRCROOT%` is what a viewer gets. `report.document.name` (`stdin`) is no better an address; a `--artifact` override is the only honest option |
+| 12.9 | `api_calls` in the footer counts LLM calls only | a cold resolution of five references (33.5 s against Crossref and Semantic Scholar) still prints `0 API calls`; the counter is the judge's (Phase 9) and the wording says nothing about provider lookups. Rename or count — one line either way |
+| 12.10 | A cached resolution reprints its notes as if current | the live draft's ghost still carries `openalex unavailable (HTTP 429, retry after 65567s)` from the day the resolution was stored. Correct (nothing was re-checked) but it reads like today's outage; a `cached:` prefix on stored notes would say so |
+| 12.11 | A provider body that is valid JSON but not an object escapes `resolve` as an error | `_json` guards against a non-JSON body (`ProviderError`), but a bare list or string parses and then fails the `.get(...)` that follows with an `AttributeError`: exit 2 instead of `UNVERIFIED (provider unavailable)`. A type check in `_json` is the fix |
+| 12.12 | `/quit` waits for an in-flight mirrored `/fetch` | a `/check` run is cancelled through its scheduler; a mirrored verb runs in `asyncio.to_thread` with no cancel hook, and the loop's shutdown joins that executor, so the app exits only when the ladder returns. Bounded by the fetch timeouts, but a browser step can take a while |
+| 12.13 | Phase-9 briefs are untracked | they live under the git-ignored `.superpowers/sdd/phase9/`; the tracked plan is `docs/superpowers/plans/2026-09-12-phases-9-10-plan.md` |
+
+### Next session
+
+1. **Phases 9–10 are deferred.** Development stops after v0.2.0 for now; when it
+   resumes, the judge layer (v0.3) and the social provider (v0.4) are planned in
+   `docs/superpowers/plans/2026-09-12-phases-9-10-plan.md` (briefs under
+   `.superpowers/sdd/phase9/`), with 12.1–12.10 above as the backlog beside them.

@@ -5,10 +5,17 @@ A single client concern lives here: a descriptive User-Agent, a minimum interval
 between requests to the same host, and exponential backoff on 429/5xx that honours
 ``Retry-After`` up to a cap. None of this is provider-specific — Crossref, OpenAlex,
 a publisher landing page and a repository API all get the same treatment.
+
+The interval is a property of the *host*, not of the object talking to it, so the
+throttle lives in one :class:`HostThrottle` that every client shares by default.
+A TUI session runs several verifications at once (spec section 13.1) and each one
+builds its own engine, hence its own clients; per-instance pacing would let three
+runs hit Crossref three times in the interval meant for one.
 """
 
 from __future__ import annotations
 
+import threading
 import time
 from typing import Any
 
@@ -37,6 +44,53 @@ RETRYABLE = (429, 500, 502, 503, 504)
 
 class ProviderError(RuntimeError):
     pass
+
+
+class HostThrottle:
+    """The minimum interval between two requests to one host, shared and thread-safe.
+
+    One lock per host, held across the wait, so concurrent callers queue instead of
+    all reading the same last-call time and firing together; the dict of hosts has a
+    lock of its own, so two runs talking to two hosts never wait on each other.
+
+    ``MIN_INTERVAL`` is read at call time rather than copied in, so a caller that
+    adjusts a host's interval is obeyed by clients that already exist.
+    """
+
+    def __init__(self) -> None:
+        self._guard = threading.Lock()
+        self._locks: dict[str, threading.Lock] = {}
+        self._last: dict[str, float] = {}
+
+    @staticmethod
+    def interval(host: str) -> float:
+        return MIN_INTERVAL.get(host, DEFAULT_MIN_INTERVAL)
+
+    def wait(self, host: str) -> float:
+        """Block until this host may be called again; return the seconds waited."""
+        with self._guard:
+            lock = self._locks.setdefault(host, threading.Lock())
+        interval = self.interval(host)
+        with lock:
+            with self._guard:
+                last = self._last.get(host)
+            waited = 0.0
+            if last is not None:
+                waited = last + interval - time.monotonic()
+                if waited > 0:
+                    time.sleep(waited)
+            with self._guard:
+                self._last[host] = time.monotonic()
+            return max(waited, 0.0)
+
+    def reset(self) -> None:
+        """Forget every recorded call. For tests and for a session that starts over."""
+        with self._guard:
+            self._last.clear()
+
+
+#: The throttle every :class:`PoliteClient` uses unless it is handed another one.
+SHARED_THROTTLE = HostThrottle()
 
 
 def user_agent(contact_email: str = "") -> str:
@@ -74,6 +128,7 @@ class PoliteClient:
         retries: int = 2,
         timeout: float = 20.0,
         follow_redirects: bool = False,
+        throttle: HostThrottle | None = None,
     ) -> None:
         self._email = contact_email
         self._client = client or httpx.Client(
@@ -82,7 +137,8 @@ class PoliteClient:
             follow_redirects=follow_redirects,
         )
         self._retries = retries
-        self._last_call: dict[str, float] = {}
+        # Shared by default: politeness is owed to the host, not kept per client.
+        self._throttle = throttle if throttle is not None else SHARED_THROTTLE
 
     @property
     def email(self) -> str:
@@ -93,15 +149,8 @@ class PoliteClient:
         return self._client
 
     def throttle(self, url: str) -> None:
-        host = httpx.URL(url).host
-        wait = (
-            self._last_call.get(host, -1e9)
-            + MIN_INTERVAL.get(host, DEFAULT_MIN_INTERVAL)
-            - time.monotonic()
-        )
-        if wait > 0:
-            time.sleep(wait)
-        self._last_call[host] = time.monotonic()
+        """Wait out this host's minimum interval, counting every client's calls."""
+        self._throttle.wait(httpx.URL(url).host)
 
     def get(
         self,

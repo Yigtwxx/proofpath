@@ -1,29 +1,46 @@
 """The persistent cache: one plain SQLite file under the user cache dir.
 
 Holds fetched source text (with a 7-day TTL), sentence chunks with their
-embeddings, and verdicts keyed ``(claim_hash, source_id, model_id)`` so a re-run
-of the same document costs nothing. No extension, no server: any SQLite GUI can
-open the file (spec sections 5.1, 12, 16).
+embeddings, verdicts keyed ``(claim_hash, source_id, model_id)`` and the two
+network lookups a run makes before it fetches anything -- reference resolution and
+the retraction check -- so a re-run of the same document costs nothing. No
+extension, no server: any SQLite GUI can open the file (spec sections 5.1, 12, 16).
 """
 
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import sqlite3
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 
 from proofpath.models import Label, Passage, Tier, Verdict
 from proofpath.paths import cache_dir
 from proofpath.pipeline import CUT_DECIMALS, Thresholds
+from proofpath.resolve import Candidate, FieldMatch, ResolveResult, Retraction, State, strip_marker
 
-SCHEMA_VERSION = "2"
+SCHEMA_VERSION = "3"
 RAW_TEXT_TTL_DAYS = 7
+# A resolution is a statement about a published record, which does not change; the
+# month is there so a reference an index had not yet ingested is looked at again.
+RESOLUTION_TTL_DAYS = 30
+# A retraction notice, once issued, stays issued -- but a paper that is clean today
+# can be retracted tomorrow, so absence is believed for a week and presence for a
+# month. Caching a miss as long as a hit would hide the notice that arrives in between.
+RETRACTION_HIT_TTL_DAYS = 30
+RETRACTION_MISS_TTL_DAYS = 7
+# Product rule 2: an outage says nothing about the reference, so it is never stored.
+# Every other state is a reading of what the providers answered, and keeps.
+CACHEABLE_STATES = frozenset(
+    {State.RESOLVED, State.RESOLVED_LOW, State.AMBIGUOUS, State.GHOST, State.NOT_INDEXED}
+)
 DB_FILENAME = "proofpath.sqlite3"
 
 # Kept apart from the rest of the schema, one statement per entry: a migration
@@ -84,7 +101,36 @@ CREATE TABLE IF NOT EXISTS verdicts (
 CREATE INDEX IF NOT EXISTS raw_text_expiry ON raw_text (expires_at);
 """
 
-_SCHEMA = _BASE_SCHEMA + _CHUNKS_SCHEMA
+# The two network lookups the resolving and retraction stages make, keyed by what
+# they are about rather than by a source id: a reference has no source id until it
+# resolves, and a retraction check is about a DOI, not about the text behind it.
+_LOOKUPS_DDL: tuple[str, ...] = (
+    """
+    CREATE TABLE IF NOT EXISTS resolutions (
+        raw_hash        TEXT PRIMARY KEY,   -- sha256 of the marker-free, folded entry
+        state           TEXT NOT NULL,      -- resolve.State value, verbatim
+        best_json       TEXT,               -- the chosen Candidate, or NULL
+        candidates_json TEXT NOT NULL,
+        notes_json      TEXT NOT NULL,
+        match_json      TEXT,               -- the FieldMatch behind the state, or NULL
+        resolved_at     TEXT NOT NULL,
+        expires_at      TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS retractions (
+        doi             TEXT PRIMARY KEY,
+        retraction_json TEXT,               -- NULL means "checked, and there was none"
+        checked_at      TEXT NOT NULL,
+        expires_at      TEXT NOT NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS resolutions_expiry ON resolutions (expires_at)",
+    "CREATE INDEX IF NOT EXISTS retractions_expiry ON retractions (expires_at)",
+)
+_LOOKUPS_SCHEMA = ";\n".join(_LOOKUPS_DDL) + ";\n"
+
+_SCHEMA = _BASE_SCHEMA + _CHUNKS_SCHEMA + _LOOKUPS_SCHEMA
 
 
 def _migrate_to_v2(conn: sqlite3.Connection) -> None:
@@ -100,6 +146,16 @@ def _migrate_to_v2(conn: sqlite3.Connection) -> None:
         conn.execute(statement)
 
 
+def _migrate_to_v3(conn: sqlite3.Connection) -> None:
+    """v2 -> v3: the ``resolutions`` and ``retractions`` lookup tables.
+
+    Purely additive -- nothing stored before v3 answers either question -- so the
+    two tables are created and every existing row is left exactly where it was.
+    """
+    for statement in _LOOKUPS_DDL:
+        conn.execute(statement)
+
+
 # One step per schema version, oldest first; Phase 9 appends its own.
 #
 # Invariant, on which the self-healing in ``Cache.__init__`` rests: every step runs
@@ -107,13 +163,30 @@ def _migrate_to_v2(conn: sqlite3.Connection) -> None:
 # its statements one at a time (``conn.execute``) and must never call
 # ``executescript`` or ``commit`` -- either would commit a half-applied chain, and
 # the file would come back up claiming a schema it does not have.
-_MIGRATIONS: tuple[tuple[str, Callable[[sqlite3.Connection], None]], ...] = (("2", _migrate_to_v2),)
+_MIGRATIONS: tuple[tuple[str, Callable[[sqlite3.Connection], None]], ...] = (
+    ("2", _migrate_to_v2),
+    ("3", _migrate_to_v3),
+)
+
+
+def _version(value: str | None) -> int:
+    """A recorded schema version as a number. Versions are compared numerically, not
+    as strings, so that v10 does not sort before v2 (OPEN-ITEMS 10.3). Anything this
+    code cannot read counts as the oldest possible file: the chain then runs over
+    tables ``CREATE TABLE IF NOT EXISTS`` has already put in place, which is a
+    repair rather than a downgrade."""
+    if value is None:
+        return 0
+    try:
+        return int(value)
+    except ValueError:
+        return 0
 
 
 def _migrate(conn: sqlite3.Connection, from_version: str) -> None:
     """Run every step newer than ``from_version``, in order."""
     for version, step in _MIGRATIONS:
-        if from_version < version:
+        if _version(from_version) < _version(version):
             step(conn)
 
 
@@ -134,6 +207,17 @@ def claim_hash(text: str) -> str:
     """Stable key for a claim: case- and whitespace-insensitive sha256."""
     normalised = re.sub(r"\s+", " ", text).strip().lower()
     return hashlib.sha256(normalised.encode("utf-8")).hexdigest()
+
+
+def resolution_hash(raw: str) -> str:
+    """Stable key for a bibliography entry, independent of how it was printed.
+
+    ``Reference.raw`` keeps the marker the document put in front of it, and the same
+    work is printed ``[7] `` in one paper and ``7. `` in another; the marker is
+    dropped exactly as ``Resolver.resolve`` drops it, so the two share one row.
+    Case is folded for the same reason a claim's is.
+    """
+    return hashlib.sha256(strip_marker(raw).strip().lower().encode("utf-8")).hexdigest()
 
 
 def model_id(*, nli: str, embedder: str, k: int, thresholds: Thresholds) -> str:
@@ -173,6 +257,24 @@ class VerdictRow:
 
 
 @dataclass(frozen=True)
+class RetractionHit:
+    """One cached retraction check. ``notice is None`` means the check was made and
+    there was no notice, which is a different fact from "never checked" -- the miss a
+    ``get_retraction`` of ``None`` reports (product rule 2)."""
+
+    notice: Retraction | None
+
+
+@dataclass(frozen=True)
+class Cleared:
+    """What one ``clear()`` removed, per table."""
+
+    sources: int
+    resolutions: int
+    retractions: int
+
+
+@dataclass(frozen=True)
 class SourceDetail:
     summary: SourceSummary
     embed_models: list[str]
@@ -196,7 +298,7 @@ class Cache:
         row = self._conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
         recorded = None if row is None else str(row[0])
         self.migrated_from: str | None = None
-        if recorded is None or recorded < SCHEMA_VERSION:
+        if recorded is None or _version(recorded) < _version(SCHEMA_VERSION):
             # One transaction for the whole chain and the version it records: a step
             # that fails leaves the old version in place and nothing half-applied, so
             # the next open migrates the file properly instead of trusting a version
@@ -451,6 +553,99 @@ class Cache:
         )
         return Verdict(Label(label), float(score), _tier(tier), passage, reason=reason)
 
+    # --- resolutions and retractions ---------------------------------------------
+
+    def get_resolution(self, raw: str, *, now: datetime | None = None) -> ResolveResult | None:
+        """The stored resolution for this reference, or ``None`` when there is none
+        that is still within its TTL."""
+        row = self._conn.execute(
+            "SELECT state, best_json, candidates_json, notes_json, match_json FROM resolutions "
+            "WHERE raw_hash = ? AND expires_at > ?",
+            (resolution_hash(raw), _iso(now or _now())),
+        ).fetchone()
+        if row is None:
+            return None
+        state, best_json, candidates_json, notes_json, match_json = row
+        return ResolveResult(
+            State(state),
+            _candidate(json.loads(best_json)) if best_json else None,
+            [_candidate(item) for item in json.loads(candidates_json)],
+            notes=list(json.loads(notes_json)),
+            match=_field_match(json.loads(match_json)) if match_json else None,
+        )
+
+    def put_resolution(
+        self, raw: str, result: ResolveResult, *, now: datetime | None = None
+    ) -> None:
+        """Store a resolution for ``RESOLUTION_TTL_DAYS``.
+
+        ``UNVERIFIED (provider unavailable)`` is dropped on the floor: it says that
+        Crossref or Semantic Scholar was down, not anything about the reference, and
+        a cached outage would repeat someone's bad afternoon for a month (rule 2).
+        """
+        if result.state not in CACHEABLE_STATES:
+            return
+        moment = now or _now()
+        with self._conn:
+            self._conn.execute(
+                "INSERT INTO resolutions(raw_hash, state, best_json, candidates_json, "
+                "notes_json, match_json, resolved_at, expires_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(raw_hash) DO UPDATE SET state = excluded.state, "
+                "best_json = excluded.best_json, candidates_json = excluded.candidates_json, "
+                "notes_json = excluded.notes_json, match_json = excluded.match_json, "
+                "resolved_at = excluded.resolved_at, expires_at = excluded.expires_at",
+                (
+                    resolution_hash(raw),
+                    result.state.value,
+                    None if result.best is None else _dump(result.best),
+                    _dump([_fields(c) for c in result.candidates]),
+                    _dump(list(result.notes)),
+                    None if result.match is None else _dump(result.match),
+                    _iso(moment),
+                    _iso(moment + timedelta(days=RESOLUTION_TTL_DAYS)),
+                ),
+            )
+
+    def get_retraction(self, doi: str, *, now: datetime | None = None) -> RetractionHit | None:
+        """The stored retraction check for ``doi``, or ``None`` when there is none."""
+        row = self._conn.execute(
+            "SELECT retraction_json FROM retractions WHERE doi = ? AND expires_at > ?",
+            (doi.lower(), _iso(now or _now())),
+        ).fetchone()
+        if row is None:
+            return None
+        payload = row[0]
+        return RetractionHit(None if payload is None else _retraction(json.loads(payload)))
+
+    def put_retraction(
+        self, doi: str, notice: Retraction | None, *, now: datetime | None = None
+    ) -> None:
+        """Store a retraction check. A notice keeps for a month, its absence for a
+        week: a paper that is clean today can be retracted tomorrow."""
+        moment = now or _now()
+        days = RETRACTION_HIT_TTL_DAYS if notice is not None else RETRACTION_MISS_TTL_DAYS
+        with self._conn:
+            self._conn.execute(
+                "INSERT INTO retractions(doi, retraction_json, checked_at, expires_at) "
+                "VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(doi) DO UPDATE SET retraction_json = excluded.retraction_json, "
+                "checked_at = excluded.checked_at, expires_at = excluded.expires_at",
+                (
+                    doi.lower(),
+                    None if notice is None else _dump(notice),
+                    _iso(moment),
+                    _iso(moment + timedelta(days=days)),
+                ),
+            )
+
+    def lookup_counts(self) -> tuple[int, int]:
+        """``(resolutions, retraction checks)`` stored, expired rows included: the
+        two numbers ``proofpath cache`` and ``cache ls`` print."""
+        resolutions = self._conn.execute("SELECT COUNT(*) FROM resolutions").fetchone()
+        retractions = self._conn.execute("SELECT COUNT(*) FROM retractions").fetchone()
+        return (int(resolutions[0]), int(retractions[0]))
+
     # --- inspection and housekeeping ---------------------------------------------
 
     def summary(self) -> list[SourceSummary]:
@@ -498,19 +693,65 @@ class Cache:
         ]
         return SourceDetail(summary, models, dim, chunks, verdicts)
 
-    def clear(self, *, expired_only: bool = False, now: datetime | None = None) -> int:
-        """Remove sources (cascading to text, chunks and verdicts). Returns the count."""
+    def clear(self, *, expired_only: bool = False, now: datetime | None = None) -> Cleared:
+        """Remove sources (cascading to text, chunks and verdicts) and the cached
+        lookups. One transaction, so the file is never half cleared."""
+        cutoff = _iso(now or _now())
         with self._conn:
             if expired_only:
-                cutoff = _iso(now or _now())
-                cursor = self._conn.execute(
+                sources = self._conn.execute(
                     "DELETE FROM sources WHERE source_id IN "
                     "(SELECT source_id FROM raw_text WHERE expires_at <= ?)",
                     (cutoff,),
-                )
+                ).rowcount
+                resolutions = self._conn.execute(
+                    "DELETE FROM resolutions WHERE expires_at <= ?", (cutoff,)
+                ).rowcount
+                retractions = self._conn.execute(
+                    "DELETE FROM retractions WHERE expires_at <= ?", (cutoff,)
+                ).rowcount
             else:
-                cursor = self._conn.execute("DELETE FROM sources")
-        return int(cursor.rowcount)
+                sources = self._conn.execute("DELETE FROM sources").rowcount
+                resolutions = self._conn.execute("DELETE FROM resolutions").rowcount
+                retractions = self._conn.execute("DELETE FROM retractions").rowcount
+        return Cleared(int(sources), int(resolutions), int(retractions))
+
+
+def _fields(item: Any) -> dict[str, Any]:
+    """A frozen value type as a plain dict, so the stored JSON stays readable in a
+    SQLite GUI rather than being a pickle nobody can inspect."""
+    return dict(vars(item))
+
+
+def _dump(payload: Any) -> str:
+    return json.dumps(_fields(payload) if hasattr(payload, "__dict__") else payload)
+
+
+def _candidate(payload: dict[str, Any]) -> Candidate:
+    return Candidate(
+        doi=str(payload.get("doi", "")),
+        title=str(payload.get("title", "")),
+        first_author=str(payload.get("first_author", "")),
+        year=None if payload.get("year") is None else int(payload["year"]),
+        venue=str(payload.get("venue", "")),
+        provider=str(payload.get("provider", "")),
+        url=str(payload.get("url", "")),
+    )
+
+
+def _field_match(payload: dict[str, Any]) -> FieldMatch:
+    return FieldMatch(
+        title=float(payload["title"]), author=bool(payload["author"]), year=bool(payload["year"])
+    )
+
+
+def _retraction(payload: dict[str, Any]) -> Retraction:
+    return Retraction(
+        source=str(payload["source"]),
+        date=None if payload.get("date") is None else str(payload["date"]),
+        notice_doi=None if payload.get("notice_doi") is None else str(payload["notice_doi"]),
+        label=str(payload["label"]),
+    )
 
 
 def _tier(value: str) -> Tier:

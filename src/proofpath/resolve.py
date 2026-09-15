@@ -152,14 +152,21 @@ def author_matches(family: str, raw: str) -> bool:
     return all(t in raw_tokens for t in family_tokens)
 
 
-def _years(raw: str) -> set[int]:
+def years(raw: str) -> set[int]:
+    """Every four-digit year printed in a reference string, 1800-2100.
+
+    Public because ``claims.pair_author_year`` asks the same question of the same
+    strings: the year half of an author-year marker is matched against exactly the
+    years the entry prints, with no tolerance (``year_matches`` below keeps the
+    tolerance, which only the provider comparison wants).
+    """
     return {int(t) for t in re.findall(r"\b(1[89]\d{2}|20\d{2}|2100)\b", raw)}
 
 
 def year_matches(year: int | None, raw: str, *, tolerance: int = YEAR_TOLERANCE) -> bool:
     if year is None:
         return False
-    return any(abs(year - y) <= tolerance for y in _years(raw))
+    return any(abs(year - y) <= tolerance for y in years(raw))
 
 
 _DOI = re.compile(r"\b(10\.\d{4,9}/[^\s\"'<>]+)")
@@ -233,7 +240,7 @@ _MARKER = re.compile(r"^\s*(\[\d+\]|\d{1,3}[.)]|\d{1,3}(?=\s))\s*")
 # all expect a capitalised word: the un-consumed remnant then became the first
 # title-like segment and the reference's own title was never compared (live run
 # 2026-09-12, reference [3]). Longest forms first so "van der" wins over "van".
-_PARTICLE = (
+PARTICLE = (
     r"(?:[Vv]an\s[Dd]er|[Vv]an\s[Dd]en|[Vv]an\s[Dd]e|[Vv]an|[Vv]on\s[Dd]er|[Vv]on|"
     r"[Dd]e\s[Ll]a|[Dd]e\s[Ll]os|[Dd]ella|[Dd]el|[Dd]e|[Dd]os|[Dd]as|[Dd]i|[Dd]a|[Dd]u|"
     r"[Ll]e|[Ll]a|[Tt]en|[Tt]er|[Aa]f|[Aa]l|[Bb]in|[Ii]bn|[Mm]ac|[Mm]c|[Ss]t\.)"
@@ -250,7 +257,13 @@ _IS_PARTICLE = re.compile(
 )
 _NAME_WORD = rf"(?:{_PARTICLE_GLUED}[A-Za-z]|[A-Z])[\w'\u2019-]+"
 _GLUED_HEAD = re.compile(_PARTICLE_GLUED)
-_NAME = rf"(?:{_PARTICLE}\s)*{_NAME_WORD}(?:\s{_NAME_WORD})*"
+_NAME = rf"(?:{PARTICLE}\s)*{_NAME_WORD}(?:\s{_NAME_WORD})*"
+# One surname as a *citation* prints it: "Smith", "van der Berg", "al-Khalili",
+# "O'Neill". Public because `claims.py` reads author-year markers out of the body and
+# then compares them with `author_hint` of a bibliography entry; both halves of that
+# comparison have to admit the same names, and a second copy of the particle list in
+# `claims.py` would drift from this one.
+SURNAME = rf"(?:{PARTICLE}\s)*{_NAME_WORD}"
 _INITIALS = r"(?:[A-Z]{1,3}\.?(?![a-z])\s*(?:-\s*)?){1,3}"
 _YEAR = r"(?:19|20)\d{2}[a-z]?"
 # "Robert C. Moore and William Lewis. 2010. Title" (ACM, full first names)
@@ -266,6 +279,31 @@ _AUTHOR_BLOCK = re.compile(
     rf"(?:{_AUTHOR_UNIT}[,;]?\s*(?:(?:and|&)\s*)?)+(?:et al\.?,?\s*)?"
     rf"(?:\(\d{{4}}[a-z]?\)\.?\s*)?"
 )
+# "Christopher Clark and Matt Gardner. Simple and Effective ...": full first names,
+# no initials anywhere, and no year between the names and the title. Every pattern
+# above needs one of those three, so this form survived them all and the author pair
+# became the first title-like segment -- five of the five false ghosts of the
+# 2026-09-12 live run, section 2 (OPEN-ITEMS 11.1).
+#
+# A name here is two to four capitalised words ("Hal Daume III", "Stefan van der
+# Walt"); a longer run of them is a title, not a name.
+_FULL_NAME = rf"(?:{PARTICLE}\s)*{_NAME_WORD}(?:\s(?:{PARTICLE}\s)?{_NAME_WORD}){{1,3}}"
+_NAME_JOIN = r"(?:\s*,\s*(?:and\s+|&\s*)?|\s+and\s+|\s*&\s*)"
+# Two names at the least, and the list must be closed by a full stop and followed by
+# something: without that guard "Marie Curie and Pierre Curie, 1903" -- a title, or a
+# fragment of one -- would be eaten and the reference left with nothing to compare.
+_AUTHORS_FULL_NAMES = re.compile(rf"^\s*({_FULL_NAME}(?:{_NAME_JOIN}{_FULL_NAME})+)\.\s+")
+# A person's name carries no digits, and a list of them is not a paragraph.
+_FULL_NAME_LIST_LIMIT = 200
+# What has to survive the strip for it to have been an author list at all. A
+# bibliography entry prints a title *and* a venue, so at least two title-like spans
+# are left once the names go; a title-first book ("Pattern Recognition and Machine
+# Learning. Springer Verlag, Berlin, 2006.") leaves only its imprint, which is one
+# comma-separated run with no full stop in it. The first survivor also has to be
+# long enough to be a title. Both numbers are guards, not measurements: failing them
+# only means the pair is left where it was, which is what the resolver did before.
+_MIN_SURVIVING_SEGMENTS = 2
+_MIN_TITLE_WORDS = 3
 
 
 # A period inside an author list only ever follows an initial or "et al".
@@ -299,20 +337,50 @@ def strip_marker(raw: str) -> str:
     if (
         find_doi(stripped) != find_doi(raw)
         or find_arxiv_id(stripped) != find_arxiv_id(raw)
-        or _years(stripped) != _years(raw)
+        or years(stripped) != years(raw)
     ):
         return raw
     return stripped
 
 
-def _strip_authors(text: str) -> str:
-    """Drop a leading author list so names and initials never pollute the title."""
+def _strip_initials_authors(text: str) -> str:
+    """Drop a leading author list written with initials ("Harris, C. R., …").
+
+    The three patterns here all need an initial, a year or a parenthesised year, so
+    what they match can only be a list of people. ``looks_unindexed`` asks exactly
+    that question -- "did this entry print a person-style author list at all?" -- and
+    so reads this function rather than the one below.
+    """
     for pattern in (_AUTHORS_THEN_YEAR, _AUTHORS_THEN_PAREN_YEAR):
         match = pattern.match(text)
         if match and len(match.group(1)) < 1500 and not _SENTENCE_PERIOD.search(match.group(1)):
             # The year delimits the authors; do not touch what follows.
             return text[match.end() :]
     return _AUTHOR_BLOCK.sub("", text, count=1)
+
+
+def _strip_authors(text: str) -> str:
+    """Drop a leading author list so names and initials never pollute the title."""
+    stripped = _strip_initials_authors(text)
+    if stripped != text:
+        return stripped
+    # Nothing with an initial in it was found, so the full-name form is the only one
+    # left. It is tried last because it is the loosest of the four, and it is the only
+    # one whose match could equally well be a title: "Pattern Recognition and Machine
+    # Learning" has the shape of two people. What survives the strip decides.
+    match = _AUTHORS_FULL_NAMES.match(text)
+    if match is None:
+        return text
+    block = match.group(1)
+    if len(block) >= _FULL_NAME_LIST_LIMIT or re.search(r"\d", block):
+        return text
+    rest = text[match.end() :]
+    survivors = _segments_of(rest)
+    if len(survivors) < _MIN_SURVIVING_SEGMENTS:
+        return text
+    if len(re.findall(r"[A-Za-z]{2,}", survivors[0])) < _MIN_TITLE_WORDS:
+        return text
+    return rest
 
 
 def author_hint(raw: str) -> str:
@@ -342,7 +410,11 @@ def looks_unindexed(raw: str) -> bool:
         return False
     if _URL.search(raw) or _UNINDEXED_WORDS.search(raw):
         return True
-    return _strip_authors(raw) == raw  # no person-style author list at all
+    # The initials-only stripper, deliberately: the full-name pattern matches a title
+    # that reads like two names, and letting it answer here would tell a title-first
+    # book that it *does* carry an author list -- taking away the one thing that keeps
+    # it out of GHOST (product rule 3).
+    return _strip_initials_authors(raw) == raw  # no person-style author list at all
 
 
 def _looks_like_authors(segment: str) -> bool:
@@ -362,11 +434,14 @@ def _looks_like_authors(segment: str) -> bool:
     return words >= 4 and segment.count(",") >= 2 and capitalised >= 0.8 * words and not has_digits
 
 
-def title_segments(raw: str) -> list[str]:
-    """Title-like spans, quoted spans first, for candidate generation only."""
-    found = [m.group(1).strip() for m in _QUOTED.finditer(raw)]
-    rest = _strip_authors(_QUOTED.sub(" ", strip_marker(raw)))
-    for part in _SPLIT.split(rest):
+def _segments_of(text: str) -> list[str]:
+    """The title-like spans of an already author-stripped string, in printed order.
+
+    Split out of ``title_segments`` so ``_strip_authors`` can ask what a candidate
+    strip would leave behind. It must never call back into ``_strip_authors``.
+    """
+    found: list[str] = []
+    for part in _SPLIT.split(text):
         # "(CreateSpace, 2009)" style trailing parentheticals are not title words.
         segment = re.sub(r"\s*\([^()]*\)\.?\s*$", "", part).strip().strip(",;:").strip()
         words = len(re.findall(r"[A-Za-z]{2,}", segment))
@@ -375,6 +450,13 @@ def title_segments(raw: str) -> list[str]:
         if words < 2 or _looks_like_authors(segment):
             continue
         found.append(segment)
+    return found
+
+
+def title_segments(raw: str) -> list[str]:
+    """Title-like spans, quoted spans first, for candidate generation only."""
+    found = [m.group(1).strip() for m in _QUOTED.finditer(raw)]
+    found.extend(_segments_of(_strip_authors(_QUOTED.sub(" ", strip_marker(raw)))))
     return found[:3]
 
 
@@ -611,6 +693,26 @@ def dedupe(candidates: Sequence[Candidate], raw: str) -> list[Candidate]:
     return [best[key][1] for key in order]
 
 
+def _json(response: httpx.Response) -> Any:
+    """The one place a provider's body is decoded.
+
+    A provider that is having a bad day does not always say so with a status code:
+    a bot wall, a maintenance page or a truncated answer arrives as HTML under a
+    200, and ``Response.json`` raises ``JSONDecodeError`` for it. That is a parser
+    complaining, not a state this module has a word for — and left alone it escapes
+    as a traceback where the caller expected a reference to be *reported*. It is
+    raised as the outage it is, so ``resolve``/``fetch``/``check`` say
+    ``UNVERIFIED (provider unavailable)`` and nobody reads a broken provider as
+    evidence that a work does not exist (product rule 2).
+    """
+    try:
+        return response.json()
+    except ValueError as exc:  # JSONDecodeError, and whatever else a body can be
+        request = getattr(response, "_request", None)  # httpx raises when unset
+        host = request.url.host if request is not None else "provider"
+        raise ProviderError(f"{host} answered with a non-JSON body ({exc})") from exc
+
+
 class Resolver:
     """Crossref + OpenAlex over HTTP, polite and with backoff. No key needed."""
 
@@ -633,7 +735,7 @@ class Resolver:
         response = self._get(f"{CROSSREF}/{doi}", {})
         if response.status_code == 404:
             return None
-        return _crossref_candidate(response.json().get("message", {}), provider="doi")
+        return _crossref_candidate(_json(response).get("message", {}), provider="doi")
 
     def crossref_bibliographic(self, raw: str, *, rows: int = 5) -> list[Candidate]:
         response = self._get(
@@ -644,7 +746,7 @@ class Resolver:
                 "select": "DOI,title,author,issued,container-title,score,type",
             },
         )
-        return candidates_from_crossref(response.json())
+        return candidates_from_crossref(_json(response))
 
     def openalex_search(self, segment: str, *, per_page: int = 3) -> list[Candidate]:
         response = self._get(
@@ -656,7 +758,7 @@ class Resolver:
                 "primary_location,is_retracted",
             },
         )
-        return candidates_from_openalex(response.json())
+        return candidates_from_openalex(_json(response))
 
     def s2_match(self, segment: str) -> list[Candidate]:
         response = self._get(
@@ -664,7 +766,7 @@ class Resolver:
         )
         if response.status_code == 404:
             return []  # "Title match not found"
-        return candidates_from_s2(response.json())
+        return candidates_from_s2(_json(response))
 
     def openlibrary_search(
         self, segment: str, *, author: str = "", limit: int = 3
@@ -677,7 +779,7 @@ class Resolver:
         if author:
             params["author"] = author
         response = self._get(OPENLIBRARY, params)
-        return candidates_from_openlibrary(response.json())
+        return candidates_from_openlibrary(_json(response))
 
     def arxiv_id(self, arxiv_id: str) -> Candidate | None:
         response = self._get(ARXIV, {"id_list": arxiv_id, "max_results": 1})
@@ -713,6 +815,24 @@ class Resolver:
                             [direct],
                             notes=[f"arXiv:{arxiv_id} resolved"],
                             match=result.match,
+                        )
+                    arxiv_match = match_fields(direct, raw)
+                    if arxiv_match.author and arxiv_match.year:
+                        # The mirror of the DOI rescue below, and for the same
+                        # reason: the identifier is the author's own and it resolves
+                        # to a paper by the same first author in the same year, so a
+                        # title that will not match is a citation style, not a
+                        # fabrication (spec section 8, product rule 3).
+                        return ResolveResult(
+                            State.RESOLVED_LOW,
+                            direct,
+                            [direct],
+                            notes=[
+                                *notes,
+                                f"arXiv:{arxiv_id} resolved",
+                                "title could not be matched in the reference string",
+                            ],
+                            match=arxiv_match,
                         )
                     notes.append(f"arXiv:{arxiv_id} resolves to a different work")
                     pool.append(direct)
@@ -807,19 +927,34 @@ class Resolver:
         )
 
     def retraction(self, doi: str) -> Retraction | None:
-        """Retraction Watch data via Crossref, then OpenAlex's flag as a fallback."""
+        """Retraction Watch data via Crossref, then OpenAlex's flag as a fallback.
+
+        ``None`` means one of them answered and neither knew of a notice. When
+        *every* provider failed, nothing was checked, and that is not the same fact:
+        ``ProviderError`` is raised so the caller reports it and does not cache a
+        clean record it never earned (product rule 2).
+        """
+        # "Silent", not "down": a 404 is Crossref saying it has never heard of this
+        # DOI, which is no more a statement about a retraction notice than a timeout
+        # is. Either way it has not checked anything, and only OpenAlex is left.
+        crossref_silent = True
         try:
             response = self._get(f"{CROSSREF}/{doi}", {})
             if response.status_code != 404:
-                found = retraction_from_crossref(response.json())
+                crossref_silent = False
+                found = retraction_from_crossref(_json(response))
                 if found is not None:
                     return found
         except ProviderError:
             pass
         try:
             response = self._get(f"{OPENALEX}/https://doi.org/{doi}", {"select": "is_retracted"})
-        except ProviderError:
+        except ProviderError as exc:
+            if crossref_silent:
+                raise ProviderError(f"crossref and openalex unavailable ({exc})") from exc
+            # Crossref answered, and it is the one that carries the Retraction Watch
+            # data; OpenAlex is a fallback, not a second required opinion.
             return None
-        if response.status_code != 404 and response.json().get("is_retracted"):
+        if response.status_code != 404 and _json(response).get("is_retracted"):
             return Retraction(source="openalex", date=None, notice_doi=None, label="Retraction")
         return None

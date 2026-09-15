@@ -14,6 +14,13 @@ from proofpath import cache as cache_mod
 from proofpath.cache import Cache, sha256_text
 from proofpath.models import Label, Passage, Verdict
 from proofpath.pipeline import Thresholds
+from proofpath.resolve import (
+    Candidate,
+    FieldMatch,
+    ResolveResult,
+    Retraction,
+    State,
+)
 
 
 @pytest.fixture
@@ -39,8 +46,16 @@ def test_schema_is_plain_sqlite_readable_without_extensions(db: Cache) -> None:
     db.close()
     conn = sqlite3.connect(db.path)
     tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-    assert {"meta", "sources", "raw_text", "chunks", "verdicts"} <= tables
-    assert conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone() == ("2",)
+    assert {
+        "meta",
+        "sources",
+        "raw_text",
+        "chunks",
+        "verdicts",
+        "resolutions",
+        "retractions",
+    } <= tables
+    assert conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone() == ("3",)
 
 
 def test_chunks_round_trip_with_embeddings(db: Cache) -> None:
@@ -230,9 +245,9 @@ def test_clear_removes_everything_or_only_expired(db: Cache) -> None:
     db.add_source(
         "new", scheme="academic", title="", url="", text_kind="abstract", raw_text="t", now=NOW
     )
-    assert db.clear(expired_only=True, now=NOW) == 1
+    assert db.clear(expired_only=True, now=NOW).sources == 1
     assert [e.source_id for e in db.summary()] == ["new"]
-    assert db.clear() == 1
+    assert db.clear().sources == 1
     assert db.summary() == []
 
 
@@ -412,7 +427,7 @@ def test_opening_a_v1_file_migrates_it_and_keeps_sources_text_and_verdicts(
 
     with Cache(path) as db:
         assert db._conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone() == (
-            "2",
+            "3",
         )
         columns = {r[1] for r in db._conn.execute("PRAGMA table_info(chunks)")}
         assert "text_sha256" in columns
@@ -445,12 +460,12 @@ def test_a_newer_file_is_left_alone_and_never_downgraded(tmp_path: Path) -> None
     _write_v1_database(path)
     conn = sqlite3.connect(str(path))
     with conn:
-        conn.execute("UPDATE meta SET value = '3' WHERE key = 'schema_version'")
+        conn.execute("UPDATE meta SET value = '4' WHERE key = 'schema_version'")
     conn.close()
 
     with Cache(path) as db:
         assert db._conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone() == (
-            "3",
+            "4",
         )
         assert db.migrated_from is None
         # The v1 chunks table is still there, rows and all.
@@ -484,7 +499,7 @@ def test_a_failed_migration_leaves_the_old_version_and_self_heals(
     monkeypatch.undo()
     with Cache(path) as db:
         assert db._conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone() == (
-            "2",
+            "3",
         )
         assert db.migrated_from == "1"
         assert "text_sha256" in {r[1] for r in db._conn.execute("PRAGMA table_info(chunks)")}
@@ -517,3 +532,123 @@ def test_expired_chunk_text_is_a_miss_even_when_the_sha_still_matches(db: Cache)
     # The text the sha describes is gone, so there is nothing quotable to return.
     assert db.get_chunks("s", "bge@rev", text_sha256=RAW_SHA) is None
     assert db.get_chunks("s", "bge@rev") is None
+
+
+# --- resolutions and retractions (schema v3) -----------------------------------
+
+RAW_REFERENCE = "[7] Harris, C. R. et al. Array programming with NumPy. Nature 585, 357 (2020)."
+CANDIDATE = Candidate(
+    doi="10.1038/s41586-020-2649-2",
+    title="Array programming with NumPy",
+    first_author="Harris",
+    year=2020,
+    venue="Nature",
+    provider="crossref",
+)
+RESOLVED = ResolveResult(
+    State.RESOLVED,
+    CANDIDATE,
+    [CANDIDATE],
+    notes=["DOI 10.1038/s41586-020-2649-2 resolved"],
+    match=FieldMatch(title=1.0, author=True, year=True),
+)
+
+
+def test_a_resolution_round_trips_with_every_field(db: Cache) -> None:
+    db.put_resolution(RAW_REFERENCE, RESOLVED, now=NOW)
+    stored = db.get_resolution(RAW_REFERENCE, now=NOW)
+    assert stored == RESOLVED
+
+
+def test_a_resolution_is_keyed_by_the_reference_without_its_marker_or_case(db: Cache) -> None:
+    """``Reference.raw`` keeps the marker the document printed, and the same entry is
+    printed ``[7] `` in one document and ``7. `` in another."""
+    db.put_resolution(RAW_REFERENCE, RESOLVED, now=NOW)
+    other = RAW_REFERENCE.replace("[7] ", "7. ").upper()
+    assert db.get_resolution(other, now=NOW) == RESOLVED
+
+
+def test_an_unavailable_resolution_is_never_cached(db: Cache) -> None:
+    """Product rule 2: a provider outage is not knowledge about the reference."""
+    db.put_resolution(RAW_REFERENCE, ResolveResult(State.UNAVAILABLE, None, [], notes=["429"]))
+    assert db.get_resolution(RAW_REFERENCE) is None
+    assert db._conn.execute("SELECT COUNT(*) FROM resolutions").fetchone() == (0,)
+
+
+@pytest.mark.parametrize(
+    "state", [State.RESOLVED, State.RESOLVED_LOW, State.AMBIGUOUS, State.GHOST, State.NOT_INDEXED]
+)
+def test_every_state_but_unavailable_is_cached(db: Cache, state: State) -> None:
+    result = ResolveResult(state, None, [], notes=["n"])
+    db.put_resolution("Some reference of at least a few words. 2020.", result, now=NOW)
+    assert db.get_resolution("Some reference of at least a few words. 2020.", now=NOW) == result
+
+
+def test_a_resolution_expires_after_thirty_days(db: Cache) -> None:
+    db.put_resolution(RAW_REFERENCE, RESOLVED, now=NOW)
+    assert db.get_resolution(RAW_REFERENCE, now=NOW + timedelta(days=29)) == RESOLVED
+    assert db.get_resolution(RAW_REFERENCE, now=NOW + timedelta(days=31)) is None
+
+
+def test_a_second_resolution_of_the_same_reference_replaces_the_first(db: Cache) -> None:
+    db.put_resolution(RAW_REFERENCE, ResolveResult(State.AMBIGUOUS, None, []), now=NOW)
+    db.put_resolution(RAW_REFERENCE, RESOLVED, now=NOW)
+    stored = db.get_resolution(RAW_REFERENCE, now=NOW)
+    assert stored is not None and stored.state is State.RESOLVED
+    assert db._conn.execute("SELECT COUNT(*) FROM resolutions").fetchone() == (1,)
+
+
+NOTICE = Retraction(
+    source="retraction-watch", date="2021-03-01", notice_doi="10.1/notice", label="Retraction"
+)
+
+
+def test_a_retraction_hit_round_trips_and_keeps_thirty_days(db: Cache) -> None:
+    db.put_retraction("10.1/x", NOTICE, now=NOW)
+    hit = db.get_retraction("10.1/x", now=NOW + timedelta(days=29))
+    assert hit is not None and hit.notice == NOTICE
+    assert db.get_retraction("10.1/x", now=NOW + timedelta(days=31)) is None
+
+
+def test_a_retraction_miss_is_remembered_but_expires_after_seven_days(db: Cache) -> None:
+    """A retraction can appear later, so absence expires sooner than presence."""
+    db.put_retraction("10.1/x", None, now=NOW)
+    hit = db.get_retraction("10.1/x", now=NOW + timedelta(days=6))
+    assert hit is not None and hit.notice is None  # "checked, and there was none"
+    assert db.get_retraction("10.1/x", now=NOW + timedelta(days=8)) is None
+
+
+def test_clear_expired_covers_resolutions_and_retractions(db: Cache) -> None:
+    db.put_resolution(RAW_REFERENCE, RESOLVED, now=NOW - timedelta(days=40))
+    db.put_resolution("A fresh reference of several words. 2021.", RESOLVED, now=NOW)
+    db.put_retraction("10.1/old", None, now=NOW - timedelta(days=40))
+    db.put_retraction("10.1/new", NOTICE, now=NOW)
+
+    cleared = db.clear(expired_only=True, now=NOW)
+    assert (cleared.resolutions, cleared.retractions) == (1, 1)
+    assert db.get_resolution("A fresh reference of several words. 2021.", now=NOW) == RESOLVED
+    assert db.get_retraction("10.1/new", now=NOW) is not None
+
+
+def test_clear_without_expired_removes_every_lookup_too(db: Cache) -> None:
+    db.put_resolution(RAW_REFERENCE, RESOLVED, now=NOW)
+    db.put_retraction("10.1/x", NOTICE, now=NOW)
+    cleared = db.clear()
+    assert (cleared.resolutions, cleared.retractions) == (1, 1)
+    assert db.get_resolution(RAW_REFERENCE, now=NOW) is None
+    assert db.get_retraction("10.1/x", now=NOW) is None
+
+
+def test_lookup_counts_are_reported_for_the_cli(db: Cache) -> None:
+    db.put_resolution(RAW_REFERENCE, RESOLVED, now=NOW)
+    db.put_retraction("10.1/x", None, now=NOW)
+    assert db.lookup_counts() == (1, 1)
+
+
+def test_migrating_a_v1_file_adds_the_lookup_tables(tmp_path: Path) -> None:
+    path = tmp_path / "proofpath.sqlite3"
+    _write_v1_database(path)
+    with Cache(path) as db:
+        db.put_resolution(RAW_REFERENCE, RESOLVED, now=NOW)
+        assert db.get_resolution(RAW_REFERENCE, now=NOW) == RESOLVED
+        assert db.get_verdict("h", "s", "m") is not None  # nothing else was lost

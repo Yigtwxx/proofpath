@@ -549,3 +549,45 @@ def test_footer_passes_the_no_bibliography_hint_through() -> None:
         ),
     )
     assert "hint       no bibliography was found; 84 citation markers" in out.getvalue()
+
+
+# --- the section 7.1 aggregate skipped line (OPEN-ITEMS 11.7) ------------------
+
+
+def _skipped_footer(count: int) -> Footer:
+    return Footer(
+        counts="4 refs: 4 ok",
+        coverage=(50, 0, 50),
+        api_calls=0,
+        elapsed=1.0,
+        written=None,
+        weak=False,
+        cancelled=False,
+        browser_skipped=count,
+    )
+
+
+def test_footer_prints_the_browser_skipped_line() -> None:
+    instance, out, _ = _build()
+    ui.footer(instance, _skipped_footer(3))
+    assert f"skipped    3 source(s) {ui.BROWSER_SKIPPED_REASON}" in out.getvalue().splitlines()
+
+
+def test_the_skipped_line_survives_quiet() -> None:
+    """Rule 6: -q drops progress, never a statement about what was not read."""
+    instance, out, _ = _build(quiet=True)
+    ui.footer(instance, _skipped_footer(1))
+    assert f"skipped    1 source(s) {ui.BROWSER_SKIPPED_REASON}" in out.getvalue().splitlines()
+
+
+def test_no_skipped_line_when_the_browser_stopped_nothing() -> None:
+    instance, out, _ = _build()
+    ui.footer(instance, _skipped_footer(0))
+    assert "skipped" not in out.getvalue()
+
+
+def test_the_skipped_count_is_yellow_on_a_terminal() -> None:
+    instance, out, _ = _build(force_terminal=True)
+    ui.footer(instance, _skipped_footer(2))
+    line = next(ln for ln in out.getvalue().splitlines() if "skipped" in ln)
+    assert "\x1b[33m2 source(s)\x1b[0m" in line

@@ -341,13 +341,6 @@ def test_a_crash_inside_the_run_is_an_error_not_a_finding(
 # --- flags that are not built yet ----------------------------------------------------
 
 
-def test_format_sarif_says_which_version_brings_it(monkeypatch: pytest.MonkeyPatch) -> None:
-    install(monkeypatch)
-    result = runner.invoke(app, ["check", "-", "--format", "sarif"], input=draft(CLEAN_BODY))
-    assert result.exit_code == 2
-    assert "error: --format sarif arrives in v0.2" in result.output
-
-
 def test_an_unknown_format_is_a_usage_error(monkeypatch: pytest.MonkeyPatch) -> None:
     install(monkeypatch)
     result = runner.invoke(app, ["check", "-", "--format", "xml"], input=draft(CLEAN_BODY))
@@ -369,6 +362,139 @@ def test_allow_browser_and_no_browser_cannot_be_combined(monkeypatch: pytest.Mon
     )
     assert result.exit_code == 2
     assert "--allow-browser" in result.output and "--no-browser" in result.output
+
+
+# --- --format sarif ------------------------------------------------------------------
+
+
+def test_sarif_puts_one_log_document_on_stdout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """What an editor opens: a SARIF 2.1.0 log and nothing else on stdout."""
+    install(monkeypatch)
+    write(tmp_path, TROUBLED_BODY)
+    result = runner.invoke(app, ["check", "draft.md", "--format", "sarif"])
+
+    assert result.exit_code == 1, result.output
+    payload = json.loads(result.stdout)
+    assert payload["version"] == "2.1.0"
+    assert payload["runs"][0]["tool"]["driver"]["name"] == "proofpath"
+    assert payload["runs"][0]["results"], "the troubled draft has a finding to show"
+
+
+def test_sarif_points_at_the_target_as_the_caller_named_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    install(monkeypatch)
+    write(tmp_path, TROUBLED_BODY)
+    result = runner.invoke(app, ["check", "draft.md", "--format", "sarif"])
+
+    assert result.exit_code == 1, result.output
+    location = json.loads(result.stdout)["runs"][0]["results"][0]["locations"][0]
+    assert location["physicalLocation"]["artifactLocation"]["uri"] == "draft.md"
+
+
+def test_sarif_carries_the_runs_coverage(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Product rule 6: a log opened without the terminal output still states coverage."""
+    install(monkeypatch)
+    write(tmp_path, CLEAN_BODY)
+    result = runner.invoke(app, ["check", "draft.md", "--format", "sarif"])
+
+    assert result.exit_code == 0, result.output
+    coverage = json.loads(result.stdout)["runs"][0]["properties"]["coverage"]
+    assert coverage["references"] == 1
+    assert coverage["pct"]["fulltext"] == 100
+
+
+def test_sarif_sends_the_human_lines_to_stderr(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Same rule as ``--format json`` (spec section 13.3): stdout is the document."""
+    install(monkeypatch)
+    write(tmp_path, CLEAN_BODY)
+    result = runner.invoke(app, ["check", "draft.md", "--format", "sarif"])
+
+    assert result.exit_code == 0, result.output
+    assert "Parsing" not in result.stdout
+    assert "  Parsing" in result.stderr
+
+
+def test_sarif_writes_no_report_md_of_its_own(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The log *is* the output. A markdown file nobody asked for is not part of it."""
+    install(monkeypatch)
+    write(tmp_path, CLEAN_BODY)
+    result = runner.invoke(app, ["check", "draft.md", "--format", "sarif"])
+
+    assert result.exit_code == 0, result.output
+    assert not (tmp_path / "report.md").exists()
+
+
+def test_sarif_out_writes_the_same_document_it_printed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``--out draft.sarif`` is how the file reaches VS Code, so it holds the log."""
+    install(monkeypatch)
+    write(tmp_path, TROUBLED_BODY)
+    result = runner.invoke(app, ["check", "draft.md", "--format", "sarif", "--out", "draft.sarif"])
+
+    assert result.exit_code == 1, result.output
+    written = (tmp_path / "draft.sarif").read_text(encoding="utf-8")
+    assert json.loads(written) == json.loads(result.stdout)
+
+
+def test_sarif_keeps_the_exit_code_contract(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A format is a way of printing, never a second opinion about the document."""
+    install(monkeypatch)
+    write(tmp_path, CLEAN_BODY)
+    assert runner.invoke(app, ["check", "draft.md", "--format", "sarif"]).exit_code == 0
+
+
+def test_sarif_stays_refused_by_resolve_and_fetch() -> None:
+    """Only ``check`` emits it; the other two say so rather than printing text."""
+    for argv in (["resolve", "ref", "--format", "sarif"], ["fetch", "url", "--format", "sarif"]):
+        result = runner.invoke(app, argv)
+        assert result.exit_code == 2, result.output
+        assert "--format sarif" in result.output
+
+
+# --- the committed author-year draft -------------------------------------------------
+
+AUTHOR_YEAR_DRAFT = Path(__file__).parent / "data" / "draft-author-year.md"
+AUTHOR_YEAR_SURNAMES = ("Vaswani", "Jumper", "Harris", "Virtanen", "Wilkinson")
+
+
+def test_the_author_year_draft_pairs_every_citation(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The v0.2 live asset (``docs/eval/2026-09-15-v0.2-live.md`` section 4), offline.
+
+    Five APA entries, cited as ``(Surname et al., YEAR)``, one ``(ibid.)`` and one
+    mixed ``(…; [5])``: every marker pairs with an entry, so the Claims row says
+    ``0 unresolved`` and nothing is reported as an unsupported citation style.
+    """
+    dois = {name: f"10.5/{name.lower()}" for name in AUTHOR_YEAR_SURNAMES}
+    # Every source is the same three-sentence paper, and every sentence of it scores
+    # NEI: what this test is about is the pairing, not the verdicts.
+    nei = dict.fromkeys((SUPPORTING, FIGURE, FILLER), (0.1, 0.1, 0.8))
+    install(
+        monkeypatch,
+        built_engine(
+            resolver=StubResolver({name: resolved(doi) for name, doi in dois.items()}),
+            chain=StubOpenAccess({doi: text_evidence(PAPER) for doi in dois.values()}),
+            scorer=TableScorer(nei),
+        ),
+    )
+    result = runner.invoke(app, ["check", str(AUTHOR_YEAR_DRAFT), "--format", "json"])
+
+    assert result.exit_code in (0, 1), result.output
+    assert "5 refs" in result.stderr
+    assert "6 citations, 0 unresolved" in result.stderr
+    assert "UNSUPPORTED CITATION STYLE" not in result.output
+    report = json.loads(result.stdout)
+    assert report["coverage"]["references"] == 5
+    assert report["coverage"]["unverified"] == 0
 
 
 # --- what reaches Engine.default -----------------------------------------------------

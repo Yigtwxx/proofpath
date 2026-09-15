@@ -6,6 +6,128 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-15
+
+The interactive front-end, author-year citations, SARIF output and a cache for the
+two lookups that made a warm re-run slow. Bare `proofpath` now opens the TUI; the
+one-shot verbs are unchanged for CI. Live checks in `docs/eval/2026-09-15-v0.2-live.md`.
+
+### Added
+- **TUI** (spec §13.1): bare `proofpath` opens a `textual` session — a four-line banner
+  with the pet, one prompt bar, and a scrolling log of run blocks. Every CLI verb is a
+  slash command (`/check`, `/resolve`, `/fetch`, `/config`, `/cache`; plus `/allow`,
+  `/cancel #n`, `/help`, `/quit`), a bare verb waits for its argument (`Esc` leaves
+  it), and a line that is not a command is something to check. Runs are scheduled
+  concurrently through one `Scheduler` (network stages in parallel under a shared
+  politeness limiter, the NLI model one run at a time), each run is **cancellable**
+  mid-flight and keeps what it had decided, the coverage footer never scrolls away,
+  and the §7.1 permission prompt is drawn **inline under the stage that hit the wall**
+  with `[allow once] [always] [no] [never]` buttons (or `/allow …`). Every log line
+  works by mouse and by keyboard: run headers fold, stage rows hide their summary,
+  findings open the full quoted passage, `⧉`/`c` copies it, a finding's reference is
+  an OSC 8 link to its source. The pet's eyes blink, watch a run and react to its
+  result — only with colour, never under `--no-color` or `-q`.
+- **Author-year citations** (spec §9, §17): `(Smith et al., 2020)`, `Smith (2020)`,
+  `(Smith, 2020; Jones, 2019)`, `2020a`/`2020b` collisions, `ibid.` and `op. cit.`
+  back-references, and mixed `(Smith, 2020; [12])` all pair with their bibliography
+  entry. Hand-built set of 55 passages, 83 expectations, rate **0.940**
+  (`docs/eval/2026-09-12-pairing-author-year.md`); the numeric set is unchanged at
+  108/109. A marker no entry matches is reported as `UNRESOLVED MARKER`, never guessed.
+- **`check --format sarif`** (spec §13.2): the run as a SARIF 2.1.0 log for VS Code or
+  any SARIF 2.1.0 viewer — one result per finding on its line, the quoted passage in
+  the message of every asserting result, the exact honesty state in `properties`, and
+  the run's coverage in `runs[0].properties`. `--out FILE` writes the same document.
+  Validated against the schemastore schema, vendored in
+  `tests/data/sarif-schema-2.1.0.json`; not yet exercised against GitHub code scanning.
+- **Resolution and retraction cache** (cache schema v3): `resolutions` (30-day TTL,
+  keyed by the marker-free folded entry) and `retractions` (30 days for a notice, 7
+  for its absence). Neither an `UNVERIFIED (provider unavailable)` nor a retraction
+  check every provider failed is ever stored. A warm re-run of the seven-reference
+  draft: **1.35 s** wall clock, 0 network calls (v0.1: 15.8 s). `proofpath cache`
+  counts both tables.
+- The §7.1 aggregate line `skipped N source(s) because the browser was not permitted`
+  is printed by `check` too (terminal and markdown), never dropped by `-q`.
+- `browser_binary_present()`: the consent gate checks for a chromium build under
+  `PLAYWRIGHT_BROWSERS_PATH` or the platform default, so a half-installed environment
+  runs the idempotent installer instead of failing inside the fetch; the consent log
+  gains `browser binary: found|missing`.
+- `commands.py`: the shared wiring behind every mirrored verb (`resolve_reference`,
+  `fetch_target`, `config_*`, `cache_*`) returns result objects and never prints, so
+  `cli.py` and the TUI can only differ in how a result is drawn.
+- Bibliography fallback for PDFs without a `References` heading (paged formats):
+  the last contiguous run of numbered paragraphs is read as the list. AlphaFold:
+  0 → 17 references found, 97 markers now reported as unresolved instead of invisible.
+- Resolver rescues: `First Last and First Last` author lists resolve instead of landing
+  in `AMBIGUOUS`; an arXiv id whose record agrees on author and year is accepted as
+  `RESOLVED (low confidence)` the way a DOI already was. Ghost set 274 rows: false-ghost
+  **0.0 %**, ghost recall 99.1 % (`docs/eval/2026-09-12-ghosts.md`).
+- `tests/data/draft-author-year.md`, a committed author-year draft with an offline
+  smoke test; live: 6 citations paired, 0 unresolved.
+
+### Changed
+- Cache schema **v3** (migrated in place from v1/v2; versions compared as integers).
+- `Claims.unsupported` now means "a style this version cannot pair" and is empty by
+  construction; `UNSUPPORTED CITATION STYLE` is left for footnote-only and
+  superscript-letter styles. Markers that pair with nothing are `unresolved`.
+- `resolve.looks_unindexed` reads only the initials-path author patterns: a full-name
+  list (`First Last and First Last`) no longer counts as "this entry printed an
+  author list", so a title-first book keeps its title (see Known issues for the price).
+- `--format sarif` on `resolve` or `fetch` now says `applies to check only` instead of
+  naming a future version.
+- Stage row `Claims` reads `N citations, M unresolved` (was `M unsupported`).
+
+### Fixed
+- A provider answering with a non-JSON body (a bot wall or maintenance page under a
+  200) escaped `resolve.py` as a raw `JSONDecodeError` traceback. Every provider body
+  is decoded in one place and that failure is a `ProviderError`, so `resolve`, `fetch`
+  and `check` report `UNVERIFIED (provider unavailable)` and never read it as evidence
+  the work does not exist.
+- The §7.1 prompt said `blocked this request (HTTP 200)` for the empty-body bot wall;
+  it now says `answered without readable text (HTTP 200)`.
+- `resolve` on the CLI leaked one HTTP client per invocation; `commands.resolve_reference`
+  owns and closes it.
+- A retraction check every provider failed was recorded as "not retracted". It now
+  raises, is reported as `retraction check unavailable` and counted in the stage
+  summary (`1 unavailable`), and nothing is cached, so the next run asks again
+  (product rule 2). Found alongside it: the fetching stage replaced a source's notes
+  instead of appending, which would have dropped that very note.
+- Versions in the cache file compared as strings (`"10" < "9"`); compared as integers now.
+
+### Known issues
+- `api_calls` in the footer counts LLM calls only (none yet), so a cold run that spent
+  30 s on Crossref and Semantic Scholar still prints `0 API calls`; the provider lookups
+  are shown on the stage lines instead.
+- A cached resolution reprints the notes it was stored with (for example an `openalex
+  unavailable (HTTP 429)` from the day it was resolved) as if they were current.
+- `proofpath check -` names its SARIF artifact `-`; give the draft a file name when the
+  log is meant for a viewer.
+- Author-year pairing matches the first author and the exact year; `(Lindqvist, 2019)`
+  against "Okafor, C. and Lindqvist, S." and a year off by one are reported unresolved,
+  and two surnames sharing a last word (`Berg` / `van der Berg`) are reported ambiguous
+  rather than guessed. `Smith 2020` with no comma is not a marker; `(WHO, 2020)` does
+  not pair with "World Health Organization".
+- An unnumbered two-column bibliography is cut at line breaks (RoBERTa: 103 entries
+  for ~50), so author-year pairing over such a list resolves few items. The largest
+  open item for author-year pairing.
+- The headless bibliography fallback takes only the *last* run of numbered paragraphs
+  (AlphaFold: 17 of 84 entries) and drops the prose printed before a block's first entry.
+- A fabricated `First Last and First Last. Title. Venue.` with no year between the
+  names and the title reaches `UNVERIFIED (not in bibliographic indexes)`, not `GHOST`
+  (the price of the rescue above; rule 3 outranks recall). A proceedings-*volume*
+  record can accept a fabricated paper cited into that volume as `RESOLVED (low
+  confidence)` — the ghost set's one fabricated acceptance (0.9 %).
+- A cold run of a long bibliography is still serial through the providers (129
+  references: minutes); only the TUI's concurrent scheduler runs them in parallel.
+- In the TUI the `loading models …` note is drawn after the `Verifying` row it precedes
+  (it is emitted inside that stage).
+- A `#n` run reference in the TUI is a click target that folds its block, not a
+  hyperlink (spec §13.1); a run number has no address to open.
+- A provider body that is valid JSON but not an object (a bare list or string) still
+  escapes `resolve` as an error, exit 2, rather than being reported as `UNVERIFIED
+  (provider unavailable)`.
+- `/quit` in the TUI waits for an in-flight mirrored `/fetch` to finish before the
+  app exits; a `/check` run is cancelled, a `/fetch` is not.
+
 ## [0.1.0] - 2026-09-12
 
 First working release: `proofpath check` verifies a document's citations end to end

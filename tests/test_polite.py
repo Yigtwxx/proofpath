@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import threading
+
 import httpx
 import pytest
 import respx
@@ -165,3 +167,71 @@ def test_connect_error_is_retried_and_surfaces_as_provider_error(
     respx.get("https://api.crossref.org/works").mock(side_effect=httpx.ConnectError("boom"))
     with pytest.raises(pl.ProviderError, match="ConnectError"):
         pl.PoliteClient(retries=1).get("https://api.crossref.org/works")
+
+
+# --- the shared throttle ----------------------------------------------------------
+
+
+def test_two_clients_share_the_per_host_interval(monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = {"now": 100.0}
+    slept: list[float] = []
+    monkeypatch.setattr(pl.time, "monotonic", lambda: clock["now"])
+    monkeypatch.setattr(pl.time, "sleep", lambda s: slept.append(s))
+    pl.PoliteClient().throttle("https://export.arxiv.org/api/query")
+    pl.PoliteClient().throttle("https://export.arxiv.org/api/query")  # another run
+    assert slept == [pytest.approx(pl.MIN_INTERVAL["export.arxiv.org"])]
+
+
+def test_two_hosts_do_not_wait_on_each_other(monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = {"now": 100.0}
+    slept: list[float] = []
+    monkeypatch.setattr(pl.time, "monotonic", lambda: clock["now"])
+    monkeypatch.setattr(pl.time, "sleep", lambda s: slept.append(s))
+    client = pl.PoliteClient()
+    client.throttle("https://api.crossref.org/works")
+    client.throttle("https://api.openalex.org/works")
+    assert slept == []
+
+
+def test_a_client_can_be_given_a_throttle_of_its_own(monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = {"now": 100.0}
+    slept: list[float] = []
+    monkeypatch.setattr(pl.time, "monotonic", lambda: clock["now"])
+    monkeypatch.setattr(pl.time, "sleep", lambda s: slept.append(s))
+    pl.PoliteClient().throttle("https://export.arxiv.org/api/query")
+    pl.PoliteClient(throttle=pl.HostThrottle()).throttle("https://export.arxiv.org/api/query")
+    assert slept == []
+
+
+def test_reset_forgets_every_recorded_call(monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = {"now": 100.0}
+    slept: list[float] = []
+    monkeypatch.setattr(pl.time, "monotonic", lambda: clock["now"])
+    monkeypatch.setattr(pl.time, "sleep", lambda s: slept.append(s))
+    client = pl.PoliteClient()
+    client.throttle("https://export.arxiv.org/api/query")
+    pl.SHARED_THROTTLE.reset()
+    client.throttle("https://export.arxiv.org/api/query")
+    assert slept == []
+
+
+def test_concurrent_callers_are_spaced_one_interval_apart() -> None:
+    """Two threads, one host: the second waits rather than reading the same last call.
+
+    The one real sleep in this file, on the shortest interval of any known host.
+    """
+    host = "api.crossref.org"
+    throttle = pl.HostThrottle()
+    waits: list[float] = []
+    barrier = threading.Barrier(2)
+
+    def call() -> None:
+        barrier.wait()
+        waits.append(throttle.wait(host))
+
+    threads = [threading.Thread(target=call) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=5.0)
+    assert sorted(waits) == [0.0, pytest.approx(pl.MIN_INTERVAL[host], abs=0.05)]

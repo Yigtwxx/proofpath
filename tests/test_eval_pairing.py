@@ -5,8 +5,11 @@ hand-built expectation set) and on synthetic rows built here. The live half --
 fetching real PDFs through the open-access chain -- is not exercised.
 
 ``test_score_on_the_hand_set_meets_the_gate`` is the Phase 5 gate: the measured
-pairing rate on the hand set must stay at or above 0.95. If it fails, fix
-``claims.py`` or the row -- never the bar.
+pairing rate on the numeric hand set must stay at or above 0.95.
+``test_score_on_the_author_year_hand_set_meets_the_gate`` is the Phase 8 one, at 0.90 --
+author-year is the harder style, and its five standing misses are recorded in
+``docs/eval/2026-09-12-pairing-author-year.md``. If either fails, fix ``claims.py`` or
+the row -- never the bar.
 """
 
 from __future__ import annotations
@@ -22,8 +25,20 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT_PATH = ROOT / "scripts" / "eval_pairing.py"
 SET_PATH = ROOT / "tests" / "data" / "pairing_set.jsonl"
+AUTHOR_YEAR_SET_PATH = ROOT / "tests" / "data" / "pairing_author_year.jsonl"
 
 GATE = 0.95
+# Author-year is the harder style: a number is looked up in a list, a name and a year
+# have to agree with what an entry happens to print. The bar is lower for that reason and
+# for that reason only -- the misses under it are recorded in
+# docs/eval/2026-09-12-pairing-author-year.md, never tuned away.
+AUTHOR_YEAR_GATE = 0.90
+# What the numeric set scored once task 8.5 closed OPEN-ITEMS 9.2 (108) against what it
+# scored before (107, docs/eval/2026-09-11-pairing.md). Pinned exactly, in both
+# directions: a drop is a regression, and a rise nobody explained means an expectation
+# moved rather than the code improving.
+NUMERIC_CORRECT = 108
+NUMERIC_EXPECTED = 109
 
 
 def _load_script() -> ModuleType:
@@ -141,6 +156,30 @@ def test_score_on_the_hand_set_meets_the_gate() -> None:
     assert result.rate >= GATE, f"pairing rate {result.rate:.3f} < {GATE}\n{detail}"
 
 
+def test_score_on_the_author_year_hand_set_meets_the_gate() -> None:
+    rows = load_rows(AUTHOR_YEAR_SET_PATH)
+    assert len(rows) >= 40
+    result = score(rows)
+    assert result.expected == sum(row.checks for row in rows)
+    detail = "\n".join(f"{m.row_id} {m.marker}: {m.reason}" for m in result.misses)
+    assert result.rate >= AUTHOR_YEAR_GATE, (
+        f"author-year pairing rate {result.rate:.3f} < {AUTHOR_YEAR_GATE}\n{detail}"
+    )
+
+
+def test_the_author_year_set_exercises_every_style_it_declares() -> None:
+    styles = {row.style for row in load_rows(AUTHOR_YEAR_SET_PATH)}
+    assert styles == {"author-year", "collision", "back-reference", "mixed"}
+
+
+def test_the_numeric_hand_set_has_not_moved() -> None:
+    # The author-year work changes what `claims` does with a marker the numeric set also
+    # carries. Every marker-to-sentence pair of that set has to score exactly as before.
+    result = score(load_rows(SET_PATH))
+    detail = "\n".join(f"{m.row_id} {m.marker}: {m.reason}" for m in result.misses)
+    assert (result.correct, result.expected) == (NUMERIC_CORRECT, NUMERIC_EXPECTED), detail
+
+
 def _row(
     text: str,
     expected: tuple[Expected, ...],
@@ -227,13 +266,14 @@ def test_score_reports_an_expected_marker_that_produced_nothing_as_missing() -> 
 
 
 def test_score_counts_a_declared_unsupported_marker_as_an_expectation() -> None:
-    row = _row(
-        "Earlier work (Smith et al., 2020) established the baseline used here.",
-        (),
-        unsupported=("(Smith et al., 2020)",),
-    )
-    result = score([row])
-    assert (result.expected, result.pairs, result.correct, result.misses) == (1, 0, 1, ())
+    # Nothing the extractor produces lands in `unsupported` today (v0.2 pairs both styles
+    # it detects), so the declaration is scored against a synthetic result rather than a
+    # passage: what is under test is the scorer, which has to keep reading the field for
+    # the styles a later version will detect but still not pair.
+    row = _row("A sentence with no marker at all.", (), unsupported=("^1",))
+    correct, misses = eval_pairing.score_row(row)
+    assert (correct, misses) == (0, [Miss(row_id="syn-01", marker="^1", reason="missing")])
+    assert row.checks == 1
 
 
 def test_score_counts_a_declared_unresolved_marker_as_an_expectation() -> None:
@@ -247,13 +287,15 @@ def test_score_counts_a_declared_unresolved_marker_as_an_expectation() -> None:
 
 
 def test_score_reports_a_declared_marker_that_was_never_reported_as_missing() -> None:
-    # The numeric marker wins the overlap, so the author-year half is never reported.
+    # Both halves of the mixed citation are markers now (OPEN-ITEMS 9.2), and with no
+    # bibliography to name an entry the author-year half is reported unresolved. A row
+    # that declares it under the wrong heading is a miss, not a pass.
     row = _row(
         "A mixed citation (see Smith, 2020; [12]) appears here, and that is all.",
         (
             Expected(
                 marker="[12]",
-                sentence="A mixed citation (see Smith, 2020;) appears here, and that is all.",
+                sentence="A mixed citation appears here, and that is all.",
                 refs=(12,),
             ),
         ),
@@ -262,12 +304,15 @@ def test_score_reports_a_declared_marker_that_was_never_reported_as_missing() ->
     result = score([row])
     assert result.expected == 2
     assert result.correct == 1
+    # Declared under the wrong heading counts once: the marker *was* reported, so it is
+    # not also an "extra" -- the scorer subtracts everything the row declared, whichever
+    # of the two lists it declared it in.
     assert result.misses == (
         Miss(row_id="syn-01", marker="(see Smith, 2020; [12])", reason="missing"),
     )
 
 
-def test_score_reports_an_undeclared_unsupported_marker_as_extra() -> None:
+def test_score_reports_an_undeclared_reported_marker_as_extra() -> None:
     # A row that says nothing about "(Smith et al., 2020)" must not hide it.
     row = _row(
         "Earlier work (Smith et al., 2020) established the baseline used here.",
@@ -366,8 +411,8 @@ def test_render_report_has_every_heading_and_formats_the_rate() -> None:
         by_style={"numeric": (60, 59), "paragraph": (40, 38)},
         date="2026-09-11",
     )
-    assert report.startswith("# Citation pairing — 2026-09-11\n")
-    for heading in ("## Hand set", "## Misses", "## Real PDFs"):
+    assert report.startswith("# Citation pairing (numeric) — 2026-09-11\n")
+    for heading in ("## Hand set (numeric)", "## Misses", "## Real PDFs"):
         assert f"\n{heading}\n" in report
     assert "- rows: 60" in report
     assert "- expectations: 100 (97 pairs, 3 reported markers)" in report
@@ -378,6 +423,22 @@ def test_render_report_has_every_heading_and_formats_the_rate() -> None:
     # The Notes section is written by hand after the run; the harness never fakes it.
     assert "## Notes" not in report
     assert report.endswith("\n")
+
+
+def test_render_report_prints_the_other_hand_set_beside_the_measured_one() -> None:
+    # A change made for one style can move the other; the report says so in its own body
+    # rather than leaving a reader to compare it with an older file.
+    report = render_report(
+        _result(100, 97),
+        by_style={"author-year": (60, 59)},
+        date="2026-09-12",
+        name="author-year",
+        other=("numeric", _result(109, 108)),
+    )
+    assert "# Citation pairing (author-year) — 2026-09-12" in report
+    assert "\n## Hand set (author-year)\n" in report
+    assert "\n## Hand set (numeric) — unchanged by this run\n" in report
+    assert "| numeric | 60 | 109 | 108 | 0.99 |" in report
 
 
 def test_render_report_says_none_when_nothing_missed() -> None:
@@ -445,7 +506,9 @@ def test_measure_document_counts_what_the_real_pdf_table_prints() -> None:
     assert (row.id, row.source, row.kind, row.pages) == ("fake", "local", "text", 1)
     assert (row.paragraphs, row.references) == (2, 2)
     assert (row.claims, row.scoped) == (2, 2)  # "[2]" ends its paragraph: both sentences
-    assert (row.unresolved, row.unsupported) == (1, 1)
+    # Two markers name something this bibliography does not hold: "[99]", and the
+    # author-year one, whose surname matches no entry. Neither is an unsupported *style*.
+    assert (row.unresolved, row.unsupported) == (2, 0)
     assert len(row.samples) == 1
 
 

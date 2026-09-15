@@ -18,7 +18,7 @@ import orjson
 from rich.console import Console
 from rich.text import Text
 
-from proofpath.report import Diagnostic, Footer, Level, no_bibliography
+from proofpath.report import BROWSER_SKIPPED_REASON, Diagnostic, Footer, Level, no_bibliography
 
 KEY_WIDTH = 10
 
@@ -32,6 +32,15 @@ STAGE_BY_WIDTH = 34
 # no hex, so light and dark themes both work and NO_COLOR removes everything.
 # ACCENTS are for the TUI (Phase 8) but live here so one module owns every colour.
 ACCENTS = ("cyan", "magenta", "blue", "bright_cyan", "bright_magenta")
+# The single brand use of red (spec section 13.1): the banner's [PROOF] stamp, and the
+# only coloured element in it. It lives here because no other module names a colour --
+# ``tui/banner.py`` returns the stamp's column span and this says what to paint it.
+STAMP_COLOUR = "red"
+# The section 7.1 permission prompt, wherever it is drawn (spec section 13.3 lists it
+# under yellow): caution, not a finding. The terminal block is plain text on stderr,
+# so this is what the TUI's inline prompt paints its buttons with -- named here
+# because no other module names a colour.
+PROMPT_COLOUR = "yellow"
 GREEN = ("ok", "RESOLVED", "SUPPORTED", "fulltext", "not retracted")
 YELLOW_PREFIXES = (
     "UNVERIFIED",
@@ -42,6 +51,8 @@ YELLOW_PREFIXES = (
     "PARAGRAPH-SCOPED",
     "UNSUPPORTED CITATION STYLE",
     "UNRESOLVED MARKER",
+    # A retraction check nobody answered: caution, not "not retracted" (rule 2).
+    "unavailable",
 )
 RED = ("GHOST REFERENCE", "REFUTED", "RETRACTED", "FAILED", "NOT SUPPORTED", "PARSE ERROR")
 DIM = ("NEI", "none", "—", "cancelled")
@@ -53,6 +64,10 @@ LEVEL_STYLES: dict[Level, str] = {"error": "red", "warning": "yellow", "note": "
 COVERAGE_KEYS = ("fulltext", "abstract", "unverified")
 COVERAGE_STYLES = ("green", "yellow", "red")
 WEAK_COVERAGE = "coverage is weak: unread sources may hold more, so this is a lower bound"
+# The section 7.1 aggregate line. Caution, not a finding: the sources are reachable,
+# the permission to reach them was withheld (spec section 13.3 colour system). The
+# wording itself comes from ``report`` so the terminal and the markdown cannot drift.
+BROWSER_SKIPPED_STYLE = "yellow"
 
 
 @dataclass
@@ -206,6 +221,21 @@ def coverage(
         hint(ui, WEAK_COVERAGE)
 
 
+def skipped(ui: Ui, count: int) -> None:
+    """How many sources stopped at the section 7.1 browser consent gate.
+
+    Never suppressed and never abbreviated: ``-q`` drops progress, never a statement
+    about what the run did not read (product rule 6). Nothing is printed when the
+    gate stopped nothing -- "skipped 0" would be noise, not coverage.
+    """
+    if count <= 0:
+        return
+    number = Text(f"{count} source(s)")
+    if ui.color:
+        number.stylize(BROWSER_SKIPPED_STYLE)
+    kv(ui, "skipped", Text.assemble(number, f" {BROWSER_SKIPPED_REASON}"))
+
+
 def stage_row(ui: Ui, name: str, by: str, summary: str, elapsed: float) -> None:
     """One row of the stage table; dropped under ``-q``.
 
@@ -226,6 +256,7 @@ def footer(ui: Ui, item: Footer) -> None:
         state_line(ui, "run", "cancelled")
     ui.out.print(item.counts)
     coverage(ui, *item.coverage, weak=item.weak, unchecked_markers=item.unchecked_markers)
+    skipped(ui, item.browser_skipped)
     if item.note:
         hint(ui, item.note)
     written = f"{item.written} written" if item.written else "no report written"
@@ -237,15 +268,25 @@ def error(ui: Ui, text: str) -> None:
     ui.err.print(Text.assemble(("error: ", "red" if ui.color else ""), text))
 
 
-def emit_json(ui: Ui, payload: Any) -> None:
-    """The result as one indented JSON document on stdout, nothing else."""
+def json_text(payload: Any) -> str:
+    """The one JSON spelling every proofpath surface writes, as a string.
+
+    A ``--format sarif`` run prints its log *and* writes it to ``--out``; both come
+    from here, so the file and the stream can never drift into two formattings of
+    the same document.
+    """
     # OPT_NON_STR_KEYS: ``FetchStats.counts`` is keyed by ``Outcome`` (an enum, by value).
     raw = orjson.dumps(
         payload,
         default=_json_default,
         option=orjson.OPT_INDENT_2 | orjson.OPT_NON_STR_KEYS,
     )
-    ui.out.file.write(raw.decode("utf-8") + "\n")
+    return raw.decode("utf-8")
+
+
+def emit_json(ui: Ui, payload: Any) -> None:
+    """The result as one indented JSON document on stdout, nothing else."""
+    ui.out.file.write(json_text(payload) + "\n")
     ui.out.file.flush()
 
 

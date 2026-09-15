@@ -6,12 +6,16 @@ by a guard that counts the attempt and fails it the way a pulled cable would. Th
 same document is then verified again with a fresh `Engine.default`, and the counts
 say which stages still needed the wire.
 
-Two different claims come out of that, and they are not the same claim:
+What the counts say is which stages still need the wire. Since task 8.7 cached the
+resolution and the retraction check as well as the source text (schema v3), a warm
+run of an unchanged document reaches `blocked 0` and every network-bound stage is
+attributed to `cache` -- a warm run is now an offline run.
 
-* the source text is not fetched again -- the point of the cache, and what
-  `Fetching  cache  ... 0.0s` in the output shows;
-* reference resolution and the retraction check still go out on every run
-  (OPEN-ITEMS 10.8), so a warm run is *not* an offline run.
+One state is deliberately never cached, and it is the one that can still put a
+number on that line: `UNVERIFIED (provider unavailable)`. An outage says nothing
+about the reference (product rule 2), so a run that hit one asks again, and this
+script will count that attempt. Re-run the normal check until nothing is unavailable
+before reading the count as a regression.
 
 Run it after a normal run of the same document, which is what fills the cache.
 
