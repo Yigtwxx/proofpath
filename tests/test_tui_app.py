@@ -163,6 +163,16 @@ async def until(pilot: Any, ready: Callable[[], bool], what: str, timeout: float
     raise AssertionError(f"timed out waiting for {what}")
 
 
+async def answered(pilot: Any, answer: Future[Any]) -> Any:
+    """Pump the loop until the worker's future is settled, then return its value.
+
+    ``Future.result(timeout=...)`` would block the very event loop that has to deliver
+    the button press or the ``/allow`` line, so on a slow runner the answer never comes.
+    """
+    await until(pilot, answer.done, "the worker's answer")
+    return answer.result(timeout=0)
+
+
 def in_a_worker(work: Callable[[], Any]) -> Future[Any]:
     """Run ``work`` on a daemon thread, the way a run's own thread runs its engine.
 
@@ -778,7 +788,7 @@ async def test_the_prompt_is_drawn_in_the_block_of_the_run_that_hit_the_wall() -
         assert browser.WHEELS_SIZE in text and browser.BROWSER_SIZE in text
 
         await pilot.click("#allow-once")
-        assert answer.result(timeout=3) == "once"
+        assert await answered(pilot, answer) == "once"
 
 
 async def test_a_button_click_and_an_allow_line_resolve_the_same_future() -> None:
@@ -789,7 +799,7 @@ async def test_a_button_click_and_an_allow_line_resolve_the_same_future() -> Non
         answer = ask_from_a_worker(app, run.id)
         await until(pilot, lambda: app.query(PermissionPrompt), "the prompt")
         await submit(pilot, "/allow never")
-        assert answer.result(timeout=3) == "never"
+        assert await answered(pilot, answer) == "never"
         # The prompt stays in the log saying what was answered: rule 6, in the log.
         prompt = app.query_one(PermissionPrompt)
         assert prompt.answer == "never"
@@ -821,7 +831,7 @@ async def test_a_bare_allow_lists_the_four_answers_without_holding_the_bar() -> 
             assert f"/allow {name}" in text
         assert not answer.done()
         await submit(pilot, "/allow no")
-        assert answer.result(timeout=3) == "no"
+        assert await answered(pilot, answer) == "no"
 
 
 async def test_an_answer_that_is_not_one_of_the_four_is_refused() -> None:
@@ -835,7 +845,7 @@ async def test_an_answer_that_is_not_one_of_the_four_is_refused() -> None:
         assert "maybe" in text
         assert not answer.done()
         await submit(pilot, "/allow no")
-        assert answer.result(timeout=3) == "no"
+        assert await answered(pilot, answer) == "no"
 
 
 async def test_a_cancelled_run_answers_its_own_question_with_no() -> None:
@@ -846,7 +856,7 @@ async def test_a_cancelled_run_answers_its_own_question_with_no() -> None:
         answer = ask_from_a_worker(app, schedulers[0].runs[0].id)
         await until(pilot, lambda: app.query(PermissionPrompt), "the prompt")
         await submit(pilot, "/cancel 1")
-        assert answer.result(timeout=3) == "no"
+        assert await answered(pilot, answer) == "no"
         assert app.pending == {}
 
 
