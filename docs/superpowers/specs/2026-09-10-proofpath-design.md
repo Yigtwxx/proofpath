@@ -689,8 +689,17 @@ Design rules:
   quoted passage; the inline permission prompt renders `[allow once] [always] [no]
   [never]` as buttons, equal to typing `/allow …`; a `#n` reference or a source URL
   is a terminal hyperlink (OSC 8) that opens in the browser, and `⧉` next to a
-  passage copies it. Right-click and drag do nothing special. In a terminal without
+  passage copies it. Drag selects text and Ctrl+C / ⌘C copies it (without a
+  selection they quit); right-click does nothing special. In a terminal without
   mouse reporting every target keeps its keyboard path, so nothing is lost.
+- **Shell reflexes in the bar (decided 2026-09-16, `2026-09-16-tui-conveniences-design.md`).**
+  `↑`/`↓` walk a 500-line command history kept in `state_dir()/history`; `Tab`
+  completes `/verbs`, `/allow` answers and `/cancel #n`, and elsewhere still moves
+  focus; `PageUp`/`PageDown`, `Shift+↑`/`↓` and `Ctrl+Home`/`End` scroll the log from
+  the bar; on a focused log line `↑`/`↓` step between lines and any other printable
+  key except `c` (copy) returns to the bar with the character; `Ctrl+L` drops finished blocks and keeps
+  running ones and the footer (rule 6); a cleared run can no longer be summarised and
+  `/summarize` says so.
 
 ### 13.2 One-shot output
 

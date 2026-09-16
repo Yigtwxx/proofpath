@@ -17,6 +17,7 @@ from proofpath.tui.commands import (
     Awaiting,
     Command,
     Unknown,
+    complete,
     parse,
 )
 
@@ -139,3 +140,34 @@ def test_awaiting_verbs_are_the_ones_that_open_a_run() -> None:
     # The two answers say what they want instead: a pasted path after them is a check.
     assert "cancel" not in AWAITING_VERBS
     assert "allow" not in AWAITING_VERBS
+
+
+# --- completion ---------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("text", "run_ids", "expected"),
+    [
+        ("/ch", (), ["/check "]),
+        # VERBS order, filtered by prefix; only the verbs that take an argument get
+        # the trailing space, and NEEDS_ARGUMENT is the source of truth for which.
+        ("/c", (), ["/check ", "/config", "/cache", "/cancel "]),
+        (
+            "/",
+            (),
+            [f"/{verb} " if verb in NEEDS_ARGUMENT else f"/{verb}" for verb in VERBS],
+        ),
+        ("/help", (), ["/help"]),
+        ("/allow ", (), ["/allow once", "/allow always", "/allow no", "/allow never"]),
+        ("/allow n", (), ["/allow no", "/allow never"]),
+        ("/cancel ", (2, 3), ["/cancel #2", "/cancel #3"]),
+        ("/cancel #3", (2, 3), ["/cancel #3"]),
+        ("/cancel ", (), []),
+        ("/check ", (), []),  # a target is not completed
+        ("paper.pdf", (), []),  # not a command
+        ("", (), []),
+        ("/zz", (), []),
+    ],
+)
+def test_complete(text: str, run_ids: tuple[int, ...], expected: list[str]) -> None:
+    assert complete(text, run_ids=run_ids) == expected

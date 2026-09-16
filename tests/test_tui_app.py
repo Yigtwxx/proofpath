@@ -18,7 +18,9 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from textual import events as tevents
 from textual.widgets import Button
+from textual.widgets.input import Selection as InputSelection
 
 from proofpath import __version__, browser, ui
 from proofpath import commands as library
@@ -37,6 +39,7 @@ from proofpath.tui import banner, commands
 from proofpath.tui.app import (
     ANSWER_LABELS,
     AWAITING_VERBS,
+    CLEARED_NOT_SUMMARIZABLE,
     FLASH_SECONDS,
     HINT,
     Banner,
@@ -56,6 +59,7 @@ from proofpath.tui.app import (
     run_context,
 )
 from proofpath.tui.runs import Run, State
+from proofpath.tui.theme import PLAIN
 from proofpath.verify import Engine
 
 SIZE = (80, 24)
@@ -67,6 +71,7 @@ def isolated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """``/config`` and ``/cache`` read real files; never the ones this machine uses."""
     monkeypatch.setenv("PROOFPATH_CONFIG_DIR", str(tmp_path / "conf"))
     monkeypatch.setenv("PROOFPATH_CACHE_DIR", str(tmp_path / "cache"))
+    monkeypatch.setenv("PROOFPATH_STATE_DIR", str(tmp_path / "state"))
 
 
 # --- the fake scheduler ------------------------------------------------------------
@@ -869,6 +874,93 @@ async def test_a_fresh_command_leaves_awaiting_mode() -> None:
     assert schedulers[0].submitted == []
 
 
+# --- history ------------------------------------------------------------------------
+
+
+async def test_up_brings_back_the_last_line() -> None:
+    app, _ = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "/help")
+        await submit(pilot, "/config")
+        prompt = app.query_one(Prompt)
+        await pilot.press("up")
+        assert prompt.value == "/config"
+        assert prompt.cursor_position == len("/config")
+        await pilot.press("up")
+        assert prompt.value == "/help"
+        await pilot.press("up")  # at the oldest: stays
+        assert prompt.value == "/help"
+
+
+async def test_down_past_the_newest_restores_the_draft() -> None:
+    app, _ = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "/help")
+        prompt = app.query_one(Prompt)
+        prompt.value = "half a th"
+        await pilot.press("up")
+        assert prompt.value == "/help"
+        await pilot.press("down")
+        assert prompt.value == "half a th"
+        await pilot.press("down")  # nothing newer than the draft
+        assert prompt.value == "half a th"
+
+
+async def test_an_edit_ends_the_walk() -> None:
+    app, _ = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "/help")
+        await submit(pilot, "/config")
+        prompt = app.query_one(Prompt)
+        await pilot.press("up")
+        await pilot.press("x")
+        assert prompt.value == "/configx"
+        await pilot.press("up")  # a fresh walk: starts at the newest again
+        assert prompt.value == "/config"
+
+
+async def test_held_up_walks_back_even_when_keys_outrun_changed() -> None:
+    """Two ``up`` keys already queued must not read as an edit that ends the walk."""
+    app, _ = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        for line in ("/one", "/two", "/three"):
+            await submit(pilot, line)
+        prompt = app.query_one(Prompt)
+        # ``pilot.press`` pauses between keys; a held key while the loop is busy does
+        # not. Posted to the app the way the driver posts them, both are handled
+        # before the first ``Changed`` reaches the bar.
+        app.post_message(tevents.Key("up", None))
+        app.post_message(tevents.Key("up", None))
+        await pilot.pause()
+        assert prompt.value == "/two"
+        await pilot.press("up")
+        assert prompt.value == "/one"
+
+
+async def test_down_from_an_empty_bar_comes_back_empty() -> None:
+    app, _ = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "/help")
+        prompt = app.query_one(Prompt)
+        await pilot.press("up")
+        assert prompt.value == "/help"
+        await pilot.press("down")
+        assert prompt.value == ""
+        await pilot.press("up")  # a fresh walk starts at the newest again
+        assert prompt.value == "/help"
+
+
+async def test_history_survives_a_restart(tmp_path: Path) -> None:
+    app, _ = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "/help")
+    assert (tmp_path / "state" / "history").read_text(encoding="utf-8") == "/help\n"
+    again, _ = build_app()
+    async with again.run_test(size=SIZE) as pilot:
+        await pilot.press("up")
+        assert again.query_one(Prompt).value == "/help"
+
+
 async def test_cancel_never_captures_a_path_as_its_argument() -> None:
     """Only the verbs that start a run hold the bar; a path after /cancel is a check."""
     assert "cancel" not in AWAITING_VERBS
@@ -1248,6 +1340,27 @@ async def test_help_lists_every_verb_with_what_it_wants() -> None:
         assert f"/{verb} {placeholder}" in text
 
 
+async def test_help_lists_the_keys() -> None:
+    app, _ = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "/help")
+        await pilot.pause()
+        notes = [str(note.render()) for note in app.query(NoteLine)]
+        assert any("history" in note and "Tab" in note for note in notes)
+        assert any("Ctrl+L" in note for note in notes)
+
+
+async def test_help_keys_are_ascii_in_plain_theme() -> None:
+    app, _ = build_app(theme=PLAIN)
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "/help")
+        await pilot.pause()
+        notes = [str(note.render()) for note in app.query(NoteLine)]
+    assert "up/down" in "\n".join(notes)
+    for text in notes:
+        assert text.isascii(), f"non-ASCII help note in PLAIN theme: {text!r}"
+
+
 # --- task 8.4: the mouse, and its keyboard equivalent (spec 13.1) --------------------
 
 
@@ -1624,3 +1737,452 @@ async def test_an_unreadable_config_is_reported_not_raised(tmp_path: Path) -> No
         text = await lines_of(app, pilot)
         assert app.is_running
     assert text.startswith("  error: ")
+
+
+# --- completion ---------------------------------------------------------------------
+
+
+async def test_tab_completes_a_verb() -> None:
+    app, _ = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        prompt = app.query_one(Prompt)
+        prompt.focus()
+        prompt.value = "/ch"
+        prompt.cursor_position = 3
+        await pilot.press("tab")
+        assert prompt.value == "/check "
+        assert app.focused is prompt
+
+
+async def test_tab_cycles_through_the_allow_answers() -> None:
+    app, _ = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        prompt = app.query_one(Prompt)
+        prompt.focus()
+        prompt.value = "/allow "
+        prompt.cursor_position = 7
+        await pilot.press("tab")
+        assert prompt.value == "/allow once"
+        await pilot.press("tab")
+        assert prompt.value == "/allow always"
+        await pilot.press("tab")
+        await pilot.press("tab")
+        await pilot.press("tab")  # wraps
+        assert prompt.value == "/allow once"
+
+
+async def test_tab_offers_the_runs_that_can_be_cancelled() -> None:
+    app, schedulers = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "/check one.pdf")
+        await submit(pilot, "/check two.pdf")
+        scheduler = schedulers[0]
+        scheduler.move(scheduler.runs[0], "done")
+        await pilot.pause()
+        prompt = app.query_one(Prompt)
+        prompt.value = "/cancel "
+        prompt.cursor_position = 8
+        await pilot.press("tab")
+        assert prompt.value == "/cancel #2"
+
+
+async def test_tab_on_a_target_moves_focus_instead() -> None:
+    app, _ = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "/check one.pdf")
+        prompt = app.query_one(Prompt)
+        prompt.value = "paper.pdf"
+        await pilot.press("tab")
+        assert prompt.value == "paper.pdf"
+        assert app.focused is not prompt
+
+
+async def test_a_history_step_ends_the_completion_cycle() -> None:
+    app, _ = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "/check one.pdf")
+        prompt = app.query_one(Prompt)
+        prompt.value = "/allow "
+        prompt.cursor_position = 7
+        await pilot.press("tab")
+        assert prompt.value == "/allow once"
+        await pilot.press("up")
+        assert prompt.value == "/check one.pdf"
+        await pilot.press("tab")  # a fresh cycle over the recalled line: nothing to complete
+        assert prompt.value == "/check one.pdf"
+
+
+async def test_an_edit_ends_the_completion_cycle() -> None:
+    app, _ = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        prompt = app.query_one(Prompt)
+        prompt.focus()
+        prompt.value = "/allow "
+        prompt.cursor_position = 7
+        await pilot.press("tab")
+        assert prompt.value == "/allow once"
+        await pilot.press("backspace")
+        await pilot.press("tab")  # fresh cycle from "/allow onc": the first match again
+        assert prompt.value == "/allow once"
+
+
+async def test_tab_on_a_slash_line_with_nothing_to_complete_keeps_focus() -> None:
+    app, _ = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "/check one.pdf")
+        prompt = app.query_one(Prompt)
+        prompt.focus()
+        prompt.value = "/check paper.pdf"
+        prompt.cursor_position = len(prompt.value)
+        await pilot.press("tab")
+        assert prompt.value == "/check paper.pdf"
+        assert app.focused is prompt
+
+
+# --- the log from the keyboard ------------------------------------------------------
+
+
+async def _tall_log(pilot: Any, app: ProofpathApp) -> None:
+    """Enough help lines to overflow 24 rows, so there is something to scroll."""
+    for _ in range(6):
+        await submit(pilot, "/help")
+    await pilot.pause()
+    assert app.query_one(RunLog).max_scroll_y > 0
+
+
+async def test_pageup_scrolls_the_log_without_leaving_the_bar() -> None:
+    app, _ = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        await _tall_log(pilot, app)
+        log = app.query_one(RunLog)
+        at_end = log.scroll_y
+        await pilot.press("pageup")
+        await pilot.pause()
+        assert log.scroll_y < at_end
+        assert app.focused is app.query_one(Prompt)
+        after_pageup = log.scroll_y
+        await pilot.press("pagedown")
+        await pilot.pause()
+        assert log.scroll_y > after_pageup
+        await pilot.press("ctrl+end")
+        await pilot.pause()
+        assert log.scroll_y == at_end
+        await pilot.press("ctrl+home")
+        await pilot.pause()
+        assert log.scroll_y == 0
+        await pilot.press("shift+down")
+        await pilot.pause()
+        assert log.scroll_y == 1
+        await pilot.press("shift+up")
+        await pilot.pause()
+        assert log.scroll_y == 0
+
+
+async def test_up_and_down_walk_the_lines() -> None:
+    app, schedulers = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "/check one.pdf")
+        scheduler = schedulers[0]
+        run = scheduler.runs[0]
+        scheduler.move(run, "running")
+        scheduler.push(run, StageStart("Parse", "pymupdf"))
+        scheduler.push(run, StageEnd("Parse", "pymupdf", "24 pages, 42 refs", 1.2))
+        scheduler.push(run, StageStart("Resolve references", "Crossref, OpenAlex"))
+        await pilot.pause()
+        header = app.query_one(RunHeader)
+        header.focus()
+        await pilot.press("down")
+        assert isinstance(app.focused, StageLine)
+        assert app.focused.stage == "Parse"
+        await pilot.press("down")
+        assert isinstance(app.focused, StageLine)
+        assert app.focused.stage == "Resolve references"
+        await pilot.press("down")  # last line: stays
+        assert isinstance(app.focused, StageLine)
+        assert app.focused.stage == "Resolve references"
+        await pilot.press("up")
+        await pilot.press("up")
+        assert app.focused is header
+        await pilot.press("up")  # first line: stays
+        assert app.focused is header
+
+
+async def test_a_collapsed_block_is_skipped_by_the_walk() -> None:
+    app, schedulers = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "/check one.pdf")
+        await submit(pilot, "/check two.pdf")
+        scheduler = schedulers[0]
+        for run in scheduler.runs:
+            scheduler.move(run, "running")
+            scheduler.push(run, StageStart("Parse", "pymupdf"))
+        await pilot.pause()
+        first, second = app.query(RunHeader)
+        first.focus()
+        await pilot.press("enter")  # collapse the first block
+        await pilot.press("down")
+        assert app.focused is second
+
+
+async def test_typing_on_a_line_goes_to_the_bar() -> None:
+    app, _ = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "/check one.pdf")
+        await pilot.pause()
+        app.query_one(RunHeader).focus()
+        await pilot.press("slash")
+        prompt = app.query_one(Prompt)
+        assert app.focused is prompt
+        assert prompt.value == "/"
+        await pilot.press("h")
+        assert prompt.value == "/h"
+
+
+async def test_typing_on_a_line_keeps_the_bar_draft() -> None:
+    app, _ = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "/check one.pdf")
+        await pilot.pause()
+        prompt = app.query_one(Prompt)
+        prompt.value = "check pa"
+        prompt.cursor_position = len(prompt.value)
+        app.query_one(RunHeader).focus()
+        await pilot.pause()
+        await pilot.press("p")
+        assert app.focused is prompt
+        assert prompt.value == "check pap"
+
+
+# --- clearing and copying -----------------------------------------------------------
+
+
+async def test_ctrl_l_drops_finished_blocks_and_keeps_live_ones() -> None:
+    app, schedulers = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "/help")
+        await submit(pilot, "/check one.pdf")
+        await submit(pilot, "/check two.pdf")
+        scheduler = schedulers[0]
+        scheduler.move(scheduler.runs[0], "done")
+        scheduler.move(scheduler.runs[1], "running")
+        await pilot.pause()
+        assert len(app.query(RunBlock)) == 2
+        assert app.query(NoteLine)
+        await pilot.press("ctrl+l")
+        await pilot.pause()
+        blocks = list(app.query(RunBlock))
+        assert [block.run.id for block in blocks] == [2]
+        assert not app.query(NoteLine)
+        # The scheduler still knows the cleared run: /cancel and /summarize see it.
+        assert scheduler.get(1) is not None
+
+
+async def test_ctrl_l_keeps_a_running_blocks_own_notes() -> None:
+    """A block's stage notes belong to the block, not to the log: they stay with it."""
+    app, schedulers = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "/check one.pdf")
+        scheduler = schedulers[0]
+        run = scheduler.runs[0]
+        scheduler.move(run, "running")
+        scheduler.push(run, StageStart("Parse", "pymupdf"))
+        scheduler.push(run, Note("still parsing"))
+        await pilot.pause()
+        inside = len(app.query_one(RunBlock).query(NoteLine))
+        assert inside >= 1
+        await pilot.press("ctrl+l")
+        await pilot.pause()
+        assert len(app.query_one(RunBlock).query(NoteLine)) == inside
+
+
+async def test_ctrl_l_keeps_the_footer() -> None:
+    app, schedulers = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "/check one.pdf")
+        scheduler = schedulers[0]
+        scheduler.move(scheduler.runs[0], "done", report=a_report())
+        await pilot.pause()
+        before = app.query_one(CoverageFooter).render().plain
+        assert "no run yet" not in before
+        await pilot.press("ctrl+l")
+        await pilot.pause()
+        assert app.query_one(CoverageFooter).render().plain == before
+
+
+async def test_summarize_after_ctrl_l_says_the_run_was_cleared() -> None:
+    app, schedulers = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "/check one.pdf")
+        scheduler = schedulers[0]
+        scheduler.move(scheduler.runs[0], "done", report=a_report())
+        await pilot.pause()
+        await pilot.press("ctrl+l")
+        await pilot.pause()
+        await submit(pilot, "/summarize")
+        notes = _notes(app)
+        assert CLEARED_NOT_SUMMARIZABLE in notes
+        assert "finish a /check first" not in notes
+
+
+async def test_a_late_event_for_a_cleared_run_is_noted_not_crashed() -> None:
+    app, schedulers = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "/check one.pdf")
+        scheduler = schedulers[0]
+        run = scheduler.runs[0]
+        scheduler.move(run, "done", report=a_report())
+        await pilot.pause()
+        await pilot.press("ctrl+l")
+        await pilot.pause()
+        assert not app.query(RunBlock)
+        # A worker's last words arriving after the clear: the run is finished, so
+        # they must not raise a block from the dead, and they must not be lost either.
+        scheduler.push(run, Note("late words"))
+        scheduler.move(run, "done", report=a_report())
+        await pilot.pause()
+        assert not app.query(RunBlock)
+        assert "#1" in _notes(app)
+
+
+async def test_ctrl_c_with_a_selection_copies_instead_of_quitting() -> None:
+    app, schedulers = build_app()
+    copied: list[str] = []
+    app.copy_to_clipboard = copied.append  # type: ignore[method-assign]
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "/help")
+        await pilot.pause()
+        line = app.query(NoteLine).first()
+        # Textual 8 has no public way to select programmatically; the private helper
+        # is what its own mouse handling calls, so it is the closest thing to a drag.
+        app.screen._select_all_in_widget(line)
+        await pilot.pause()
+        assert app.screen.get_selected_text() is not None
+        await pilot.press("ctrl+c")
+        await pilot.pause()
+        assert copied and "/check" in copied[0]
+        assert app.is_running
+    assert not schedulers[0].closed
+
+
+async def test_ctrl_c_without_a_selection_quits() -> None:
+    app, schedulers = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        await pilot.press("ctrl+c")
+        await pilot.pause()
+    assert schedulers[0].closed
+
+
+async def test_ctrl_d_quits_even_with_a_selection() -> None:
+    app, schedulers = build_app()
+    copied: list[str] = []
+    app.copy_to_clipboard = copied.append  # type: ignore[method-assign]
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "/help")
+        await pilot.pause()
+        app.screen._select_all_in_widget(app.query(NoteLine).first())
+        await pilot.pause()
+        await pilot.press("ctrl+d")
+        await pilot.pause()
+    assert schedulers[0].closed
+    assert copied == []
+
+
+# --- final review: cross-task interactions the per-task reviews could not see ---------
+
+
+async def test_ctrl_c_quits_after_ctrl_l_removed_the_selected_widget() -> None:
+    """A selection on a widget ``ctrl+l`` removed is dead, and dead is not a selection.
+
+    Textual keeps the removed widget in ``screen.selections``, so
+    ``get_selected_text`` comes back ``""`` rather than ``None``: without the fix
+    ``ctrl+c`` copies nothing, forever, and never quits.
+    """
+    app, schedulers = build_app()
+    copied: list[str] = []
+    app.copy_to_clipboard = copied.append  # type: ignore[method-assign]
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "/help")
+        await pilot.pause()
+        line = app.query(NoteLine).first()
+        # Textual 8 has no public way to select programmatically; the private helper
+        # is what its own mouse handling calls, so it is the closest thing to a drag.
+        app.screen._select_all_in_widget(line)
+        await pilot.pause()
+        await pilot.press("ctrl+l")
+        await pilot.pause()
+        assert not app.query(NoteLine)
+        await pilot.press("ctrl+c")
+        await pilot.pause()
+    assert copied == []
+    assert schedulers[0].closed
+
+
+class GatedJudge(FakeJudge):
+    """A judge whose one call waits for the test to let it answer."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.release = threading.Event()
+
+    def summarize(self, report_markdown: str, *, max_tokens: int = 1500) -> str:
+        self.release.wait(5)
+        return super().summarize(report_markdown, max_tokens=max_tokens)
+
+
+async def test_a_summary_in_flight_when_ctrl_l_fires_is_noted_not_lost() -> None:
+    """The paragraph was paid for; a block that left the screen must not swallow it."""
+    judge = GatedJudge()
+    app, schedulers = build_app(judge_factory=lambda: judge)
+    async with app.run_test(size=SIZE) as pilot:
+        run = await finished_run(pilot, schedulers[0])
+        await submit(pilot, "/summarize")
+        await pilot.pause()
+        await pilot.press("ctrl+l")
+        await pilot.pause()
+        assert not app.query(RunBlock)
+        judge.release.set()
+        await until(pilot, lambda: judge.closed, "the summary worker")
+        await pilot.pause()
+        notes = _notes(app)
+        assert f"#{run.id} summary:" in notes
+        assert FakeJudge.PARAGRAPH in notes
+        assert app.is_running
+
+
+async def test_escape_clears_a_selection() -> None:
+    app, _ = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "/help")
+        await pilot.pause()
+        app.screen._select_all_in_widget(app.query(NoteLine).first())
+        await pilot.pause()
+        assert app.screen.get_selected_text() is not None
+        await pilot.press("escape")
+        await pilot.pause()
+        assert app.screen.get_selected_text() is None
+
+
+async def test_ctrl_c_copies_a_selection_inside_the_bar() -> None:
+    """``Input`` keeps its own selection (Shift+Home and friends); it is copied, not quit over."""
+    app, schedulers = build_app()
+    copied: list[str] = []
+    app.copy_to_clipboard = copied.append  # type: ignore[method-assign]
+    async with app.run_test(size=SIZE) as pilot:
+        prompt = app.query_one(Prompt)
+        prompt.value = "/check paper.pdf"
+        prompt.selection = InputSelection(0, len(prompt.value))
+        await pilot.pause()
+        await pilot.press("ctrl+c")
+        await pilot.pause()
+        assert copied == ["/check paper.pdf"]
+        assert app.is_running
+    assert not schedulers[0].closed
+
+
+async def test_an_unknown_verb_note_is_ascii_in_plain_theme() -> None:
+    app, _ = build_app(theme=PLAIN)
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "/Check draft.md")
+        notes = _notes(app)
+    assert "/Check" in notes
+    assert notes.isascii(), f"non-ASCII note in PLAIN theme: {notes!r}"

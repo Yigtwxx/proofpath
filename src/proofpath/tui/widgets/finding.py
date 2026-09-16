@@ -8,7 +8,7 @@ from rich.text import Text
 from textual import events as tevents
 from textual.binding import Binding, BindingType
 from textual.geometry import Size
-from textual.widgets import Static
+from textual.widgets import Input, Static
 
 from proofpath import ui
 from proofpath.report import Finding
@@ -129,6 +129,10 @@ class Line(Static):
         # and shadowing it would break every binding that uses the real one.
         Binding("enter", "expand", "expand or collapse"),
         Binding("c", "copy", "copy"),
+        # Design section 2.4: the arrows walk the log's lines the way they walk the
+        # bar's history; ``shift`` with them scrolls, and that pair is the app's.
+        Binding("up", "neighbour(-1)", "previous line", show=False),
+        Binding("down", "neighbour(1)", "next line", show=False),
     ]
 
     #: Whether the line's detail is showing. What "detail" means is the subclass's.
@@ -167,6 +171,40 @@ class Line(Static):
     def copyable(self) -> str:
         """What ``c`` and the copy glyph put on the clipboard."""
         return ""
+
+    def action_neighbour(self, step: int) -> None:
+        """Focus the previous (``-1``) or next (``1``) displayed line; the ends stay put.
+
+        The screen's focus chain already skips everything inside a collapsed block
+        (``display: none``), so a folded run is one line to step over, not many.
+        """
+        lines = [w for w in self.screen.focus_chain if isinstance(w, Line)]
+        try:
+            index = lines.index(self)
+        except ValueError:  # pragma: no cover - a line that is not displayed has no focus
+            return
+        target = index + step
+        if 0 <= target < len(lines):
+            lines[target].focus()
+
+    def on_key(self, event: tevents.Key) -> None:
+        """A printable key on a line is typing, and typing belongs to the bar.
+
+        ``c`` is the one exception: it is this line's copy (spec section 13.1). The
+        key is stopped here and posted to the bar afresh rather than inserted: an
+        unstopped key bubbles up to the screen and then to the app's own bindings,
+        where it would be checked against the bar's after focus has already moved.
+        Focused on the screen directly -- ``Widget.focus`` defers, and the key would
+        overtake the ``Focus`` -- and posted after it, the key is typed the way the
+        bar types every other one.
+        """
+        if not event.is_printable or event.character is None or event.key == "c":
+            return
+        event.stop()
+        event.prevent_default()
+        prompt = self.screen.query_one("#prompt", Input)
+        self.screen.set_focus(prompt)
+        prompt.post_message(tevents.Key(event.key, event.character))
 
 
 class FindingsRule(Static):

@@ -13,6 +13,7 @@ parser has no idea which permission is being answered and should not guess.
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
 
 VERBS = (
@@ -111,6 +112,31 @@ def parse(line: str) -> Parsed:
         if not arg:
             return Awaiting(verb, NEEDS_ARGUMENT[verb])
     return Command(verb, arg)
+
+
+def complete(text: str, *, run_ids: Iterable[int] = ()) -> list[str]:
+    """Every line ``text`` could be finished into, in order; empty when there is none.
+
+    Only slash commands complete. A verb is finished with a space when it takes an
+    argument, so the next keystroke is already the argument; ``/allow`` offers its
+    four answers and ``/cancel`` the runs that can still be cancelled. A target is
+    never completed: the OS has better file pickers than a bar could.
+    """
+    if not text.startswith("/"):
+        return []
+    body = text[1:]
+    if " " not in body:
+        return [
+            f"/{verb} " if verb in NEEDS_ARGUMENT else f"/{verb}"
+            for verb in VERBS
+            if verb.startswith(body)
+        ]
+    verb, _, partial = body.partition(" ")
+    if verb == "allow":
+        return [f"/allow {answer}" for answer in ALLOW_ANSWERS if answer.startswith(partial)]
+    if verb == "cancel":
+        return [f"/cancel #{run_id}" for run_id in run_ids if f"#{run_id}".startswith(partial)]
+    return []
 
 
 def _split_verb(body: str) -> tuple[str, str]:

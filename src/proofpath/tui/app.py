@@ -52,8 +52,9 @@ from proofpath.events import Event
 from proofpath.judge import Judge, JudgeClient, JudgeError, resolve_api_key
 from proofpath.report import Report, render_markdown, summary_silence
 from proofpath.tui import commands, pet
+from proofpath.tui.history import History
+from proofpath.tui.runs import TERMINAL, Run, Scheduler
 from proofpath.tui.runs import EngineFactory as RunsEngineFactory
-from proofpath.tui.runs import Run, Scheduler
 from proofpath.tui.theme import PLAIN, Theme, detect
 from proofpath.tui.verbs import error_line, verb_lines
 from proofpath.tui.widgets import (
@@ -91,12 +92,35 @@ NO_JUDGE_NOTE = "configure a judge first (`/config set judge.provider ...`, key 
 #: What ``/summarize`` says before anything has finished. A run still going, or one
 #: that stopped early, has no finished report to summarise (product rule 2).
 NOTHING_TO_SUMMARIZE = "nothing to summarize yet: finish a /check first"
+#: What ``/summarize`` says when the last finished run's block was removed by
+#: ``ctrl+l``. The run *did* finish -- its report is still on the ``Run`` and its
+#: coverage is still on the footer -- so ``NOTHING_TO_SUMMARIZE``'s "finish a /check
+#: first" would contradict what the footer is still showing.
+CLEARED_NOT_SUMMARIZABLE = "nothing to summarize: the last finished run was cleared (ctrl+l)"
 #: What a second ``/summarize`` over the same run says. One run gets one paragraph
 #: (spec section 11.1), and a second line would read as a second opinion about a
 #: report that has not changed -- besides costing another call nobody asked for.
 ALREADY_SUMMARISED = "already summarised: this run has its one model-written summary"
 #: The same, while the first call is still out.
 SUMMARY_IN_PROGRESS = "summary in progress: one call is already out for this run"
+
+
+def key_help(arrows: str, shift_arrows: str, sep: str) -> tuple[str, str]:
+    """The key reference ``/help`` prints after the verbs (design section 2.7).
+
+    ``arrows`` and ``shift_arrows`` are the theme's spelling of "up" and "down" --
+    ``"↑ ↓"``/``"↑↓"`` in RICH, ``"up/down"`` in PLAIN, which must stay ASCII-only --
+    and ``sep`` is the theme's own separator glyph (``self._theme.glyphs.sep``, ``·``
+    in RICH and ``,`` in PLAIN), so the two lines are built entirely from theme
+    values rather than a hardcoded glyph that would break PLAIN's ASCII-only rule.
+    """
+    return (
+        f"{arrows} history{sep}Tab completes /verbs{sep}"
+        f"PageUp/PageDown Shift+{shift_arrows} scroll the log",
+        f"Tab into the log: {arrows} walk lines, Enter opens, c copies{sep}"
+        "Ctrl+L clears finished runs",
+    )
+
 
 #: Which verbs hold the bar is the parser's decision, not this module's; it is
 #: re-exported here because the app is where the mode is entered and left.
@@ -195,8 +219,21 @@ class ProofpathApp(App[None]):
 
     BINDINGS: ClassVar[list[BindingType]] = [
         Binding("escape", "leave_awaiting", "cancel awaiting", priority=True),
-        Binding("ctrl+c", "quit_app", "quit", priority=True),
-        Binding("ctrl+d", "quit_app", "quit", priority=True),
+        # ``ctrl+c`` is what a terminal means by "copy" once something is selected
+        # (design section 2.6), so it copies when there is a selection and quits
+        # otherwise. ``ctrl+d`` goes straight to ``quit`` and never copies.
+        Binding("ctrl+c,super+c", "quit_app", "copy or quit", priority=True),
+        Binding("ctrl+d", "quit", "quit", priority=True),
+        Binding("ctrl+l", "clear_log", "clear finished runs", show=False, priority=True),
+        # The log from the bar (design section 2.3): the bar keeps ``up``, ``down``,
+        # ``home`` and ``end`` for itself; these reach past it whatever has focus
+        # and never move focus, so a page up is a look, not a departure.
+        Binding("pageup", "scroll_log('page_up')", "log page up", show=False, priority=True),
+        Binding("pagedown", "scroll_log('page_down')", "log page down", show=False, priority=True),
+        Binding("shift+up", "scroll_log('up')", "log up", show=False, priority=True),
+        Binding("shift+down", "scroll_log('down')", "log down", show=False, priority=True),
+        Binding("ctrl+home", "scroll_log('home')", "log top", show=False, priority=True),
+        Binding("ctrl+end", "scroll_log('end')", "log bottom", show=False, priority=True),
     ]
 
     def __init__(
@@ -208,6 +245,7 @@ class ProofpathApp(App[None]):
         scheduler_factory: SchedulerFactory | None = None,
         judge_factory: JudgeFactory | None = None,
         theme: Theme = PLAIN,
+        history: History | None = None,
     ) -> None:
         super().__init__()
         # The terminal's own colours, not Textual's grey: ``ansi-dark`` paints every
@@ -219,6 +257,9 @@ class ProofpathApp(App[None]):
         #: The look, fixed for the session. ``PLAIN`` unless told otherwise: ``run()``
         #: detects the terminal's; a test says which one it is testing.
         self._theme = theme
+        #: The bar's command history. A test hands one in on a temp path; the real
+        #: app reads and writes the state dir (design section 2.1).
+        self._history = history if history is not None else History()
         self._engine_factory = engine_factory or self._default_engine
         self._scheduler_factory: SchedulerFactory = scheduler_factory or Scheduler
         self._judge_factory: JudgeFactory = judge_factory or self._default_judge
@@ -397,13 +438,19 @@ class ProofpathApp(App[None]):
             yield CoverageFooter(self._out, self._theme)
             with Horizontal(id="prompt-row"):
                 yield Static(self._theme.glyphs.prompt, id="caret")
-                yield Prompt(placeholder=DEFAULT_PLACEHOLDER, id="prompt")
+                yield Prompt(
+                    placeholder=DEFAULT_PLACEHOLDER,
+                    id="prompt",
+                    history=self._history,
+                    complete=self._completions,
+                )
         yield RunLog(id="log")
 
     def on_mount(self) -> None:
         self._scheduler = self._scheduler_factory(
             self._engine_factory, on_event=self._on_event, on_state=self._on_state
         )
+        self._history.load()
         self._accent_prompt(0)
         self.query_one(Prompt).focus()
 
@@ -456,13 +503,22 @@ class ProofpathApp(App[None]):
 
     def _on_state(self, run: Run) -> None:
         block = self._blocks.get(run.id)
+        if block is None and run.state in TERMINAL:
+            # A run is announced as ``queued`` before anything else, so a finished
+            # run without a block is one ``ctrl+l`` cleared. It is not raised from
+            # the dead, and the footer is left alone: it already showed this report
+            # when the run finished, and a newer run may have finished since.
+            self._settle_prompt(run.id, "no")
+            self._note(f"#{run.id} {run.command}: {run.state}")
+            self._watch_eyes(run)
+            return
         if block is None:
             block = RunBlock(run, self._out, self._theme)
             self._blocks[run.id] = block
             self.query_one(RunLog).mount(block)
             self._accent_prompt(run.id - 1)
         block.refresh_state()
-        if run.state in ("done", "cancelled", "failed"):
+        if run.state in TERMINAL:
             # A run that ends while its question is still up would strand the worker
             # thread on ``future.result()``: the safe answer is the one that installs
             # nothing (rule 5).
@@ -487,11 +543,53 @@ class ProofpathApp(App[None]):
     def _scroll_log(self) -> None:
         self.query_one(RunLog).scroll_end(animate=False)
 
+    def action_scroll_log(self, direction: str) -> None:
+        """Move the log without moving focus. ``direction`` names a ``Widget.scroll_*``."""
+        log = self.query_one(RunLog)
+        move = {
+            "page_up": log.scroll_page_up,
+            "page_down": log.scroll_page_down,
+            "up": log.scroll_up,
+            "down": log.scroll_down,
+            "home": log.scroll_home,
+            "end": log.scroll_end,
+        }[direction]
+        move(animate=False)
+
+    def action_clear_log(self) -> None:
+        """Drop every finished block; keep the ones still streaming, and the footer.
+
+        A running block would only reappear headless at its next event, so it stays.
+        Nothing is forgotten: the scheduler still holds every run, so ``/cancel #n``
+        and ``/summarize`` are unaffected (design section 2.5). The footer is the
+        latest finished run's coverage and rule 6 says it does not go away.
+        """
+        for run_block in list(self.query(RunBlock)):
+            if run_block.run.state in TERMINAL:
+                # Out of ``_blocks`` too, so a late word from that run's thread is
+                # noted in the log rather than written into a widget that is gone.
+                self._blocks.pop(run_block.run.id, None)
+                run_block.remove()
+        for command_block in list(self.query(CommandBlock)):
+            # ``_command_blocks`` holds a mirrored verb only while its worker is out.
+            if command_block not in self._command_blocks.values():
+                command_block.remove()
+        for note in list(self.query(NoteLine)):
+            # A block's own notes (stage lines, a summary) have the block as parent
+            # and go with it; only the loose ones are the log's to clear.
+            if isinstance(note.parent, RunLog):
+                note.remove()
+        # A selection on a widget that just left the screen would otherwise stay in
+        # ``screen.selections`` and read back as ``""``: not ``None``, so ``ctrl+c``
+        # would copy nothing and never quit.
+        self.screen.clear_selection()
+
     # --- the command line -------------------------------------------------------------
 
     async def on_input_submitted(self, event: Input.Submitted) -> None:
         line = event.value
         event.input.value = ""
+        self._history.add(line)
         await self._run_line(line)
 
     async def _run_line(self, line: str) -> None:
@@ -512,7 +610,8 @@ class ProofpathApp(App[None]):
             self._enter_awaiting(parsed)
         elif isinstance(parsed, commands.Unknown):
             if parsed.verb:
-                self._note(f"unknown command: /{parsed.verb} · try /help")
+                sep = self._theme.glyphs.sep
+                self._note(f"unknown command: /{parsed.verb} {sep} try /help")
         else:
             await self._dispatch(parsed)
 
@@ -587,9 +686,12 @@ class ProofpathApp(App[None]):
         a verdict, because every verdict was settled before it was asked.
         """
         run = self._scheduler.last_done() if self._scheduler is not None else None
-        block = self._blocks.get(run.id) if run is not None else None
-        if run is None or run.report is None or block is None:
+        if run is None or run.report is None:
             self._note(NOTHING_TO_SUMMARIZE)
+            return
+        block = self._blocks.get(run.id)
+        if block is None:
+            self._note(CLEARED_NOT_SUMMARIZABLE)
             return
         if run.id in self._summarising:
             self._note(SUMMARY_IN_PROGRESS)
@@ -636,7 +738,14 @@ class ProofpathApp(App[None]):
             # run prints (spec 13.3). It counts no calls: one request was made, and
             # ``cost.calls`` counts answers.
             line = ui.kv_text(self._out, "summary", summary_silence(detail))
-        block.add_summary(line)
+        if self._blocks.get(run_id) is not block:
+            # ``ctrl+l`` took the block off the screen while the call was out. The
+            # paragraph was paid for, so it is said in the log rather than mounted
+            # into a widget that is gone -- and ``summarised`` is not set on it,
+            # since a cleared run cannot be summarised again anyway.
+            self._note(f"#{run_id} summary: {line.plain}", dim=False)
+        else:
+            block.add_summary(line)
         self._scroll_log()
 
     def _allow(self, arg: str) -> None:
@@ -680,12 +789,24 @@ class ProofpathApp(App[None]):
         if not self._scheduler.cancel(run_id):
             self._note(f"run #{run_id} is not running")
 
+    def _completions(self, text: str) -> list[str]:
+        """What ``Tab`` may finish ``text`` into. Only the app knows which runs are live."""
+        runs = self._scheduler.runs if self._scheduler is not None else ()
+        live = tuple(run.id for run in runs if run.state not in TERMINAL)
+        return commands.complete(text, run_ids=live)
+
     def _help(self) -> None:
-        """Every verb with what it wants, so the list is also the syntax."""
+        """Every verb with what it wants, so the list is also the syntax; then the keys."""
         for verb in commands.VERBS:
             placeholder = commands.NEEDS_ARGUMENT.get(verb, "")
             self._note(f"/{verb} {placeholder}".rstrip(), dim=False)
         self._note("a line that is not a command is checked as a target")
+        rich = self._theme.name == "rich"
+        arrows = "↑ ↓" if rich else "up/down"
+        shift_arrows = "↑↓" if rich else "up/down"
+        sep = f" {self._theme.glyphs.sep} "
+        for line in key_help(arrows, shift_arrows, sep):
+            self._note(line)
 
     def _note(self, text: str, *, dim: bool = True) -> None:
         self.query_one(RunLog).mount(NoteLine(text, self._theme, dim=dim))
@@ -713,7 +834,10 @@ class ProofpathApp(App[None]):
         self.awaiting = awaiting.verb
         prompt = self.query_one(Prompt)
         prompt.placeholder = awaiting.placeholder
-        prompt.tint(self._theme.accent(len(self._blocks)))
+        # The accent the next run will wear: counted off the scheduler, not the
+        # blocks on screen, because ``ctrl+l`` takes finished blocks off the screen.
+        runs = self._scheduler.runs if self._scheduler is not None else ()
+        prompt.tint(self._theme.accent(len(runs)))
 
     def _leave_awaiting(self) -> None:
         if self.awaiting is None:
@@ -725,6 +849,10 @@ class ProofpathApp(App[None]):
 
     def action_leave_awaiting(self) -> None:
         self._leave_awaiting()
+        # The app's priority ``escape`` shadows the screen's own ``_key_escape``,
+        # which is where Textual drops a mouse selection; without this a selection
+        # could only be cleared with the mouse.
+        self.screen.clear_selection()
 
     async def action_quit(self) -> None:
         """Textual's own quit action, overridden so no route skips the close.
@@ -737,6 +865,25 @@ class ProofpathApp(App[None]):
         await self._quit()
 
     async def action_quit_app(self) -> None:
+        """``ctrl+c``: copy the selection when there is one, quit when there is none.
+
+        Textual's own ``ctrl+c -> copy_text`` lives on the screen and the app's
+        priority binding shadows it; this puts the copy back in front of the quit
+        (design section 2.6). ``ctrl+d`` is bound to ``quit`` directly, so a
+        selection never keeps it from leaving.
+        """
+        bar = self.query_one(Prompt)
+        if bar.selected_text:
+            # ``Input`` keeps a selection of its own (Shift+Home and friends) that the
+            # screen knows nothing about, and this binding shadows the bar's copy.
+            self.copy_to_clipboard(bar.selected_text)
+            return
+        selected = self.screen.get_selected_text()
+        if selected:
+            # Truthy, not ``is not None``: a selection left on a widget that has
+            # since been removed reads back as ``""`` and is no selection at all.
+            self.copy_to_clipboard(selected)
+            return
         await self.action_quit()
 
     async def _quit(self) -> None:

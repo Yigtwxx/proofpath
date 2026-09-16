@@ -6,6 +6,19 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-09-16
+
+The TUI gets a shell's reflexes, and sits on the terminal's own background.
+
+### Added
+- **The TUI bar behaves like a shell prompt.** `↑`/`↓` walk a command history kept
+  across sessions (`state_dir()/history`, 500 lines); `Tab` completes `/verbs`,
+  `/allow` answers and `/cancel #n`; `PageUp`/`PageDown`, `Shift+↑`/`↓` and
+  `Ctrl+Home`/`End` scroll the log without leaving the bar; `↑`/`↓` on a focused log
+  line step between lines and typing returns to the bar; `Ctrl+L` clears finished
+  runs and keeps the coverage footer; a mouse selection is copied by `Ctrl+C`/`⌘C`
+  instead of quitting. `/help` lists the keys.
+
 ### Fixed
 - The TUI **sits on the terminal's own background** instead of Textual's grey: every
   surface is `ansi_default` and palette names reach the terminal untranslated, so the app

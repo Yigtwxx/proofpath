@@ -2,14 +2,20 @@
 
 from __future__ import annotations
 
+from collections import deque
+from collections.abc import Callable
+from typing import ClassVar
+
 from rich.text import Text
 from textual.app import ComposeResult
+from textual.binding import Binding, BindingType
 from textual.color import Color
 from textual.containers import Horizontal, Vertical
 from textual.widgets import Button, Input, Static
 
 from proofpath import ui
 from proofpath.browser import Answer, prompt_text
+from proofpath.tui.history import History
 from proofpath.tui.theme import Theme
 from proofpath.tui.widgets._shared import textual_colour
 
@@ -96,7 +102,109 @@ class PermissionPrompt(Vertical):
 
 
 class Prompt(Input):
-    """The input bar. Awaiting mode tints it with the next run's accent."""
+    """The input bar. Awaiting mode tints it with the next run's accent.
+
+    ``up`` and ``down`` walk the command history the way a shell does: the draft in
+    the bar when the walk starts comes back one step past the newest entry, and any
+    edit ends the walk. The app hands in the :class:`History` before the bar mounts.
+
+    ``tab`` completes a slash command the way a shell does too: one candidate lands
+    at once, several are cycled through on each further ``tab``, wrapping, and any
+    edit ends the cycle. The app hands in ``complete`` because only it knows which
+    runs are still live; the bar never decides what a line may become.
+    """
+
+    BINDINGS: ClassVar[list[BindingType]] = [
+        Binding("up", "history_previous", "previous command", show=False),
+        Binding("down", "history_next", "next command", show=False),
+        Binding("tab", "complete", "complete", show=False),
+    ]
+
+    def __init__(
+        self,
+        placeholder: str = "",
+        *,
+        id: str | None = None,  # noqa: A002 - Textual's own keyword, kept for callers
+        history: History | None = None,
+        complete: Callable[[str], list[str]] | None = None,
+    ) -> None:
+        # ``Input`` selects all its text on focus by default; a key handed over from a
+        # log line (``Line.on_key``) must insert at the cursor, not replace a draft,
+        # and a command bar keeps its cursor where it left it, the way a shell does.
+        super().__init__(placeholder=placeholder, id=id, select_on_focus=False)
+        self.history = history if history is not None else History()
+        self._complete: Callable[[str], list[str]] = complete or (lambda text: [])
+        #: The candidates of the cycle in progress and where the cycle is in them;
+        #: cleared by any edit that is not the cycle's own.
+        self._candidates: list[str] = []
+        self._candidate = 0
+        #: The lines the walk has put in the bar whose ``Changed`` has not arrived yet,
+        #: oldest first. A flag raised around the assignment would not do: ``Input``
+        #: *posts* ``Changed`` rather than calling the handler, so it arrives a tick
+        #: later, after any such flag has been lowered. Nor would the last line alone:
+        #: the app forwards keys without waiting, so a held ``up`` can be handled twice
+        #: before the first ``Changed`` is read, and the first would then look like an
+        #: edit of the second. Each ``Changed`` is matched against the line whose turn
+        #: it is; the queue is what tells the walk's own replacements from a keystroke.
+        self._pending: deque[str] = deque()
+
+    def action_history_previous(self) -> None:
+        line = self.history.previous(self.value)
+        if line is not None:
+            self._show(line)
+
+    def action_history_next(self) -> None:
+        line = self.history.next()
+        if line is not None:
+            self._show(line)
+
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        # ``tab`` is completion only inside a slash command; anywhere else it stays
+        # Textual's focus-next, which is how the keyboard reaches the log. Either
+        # falsy answer lets the key pass on: ``False`` disables the binding and hides
+        # it from the footer, ``None`` disables it but keeps it shown. This binding
+        # has ``show=False``, so the two behave the same; ``None`` is used because it
+        # is the one that reads as "off for now", and the binding comes back with
+        # the next ``/``.
+        if action == "complete" and not self.value.startswith("/"):
+            return None
+        return True
+
+    def action_complete(self) -> None:
+        # A cycle is only good for the line it was built over. A history step goes
+        # through ``_show`` too, so ``on_input_changed`` never sees it as an edit and
+        # never clears ``_candidates`` — without this check, a stale cycle from before
+        # the step would overwrite whatever the step just put in the bar. So the cycle
+        # is stale, and rebuilt, whenever the bar no longer holds the candidate it last
+        # showed, for any reason, not just an edit.
+        if not self._candidates or self.value != self._candidates[self._candidate]:
+            self._candidates = self._complete(self.value)
+            self._candidate = 0
+            if not self._candidates:
+                return
+        else:
+            self._candidate = (self._candidate + 1) % len(self._candidates)
+        # Through ``_show`` like a history step: the replacement is the bar's own, so
+        # its ``Changed`` is matched off the queue instead of ending the cycle.
+        self._show(self._candidates[self._candidate])
+
+    def _show(self, line: str) -> None:
+        # A reactive posts no ``Changed`` for an equal assignment, so only a line that
+        # actually replaces the bar's value has a ``Changed`` to wait for.
+        if line != self.value:
+            self._pending.append(line)
+            self.value = line
+        self.cursor_position = len(line)
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        # Typing, deleting or pasting ends the walk and the cycle; the bar's own
+        # replacements (a history step, a completion) do not.
+        if self._pending and event.value == self._pending[0]:
+            self._pending.popleft()
+            return
+        self._pending.clear()
+        self.history.reset()
+        self._candidates = []
 
     def tint(self, accent: str) -> None:
         base = textual_colour(accent)
