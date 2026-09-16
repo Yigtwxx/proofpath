@@ -291,9 +291,7 @@ class History:
     def _save(self) -> None:
         try:
             self._path.parent.mkdir(parents=True, exist_ok=True)
-            self._path.write_text(
-                "".join(f"{line}\n" for line in self._entries), encoding="utf-8"
-            )
+            self._path.write_text("".join(f"{line}\n" for line in self._entries), encoding="utf-8")
         except OSError as exc:
             # The session keeps its in-memory history; only persistence is lost.
             logger.debug("could not write %s: %s", self._path, exc)
@@ -457,11 +455,9 @@ class Prompt(Input):
         if not self._walking:
             self.history.reset()
 
-    def tint(self, accent: str) -> None:
-        ...  # unchanged
+    def tint(self, accent: str) -> None: ...  # unchanged
 
-    def untint(self) -> None:
-        ...  # unchanged
+    def untint(self) -> None: ...  # unchanged
 ```
 
 (Keep the existing bodies of `tint` and `untint`; the `...` above marks them unchanged.) If `Input.__init__`'s signature makes the `*args: object` typing awkward under ruff/mypy, spell the parameters the app actually uses instead: `def __init__(self, placeholder: str = "", *, id: str | None = None, history: History | None = None) -> None: super().__init__(placeholder=placeholder, id=id)`.
@@ -531,7 +527,14 @@ In `tests/test_commands.py` (check its imports; it already imports `commands` fr
     [
         ("/ch", (), ["/check "]),
         ("/c", (), ["/check ", "/config ", "/cache ", "/cancel "]),
-        ("/", (), [f"/{verb} " if verb in commands.NEEDS_ARGUMENT else f"/{verb}" for verb in commands.VERBS]),
+        (
+            "/",
+            (),
+            [
+                f"/{verb} " if verb in commands.NEEDS_ARGUMENT else f"/{verb}"
+                for verb in commands.VERBS
+            ],
+        ),
         ("/help", (), ["/help"]),
         ("/allow ", (), ["/allow once", "/allow always", "/allow no", "/allow never"]),
         ("/allow n", (), ["/allow no", "/allow never"]),
@@ -674,24 +677,25 @@ In `prompt.py`, add to the imports `from collections.abc import Callable`, and e
 Then:
 
 ```python
-    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
-        # ``tab`` is completion only inside a slash command; anywhere else it stays
-        # Textual's focus-next, which is how the keyboard reaches the log.
-        if action == "complete":
-            return self.value.startswith("/")
-        return True
+def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+    # ``tab`` is completion only inside a slash command; anywhere else it stays
+    # Textual's focus-next, which is how the keyboard reaches the log.
+    if action == "complete":
+        return self.value.startswith("/")
+    return True
 
-    def action_complete(self) -> None:
+
+def action_complete(self) -> None:
+    if not self._candidates:
+        self._candidates = self._complete(self.value)
+        self._candidate = 0
         if not self._candidates:
-            self._candidates = self._complete(self.value)
-            self._candidate = 0
-            if not self._candidates:
-                return
-        else:
-            self._candidate = (self._candidate + 1) % len(self._candidates)
-        candidates = self._candidates  # ``_show`` triggers ``Changed``, which clears them
-        self._show(candidates[self._candidate])
-        self._candidates = candidates
+            return
+    else:
+        self._candidate = (self._candidate + 1) % len(self._candidates)
+    candidates = self._candidates  # ``_show`` triggers ``Changed``, which clears them
+    self._show(candidates[self._candidate])
+    self._candidates = candidates
 ```
 
 and `on_input_changed` also clears the cycle:
@@ -710,12 +714,18 @@ and `on_input_changed` also clears the cycle:
 In `compose`: `yield Prompt(placeholder=DEFAULT_PLACEHOLDER, id="prompt", history=self._history, complete=self._completions)`. Add to the app, near `_help`:
 
 ```python
-    def _completions(self, text: str) -> list[str]:
-        """What ``Tab`` may finish ``text`` into. Only the app knows which runs are live."""
-        live = () if self._scheduler is None else tuple(
-            run.id for run in self._scheduler.runs if run.state not in ("done", "cancelled", "failed")
+def _completions(self, text: str) -> list[str]:
+    """What ``Tab`` may finish ``text`` into. Only the app knows which runs are live."""
+    live = (
+        ()
+        if self._scheduler is None
+        else tuple(
+            run.id
+            for run in self._scheduler.runs
+            if run.state not in ("done", "cancelled", "failed")
         )
-        return commands.complete(text, run_ids=live)
+    )
+    return commands.complete(text, run_ids=live)
 ```
 
 - [ ] **Step 6: Run the tests to verify they pass**
@@ -903,33 +913,34 @@ In `finding.py`, extend `Line`:
 ```
 
 ```python
-    def action_neighbour(self, step: int) -> None:
-        """Focus the previous (``-1``) or next (``1``) displayed line; the ends stay put.
+def action_neighbour(self, step: int) -> None:
+    """Focus the previous (``-1``) or next (``1``) displayed line; the ends stay put.
 
-        The screen's focus chain already skips everything inside a collapsed block
-        (``display: none``), so a folded run is one line to step over, not many.
-        """
-        lines = [w for w in self.screen.focus_chain if isinstance(w, Line)]
-        try:
-            index = lines.index(self)
-        except ValueError:  # pragma: no cover - a line that is not displayed has no focus
-            return
-        target = index + step
-        if 0 <= target < len(lines):
-            lines[target].focus()
+    The screen's focus chain already skips everything inside a collapsed block
+    (``display: none``), so a folded run is one line to step over, not many.
+    """
+    lines = [w for w in self.screen.focus_chain if isinstance(w, Line)]
+    try:
+        index = lines.index(self)
+    except ValueError:  # pragma: no cover - a line that is not displayed has no focus
+        return
+    target = index + step
+    if 0 <= target < len(lines):
+        lines[target].focus()
 
-    def on_key(self, event: tevents.Key) -> None:
-        """A printable key on a line is typing, and typing belongs to the bar.
 
-        ``c`` is the one exception: it is this line's copy (spec section 13.1).
-        """
-        if not event.is_printable or event.character is None or event.key == "c":
-            return
-        event.stop()
-        event.prevent_default()
-        prompt = self.screen.query_one("#prompt")
-        prompt.focus()
-        prompt.insert_text_at_cursor(event.character)  # type: ignore[attr-defined]
+def on_key(self, event: tevents.Key) -> None:
+    """A printable key on a line is typing, and typing belongs to the bar.
+
+    ``c`` is the one exception: it is this line's copy (spec section 13.1).
+    """
+    if not event.is_printable or event.character is None or event.key == "c":
+        return
+    event.stop()
+    event.prevent_default()
+    prompt = self.screen.query_one("#prompt")
+    prompt.focus()
+    prompt.insert_text_at_cursor(event.character)  # type: ignore[attr-defined]
 ```
 
 `#prompt` rather than importing `Prompt`: `prompt.py` already imports from `_shared`, and `finding.py` must not grow a cycle. If the `type: ignore` is unwelcome, `from textual.widgets import Input` and `query_one("#prompt", Input)` gives the typed handle.
@@ -1010,7 +1021,9 @@ async def test_ctrl_c_with_a_selection_copies_instead_of_quitting() -> None:
         await submit(pilot, "/help")
         await pilot.pause()
         line = app.query(NoteLine).first()
-        app.screen.select_all_in_widget(line) if hasattr(app.screen, "select_all_in_widget") else None
+        app.screen.select_all_in_widget(line) if hasattr(
+            app.screen, "select_all_in_widget"
+        ) else None
         await pilot.pause()
         if app.screen.get_selected_text() is None:
             pytest.skip("this Textual has no programmatic selection to test with")
@@ -1040,41 +1053,42 @@ Expected: `ctrl_l` tests fail (blocks still there); `without_a_selection_quits` 
 In `app.py` `BINDINGS`, replace the `ctrl+c` line and add `ctrl+l`:
 
 ```python
-        Binding("ctrl+c,super+c", "quit_app", "copy or quit", priority=True),
-        Binding("ctrl+d", "quit_app", "quit", priority=True),
-        Binding("ctrl+l", "clear_log", "clear finished runs", show=False, priority=True),
+(Binding("ctrl+c,super+c", "quit_app", "copy or quit", priority=True),)
+(Binding("ctrl+d", "quit_app", "quit", priority=True),)
+(Binding("ctrl+l", "clear_log", "clear finished runs", show=False, priority=True),)
 ```
 
 Then:
 
 ```python
-    async def action_quit_app(self) -> None:
-        # With a selection on screen the key means "copy", as it does in a terminal;
-        # without one it means what it always meant. ``ctrl+d`` never copies.
-        selected = self.screen.get_selected_text()
-        if selected is not None:
-            self.copy_to_clipboard(selected)
-            return
-        await self.action_quit()
+async def action_quit_app(self) -> None:
+    # With a selection on screen the key means "copy", as it does in a terminal;
+    # without one it means what it always meant. ``ctrl+d`` never copies.
+    selected = self.screen.get_selected_text()
+    if selected is not None:
+        self.copy_to_clipboard(selected)
+        return
+    await self.action_quit()
 
-    def action_clear_log(self) -> None:
-        """Drop every finished block; keep the ones still streaming and the footer.
 
-        Nothing is forgotten: the scheduler still holds every run, so ``/cancel #n``
-        and ``/summarize`` are unaffected. The footer is the latest finished run's
-        coverage and rule 6 says it does not go away.
-        """
-        finished = frozenset({"done", "cancelled", "failed"})
-        for block in list(self.query(RunBlock)):
-            if block.run.state in finished:
-                self._blocks.pop(block.run.id, None)
-                block.remove()
-        for block in list(self.query(CommandBlock)):
-            if block not in self._command_blocks.values():
-                block.remove()
-        for note in list(self.query(NoteLine)):
-            if isinstance(note.parent, RunLog):
-                note.remove()
+def action_clear_log(self) -> None:
+    """Drop every finished block; keep the ones still streaming and the footer.
+
+    Nothing is forgotten: the scheduler still holds every run, so ``/cancel #n``
+    and ``/summarize`` are unaffected. The footer is the latest finished run's
+    coverage and rule 6 says it does not go away.
+    """
+    finished = frozenset({"done", "cancelled", "failed"})
+    for block in list(self.query(RunBlock)):
+        if block.run.state in finished:
+            self._blocks.pop(block.run.id, None)
+            block.remove()
+    for block in list(self.query(CommandBlock)):
+        if block not in self._command_blocks.values():
+            block.remove()
+    for note in list(self.query(NoteLine)):
+        if isinstance(note.parent, RunLog):
+            note.remove()
 ```
 
 Check `self._blocks` is keyed by `run.id` (search `_blocks[` in `app.py`) and that `NoteLine`s inside a `RunBlock` have a parent other than `RunLog` — the `isinstance(note.parent, RunLog)` guard keeps a block's own notes with the block. `ctrl+d` keeps its own `quit_app` binding but must never copy; if the shared action makes that untrue, give `ctrl+d` its own `action_quit_only` that calls `self.action_quit()` directly.
