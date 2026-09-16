@@ -29,6 +29,7 @@ from proofpath.document import Document, Locator, Reference
 from proofpath.events import Emitted, Event, Note, Progress, Prompted, StageEnd, StageStart
 from proofpath.judge import JudgeCost, JudgeError
 from proofpath.models import Label, Passage, Verdict
+from proofpath.paths import config_path
 from proofpath.report import Coverage, Finding, Kind, Report, summary_silence
 from proofpath.resolve import Candidate, ResolveResult
 from proofpath.resolve import State as ResolveState
@@ -178,6 +179,32 @@ async def answered(pilot: Any, answer: Future[Any]) -> Any:
     """
     await until(pilot, answer.done, "the worker's answer")
     return answer.result(timeout=0)
+
+
+def _laid_out(app: ProofpathApp, target: Any, offset: tuple[int, int]) -> bool:
+    """True once ``target`` has a region on screen that ``offset`` falls inside."""
+    found = app.query(target)
+    if not found:
+        return False
+    region = found.first().region
+    return region.area > 0 and (region.offset + offset) in app.screen.size.region
+
+
+async def click(pilot: Any, target: Any, offset: tuple[int, int] = (0, 0)) -> None:
+    """Press a widget once it is somewhere a press can reach it.
+
+    ``Pilot.click`` reads ``widget.region`` *before* it pumps the loop, and a widget
+    that is in the DOM but has not been laid out yet still carries the empty region it
+    was born with. The click is then delivered to cell (0, 0) -- the banner -- and
+    silently lost: nothing is pressed, the gate's future is never settled, and the test
+    fails fifteen seconds later waiting for a worker nobody answered. Mounting is not
+    layout, so waiting for the *widget* to exist is not enough; this waits for a region
+    a click can land in and then asserts that it did land, so a press that goes astray
+    says so at once instead of looking like a hung worker.
+    """
+    await until(pilot, lambda: _laid_out(pilot.app, target, offset), f"{target} to be laid out")
+    landed = await pilot.click(target, offset=offset)
+    assert landed, f"the click at {offset} never reached {target}"
 
 
 def in_a_worker(work: Callable[[], Any]) -> Future[Any]:
@@ -913,7 +940,7 @@ async def test_the_prompt_is_drawn_in_the_block_of_the_run_that_hit_the_wall() -
         assert "HTTP 403" in text
         assert browser.WHEELS_SIZE in text and browser.BROWSER_SIZE in text
 
-        await pilot.click("#allow-once")
+        await click(pilot, "#allow-once")
         assert await answered(pilot, answer) == "once"
 
 
@@ -1059,7 +1086,7 @@ async def test_the_gate_asks_the_inline_prompt_and_never_stdin(
         )
         allowed = in_a_worker(lambda: gate.allow(HOST, 403))
         await until(pilot, lambda: app.query(PermissionPrompt), "the prompt")
-        await pilot.click("#allow-no")
+        await click(pilot, "#allow-no")
         assert await answered(pilot, allowed) is False
     # Rule 5: the install happens through the gate, after an answer, and "no" is an
     # answer that installs nothing.
@@ -1232,7 +1259,7 @@ async def test_a_click_on_a_finding_opens_the_whole_passage() -> None:
         await pilot.pause()
         line = app.query_one(FindingLine)
         assert not line.expanded
-        await pilot.click(FindingLine, offset=(2, 0))
+        await click(pilot, FindingLine, offset=(2, 0))
         await pilot.pause()
         assert line.expanded
         assert "we observed a 4-8% improvement in throughput" in line.render().plain
@@ -1269,7 +1296,7 @@ async def test_c_copies_the_passage_and_the_glyph_click_does_the_same() -> None:
         await pilot.pause()
         assert copied == ["we observed a 4-8% improvement in throughput"]
         row, column = line._copy_cell
-        await pilot.click(FindingLine, offset=(column, row))
+        await click(pilot, FindingLine, offset=(column, row))
         await pilot.pause()
     assert copied == ["we observed a 4-8% improvement in throughput"] * 2
     assert not line.expanded  # the glyph copies; it does not also toggle
@@ -1296,7 +1323,7 @@ async def test_a_click_on_the_header_folds_the_run_away_but_never_its_state() ->
         scheduler.move(run, "done", report=a_report())
         await pilot.pause()
         block = app.query_one(RunBlock)
-        await pilot.click(RunHeader, offset=(2, 0))
+        await click(pilot, RunHeader, offset=(2, 0))
         await pilot.pause()
         assert block.collapsed
         assert not block.query_one(".stages").display
@@ -1304,7 +1331,7 @@ async def test_a_click_on_the_header_folds_the_run_away_but_never_its_state() ->
         # Rule 6: the header, its state and its coverage never fold away.
         assert block.header.display
         assert "coverage" in block.header.render().plain
-        await pilot.click(RunHeader, offset=(2, 0))
+        await click(pilot, RunHeader, offset=(2, 0))
         await pilot.pause()
         assert not block.collapsed
 
@@ -1319,7 +1346,7 @@ async def test_a_click_on_a_stage_hides_its_detail_and_keeps_its_attribution() -
         scheduler.push(run, StageEnd("Parse", "pymupdf", "24 pages, 42 refs", 1.2))
         await pilot.pause()
         stage = app.query_one(StageLine)
-        await pilot.click(StageLine, offset=(2, 0))
+        await click(pilot, StageLine, offset=(2, 0))
         await pilot.pause()
         text = stage.render().plain
     assert "24 pages, 42 refs" not in text
@@ -1431,12 +1458,21 @@ def test_the_app_and_the_scheduler_agree_on_what_an_engine_factory_is() -> None:
 
 
 def a_gate(app: ProofpathApp, owner: int) -> ConsentGate:
-    """A real gate wired to the app's prompt, the way ``_default_engine`` wires one."""
+    """A real gate wired to the app's prompt, the way ``_default_engine`` wires one.
+
+    ``config_path`` is passed rather than left to default, although the ``isolated``
+    fixture already points ``PROOFPATH_CONFIG_DIR`` at ``tmp_path``: an "always" or a
+    "never" answer makes the gate *write* a config file, and the file it writes is
+    pinned here to the temp one this test reads back, not left to an environment
+    variable a future edit could stop setting. It is the same path either way, so the
+    app still re-reads exactly what the gate wrote.
+    """
     return ConsentGate(
         "ask",
         interactive=True,
         prompt=app._prompt_for(owner),
         installer=lambda log: pytest.fail("nothing may be installed"),
+        config_path=config_path(),
     )
 
 
@@ -1457,7 +1493,7 @@ async def test_never_is_honoured_by_the_run_after_it(monkeypatch: pytest.MonkeyP
         gate = a_gate(app, run.id)
         allowed = in_a_worker(lambda: gate.allow(HOST, 403))
         await until(pilot, lambda: app.query(PermissionPrompt), "the prompt")
-        await pilot.click("#allow-never")
+        await click(pilot, "#allow-never")
         assert await answered(pilot, allowed) is False
         await until(
             pilot,
@@ -1549,7 +1585,7 @@ async def test_a_fetch_that_hits_the_wall_is_answered_in_its_own_block(
         prompt = app.query_one(PermissionPrompt)
         assert any(isinstance(parent, CommandBlock) for parent in prompt.ancestors_with_self)
         assert prompt.owner < 0  # a command block, not a run
-        await pilot.click("#allow-no")
+        await click(pilot, "#allow-no")
         await lines_of(app, pilot)
     assert answers == ["no"]
 

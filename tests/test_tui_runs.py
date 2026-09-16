@@ -203,6 +203,10 @@ async def test_at_most_three_runs_do_io_at_once(build) -> None:
     harness = build(io_limit=3)
     runs = [harness.submit(f"doc{n}") for n in range(1, 6)]
     await until(lambda: len(harness.running()) == 3, "three runs in the I/O stage")
+    # A run is "running" the moment the loop starts its thread; the engine is built on
+    # that thread afterwards. Wait for the engines too, or ``settle`` is being asked to
+    # guess how long three threads take to start.
+    await until(lambda: len(harness.factory.engines) == 3, "three engines to be built")
     await settle()
     assert [run.state for run in runs] == ["running"] * 3 + ["queued"] * 2
     assert len(harness.factory.engines) == 3, "a queued run must not build an engine"
@@ -214,8 +218,12 @@ async def test_finishing_one_io_half_starts_the_next_queued_run(build) -> None:
     await until(lambda: len(harness.running()) == 3, "three runs in the I/O stage")
     harness.io.let_go("doc1")
     await until(lambda: runs[3].state == "running", "the fourth run to start")
+    await until(lambda: "doc4" in harness.io.order, "the fourth run to reach the I/O half")
     assert runs[4].state == "queued"
-    assert harness.io.order[:4] == ["doc1", "doc2", "doc3", "doc4"]
+    assert set(harness.io.order) == {"doc1", "doc2", "doc3", "doc4"}, "the fifth waits"
+    # The claim is that the freed slot is what let the fourth in, not the order three
+    # threads happened to be scheduled in: only doc1 is ordered against doc4.
+    assert harness.io.order.index("doc1") < harness.io.order.index("doc4")
 
 
 async def test_a_run_gets_its_own_engine(build) -> None:
@@ -234,8 +242,11 @@ async def test_only_one_run_verifies_at_a_time(build) -> None:
     runs = [harness.submit(f"doc{n}") for n in range(1, 4)]
     harness.io.let_go("doc1", "doc2", "doc3")
     await until(
-        lambda: all(r.state in {"waiting for verify", "verifying"} for r in runs),
-        "all three runs past the I/O half",
+        lambda: (
+            all(r.state in {"waiting for verify", "verifying"} for r in runs)
+            and len(harness.model.order) == 1
+        ),
+        "all three runs past the I/O half, one of them inside the model",
     )
     await settle()
     states = [run.state for run in runs]
@@ -254,7 +265,8 @@ async def test_the_verify_slot_is_granted_in_arrival_order(build) -> None:
             lambda n=number: runs[n].state in {"waiting for verify", "verifying"},
             f"doc{number} to reach the verify queue",
         )
-    assert harness.model.order == ["doc3"]
+    # "verifying" is set on the loop before the thread is let into the model half.
+    await until(lambda: harness.model.order == ["doc3"], "doc3 to enter the model half")
     harness.model.let_go("doc3")
     await until(lambda: harness.model.order == ["doc3", "doc2"], "doc2 to verify next")
     harness.model.let_go("doc2")
@@ -337,7 +349,12 @@ async def test_cancelling_a_run_waiting_for_verify_skips_the_model(build) -> Non
     await harness.scheduler.wait(second.id)
     assert first.state == "done"
     assert harness.model.order == ["doc1"]
-    assert all(engine.closed for engine in harness.factory.engines)
+    # The cancelled run's task ends before its thread does; the engine is closed on the
+    # thread, so this waits for the thread rather than for the task that woke it.
+    await until(
+        lambda: all(engine.closed for engine in harness.factory.engines),
+        "both engines to be closed on their own threads",
+    )
 
 
 async def test_a_run_cancelled_while_waiting_for_verify_leaves_the_queue_at_once(build) -> None:
@@ -346,8 +363,12 @@ async def test_a_run_cancelled_while_waiting_for_verify_leaves_the_queue_at_once
     first, second = harness.submit("doc1"), harness.submit("doc2")
     harness.io.let_go("doc1", "doc2")
     await until(
-        lambda: first.state == "verifying" and second.state == "waiting for verify",
-        "one run verifying and one queued behind it",
+        lambda: (
+            first.state == "verifying"
+            and second.state == "waiting for verify"
+            and harness.model.order == ["doc1"]
+        ),
+        "doc1 inside the model half and doc2 queued behind it",
     )
     thread = harness.io.threads["doc2"]
     engine = next(e for e in harness.factory.engines if e.built_on is thread)
