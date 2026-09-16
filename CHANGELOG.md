@@ -14,6 +14,14 @@ All notable changes to this project are documented here. The format follows
   so the build never fetches. Design notes in
   `docs/superpowers/specs/2026-09-16-landing-page-design.md`.
 
+### Changed
+- **The pet is a raven.** The ferret is gone from both themes: `rich` draws a
+  two-tone pixel raven in Braille cells (fifteen columns, eight rows, the text beside
+  it, its ground running to the right edge), `plain` a small ASCII one. The
+  `[PROOF]` stamp and the blink/busy/tail animation are gone with it; the widget's
+  `set_busy`/`flash` remain as no-ops. Design notes in
+  `docs/superpowers/specs/2026-09-16-raven-pet-design.md`.
+
 ## [0.4.1] - 2026-09-16
 
 The TUI gets a shell's reflexes, and sits on the terminal's own background.

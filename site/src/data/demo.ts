@@ -1,8 +1,8 @@
 /* A real run, replayed. Lines are from docs/eval/2026-09-15-tui-v2-live.md
    (`/check tests/data/draft-live.md`, rich theme), abbreviated to fit a page.
    A frame either appends a line or, when it names an `id` that already exists,
-   replaces that line — that is how a stage flips from running to done and how
-   the ferret's eyes change. */
+   replaces that line — that is how a stage flips from running to done. The
+   banner above the output is static. */
 export type Tone = 'ok' | 'warn' | 'bad' | 'dim' | 'accent' | 'plain' | 'you' | 'source';
 
 export interface Span {
@@ -20,30 +20,18 @@ export interface Frame {
     spans: Span[];
 }
 
-export type Eyes = 'idle' | 'busy' | 'findings' | 'clean';
-
-export const ferret: Record<Eyes, string[]> = {
-    idle: [
-        '   ,_,',
-        '  (o.o)~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~[PROOF]',
-        '   " "',
-    ],
-    busy: [
-        '   ,_,',
-        '  (>.>)~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~[PROOF]',
-        '   " "',
-    ],
-    findings: [
-        '   ,_,',
-        '  (O.O)~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~[PROOF]',
-        '   " "',
-    ],
-    clean: [
-        '   ,_,',
-        '  (^.^)~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~[PROOF]',
-        '   " "',
-    ],
-};
+/**
+ * The `plain` raven, static: `proofpath.tui.banner.render(80, …)`'s output, which is
+ * the `ART` lines with the ground extended to 78 columns.
+ */
+export const raven: readonly string[] = [
+    '       __',
+    '      (o >',
+    '    _/ /',
+    '   /  /',
+    '  /__/',
+    ' ____||_______________________________________________________________________',
+];
 
 const stage = (
     glyph: string,
@@ -66,9 +54,8 @@ export const frames: Frame[] = [
         type: true,
         spans: [{ text: '› ', tone: 'dim' }, { text: '/check tests/data/draft-live.md' }],
     },
-    { wait: 500, id: 'ferret', spans: [{ text: '(>.>)', tone: 'dim' }] },
     {
-        wait: 200,
+        wait: 700,
         id: 'hdr',
         spans: [
             { text: '#1  /check tests/data/draft-live.md', tone: 'accent' },
@@ -126,9 +113,8 @@ export const frames: Frame[] = [
             { text: ' GHOST REFERENCE ', tone: 'bad' },
         ],
     },
-    { wait: 100, id: 'ferret', spans: [{ text: '(O.O)', tone: 'dim' }] },
     {
-        wait: 150,
+        wait: 250,
         spans: [
             { text: '       arxiv and openlibrary consulted before the ghost call', tone: 'dim' },
         ],

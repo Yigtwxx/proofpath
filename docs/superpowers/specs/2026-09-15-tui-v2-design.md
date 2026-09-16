@@ -31,9 +31,13 @@ screenshots and bug reports).
 and the state-word rules of §13.3; `theme.py` maps each meaning to a truecolor tone
 in `RICH` and to the ANSI name in `PLAIN`. Accents (one per run) stay the rotating
 five; in `RICH` they are five distinct hues, never red/yellow/green. The banner's
-only colour remains the red stamp.
+only colour remains the red stamp. *(Superseded 2026-09-16: the stamp is gone; the
+banner's colours are the raven's two tones, see `2026-09-16-raven-pet-design.md`.)*
 
 ## 3. The pet
+
+> **Superseded 2026-09-16 by `2026-09-16-raven-pet-design.md`:** the pet is a raven;
+> the stamp, the tail and the animation described below no longer exist.
 
 `RICH` draws a seven-line ferret: head at the left with a `╸┤` nose and `╭╮ ╭╮` ears, a
 low body that grows with the width and ends in a rounded rump, four feet under the

@@ -1,7 +1,7 @@
 /* Replays a scripted run inside a <pre>, one frame at a time.
    Under reduced motion, or when asked to `finish`, it renders the final state
    at once. The replay button re-runs it. */
-import { frames, ferret, type Frame, type Span, type Eyes } from '../data/demo';
+import { frames, type Frame, type Span } from '../data/demo';
 
 function spanEl(s: Span): HTMLSpanElement {
     const el = document.createElement('span');
@@ -19,7 +19,6 @@ function lineEl(spans: Span[]): HTMLDivElement {
 
 export class TerminalPlayer {
     private out: HTMLElement;
-    private eyes: HTMLElement | null;
     private lines = new Map<string, HTMLElement>();
     private timer: number | null = null;
     private reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -28,19 +27,9 @@ export class TerminalPlayer {
         const out = root.querySelector<HTMLElement>('[data-tui-out]');
         if (!out) throw new Error('terminal: missing [data-tui-out]');
         this.out = out;
-        this.eyes = root.querySelector('[data-tui-eyes]');
     }
 
-    private setEyes(eyes: Eyes): void {
-        if (this.eyes) this.eyes.textContent = ferret[eyes].join('\n');
-    }
-
-    private place(frame: Frame): HTMLElement | null {
-        if (frame.id === 'ferret') {
-            const glyph = frame.spans[0]?.text ?? '';
-            this.setEyes(glyph.includes('O') ? 'findings' : glyph.includes('>') ? 'busy' : 'idle');
-            return null;
-        }
+    private place(frame: Frame): HTMLElement {
         const el = lineEl(frame.spans);
         const prev = frame.id ? this.lines.get(frame.id) : undefined;
         if (prev) prev.replaceWith(el);
@@ -54,7 +43,6 @@ export class TerminalPlayer {
         this.timer = null;
         this.out.replaceChildren();
         this.lines.clear();
-        this.setEyes('idle');
     }
 
     finish(): void {

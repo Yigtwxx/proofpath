@@ -481,57 +481,57 @@ async def test_a_forced_rich_theme_without_colour_still_draws_its_frames() -> No
 # --- the pet -------------------------------------------------------------------------
 
 
-async def test_the_rich_ferret_is_seven_lines_with_the_stamp_on_the_tail() -> None:
+async def test_the_rich_raven_is_eight_lines_in_braille_with_the_text_beside_it() -> None:
     app, _ = rich_app()
-    async with app.run_test(size=SIZE):
-        ferret = app.query_one(Banner)
-        drawn = ferret.drawn
+    async with app.run_test(size=SIZE) as pilot:
+        await pilot.pause()
+        raven = app.query_one(Banner)
+        drawn = raven.drawn
         assert drawn is not None
-        assert ferret.region.height == 7
-    assert len(drawn.lines) == 7
-    assert drawn.stamp_line == 2
-    assert drawn.stamp_span is not None
-    start, end = drawn.stamp_span
-    assert drawn.lines[2][start:end] == pet.STAMP
-    assert drawn.lines[-1].endswith("/help  /config  /quit")
+        assert raven.region.height == 8
+    assert len(drawn.lines) == 8
+    assert drawn.lines[pet.HINT_ROW].endswith("/help  /config  /quit")
+    assert drawn.lines[pet.GROUND_ROW].endswith(pet.GROUND)
     for line in drawn.lines:
         assert cell_len(line) == len(line) <= 100, line
+    art = "".join(line[: pet.TEXT_COLUMN] for line in drawn.lines)
+    assert all(c == " " or 0x2800 <= ord(c) <= 0x28FF for c in art)
 
 
-async def test_the_rich_eyes_and_tail_follow_the_run() -> None:
-    app, schedulers = rich_app()
-    async with app.run_test(size=SIZE) as pilot:
-        ferret = app.query_one(Banner)
-        assert ferret.eyes == pet.EYES["idle"]
-        run = await a_run(pilot, schedulers)
-        schedulers[0].move(run, "running")
-        await pilot.pause()
-        assert ferret.eyes == pet.EYES["busy"]
-        drawn = ferret.drawn
-        assert drawn is not None
-        assert "> >" in drawn.lines[2]
-        # The tail wags: the tip lifts the moment the run starts.
-        assert drawn.lines[2].rstrip(pet.STAMP).endswith(pet.TAIL_TIPS[1])
-        schedulers[0].move(run, "done", report=a_report())
-        await pilot.pause()
-        assert ferret.eyes == pet.EYES["clean"]
-        drawn = ferret.drawn
-        assert drawn is not None
-        assert drawn.lines[2].rstrip(pet.STAMP).endswith(pet.TAIL_TIPS[0])
+async def test_the_rich_raven_is_painted_in_the_theme_tones() -> None:
+    app, _ = rich_app()
+    async with app.run_test(size=SIZE):
+        text = app.query_one(Banner).render()
+    styles = {str(span.style) for span in text.spans}
+    assert RICH.pet["dark"] in styles and RICH.pet["light"] in styles
+    # The text lines are not coloured.
+    plain_rows = text.plain.split("\n")
+    for row in (pet.VERSION_ROW, pet.HINT_ROW):
+        text_start = sum(len(line) + 1 for line in plain_rows[:row]) + pet.TEXT_COLUMN
+        assert not any(span.start <= text_start < span.end for span in text.spans), row
+
+
+async def test_the_raven_carries_no_styles_without_colour() -> None:
+    app, _ = rich_app(out=ui.build(force_terminal=True, no_color=True))
+    async with app.run_test(size=SIZE):
+        text = app.query_one(Banner).render()
+    assert text.spans == []
 
 
 async def test_the_hint_drops_its_command_list_where_it_would_overflow() -> None:
     app, _ = rich_app()
-    async with app.run_test(size=(64, 24)) as pilot:
+    async with app.run_test(size=(76, 24)) as pilot:
         drawn = app.query_one(Banner).drawn
         assert drawn is not None
-        assert drawn.lines[-1] == "      " + HINT.split("  ")[0]
-        await pilot.resize_terminal(65, 24)
+        assert drawn.lines[pet.HINT_ROW] == (
+            drawn.lines[pet.HINT_ROW][: pet.TEXT_COLUMN] + HINT.split("  ")[0]
+        )
+        await pilot.resize_terminal(77, 24)
         await pilot.pause()
         drawn = app.query_one(Banner).drawn
         assert drawn is not None
-        assert drawn.lines[-1].endswith("/help  /config  /quit")
-        assert len(drawn.lines[-1]) <= 65
+        assert drawn.lines[pet.HINT_ROW].endswith("/help  /config  /quit")
+        assert len(drawn.lines[pet.HINT_ROW]) <= 77
 
 
 # --- widths ----------------------------------------------------------------------------

@@ -40,7 +40,6 @@ from proofpath.tui.app import (
     ANSWER_LABELS,
     AWAITING_VERBS,
     CLEARED_NOT_SUMMARIZABLE,
-    FLASH_SECONDS,
     HINT,
     Banner,
     CommandBlock,
@@ -310,7 +309,6 @@ async def test_banner_reproduces_the_renderer_at_eighty_columns() -> None:
     assert drawn is not None
     expected = banner.render(80, version=__version__, context=run_context(Config()), hint=HINT)
     assert drawn.lines == expected.lines
-    assert drawn.stamp_span == expected.stamp_span
 
 
 async def test_banner_is_pure_ascii() -> None:
@@ -327,6 +325,20 @@ async def test_banner_context_says_offline_when_the_network_is_denied() -> None:
     config = Config(permissions=Permissions(network="deny"))
     assert " offline " in run_context(config)
     assert " online " in run_context(Config())
+
+
+async def test_busy_and_flash_are_accepted_and_change_nothing() -> None:
+    """The raven does not move (raven design §2); the app's calls must still be safe."""
+    app, _ = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        widget = app.query_one(Banner)
+        before = widget.drawn
+        widget.set_busy(True)
+        widget.flash("findings")
+        widget.flash("clean")
+        widget.set_busy(False)
+        await pilot.pause()
+        assert widget.drawn == before
 
 
 # --- awaiting mode -----------------------------------------------------------------
@@ -518,7 +530,7 @@ async def test_two_hundred_notes_keep_the_footer_and_the_banner_in_place() -> No
         banner_widget = app.query_one(Banner)
         footer = app.query_one(CoverageFooter)
         assert banner_widget.region.y == 0
-        assert banner_widget.region.height == 4
+        assert banner_widget.region.height == 6
         assert footer.display
         assert footer.region.bottom <= app.size.height
         assert "coverage" in footer.render().plain
@@ -842,7 +854,7 @@ async def test_the_banner_container_fits_every_line_it_drew(width: int) -> None:
 async def test_resizing_redraws_the_banner_and_keeps_the_footer_docked() -> None:
     app, _ = build_app()
     async with app.run_test(size=SIZE) as pilot:
-        assert app.query_one(Banner).drawn.lines[1].endswith("[PROOF]")
+        assert app.query_one(Banner).drawn.lines[5].endswith("_")
         await pilot.resize_terminal(60, 24)
         await pilot.pause()
         drawn = app.query_one(Banner).drawn
@@ -1466,86 +1478,6 @@ async def test_a_click_on_a_stage_hides_its_detail_and_keeps_its_attribution() -
     assert "Parse" in text and "1.2s" in text
 
 
-# --- task 8.4: the eyes (spec 13.1) --------------------------------------------------
-
-
-async def test_the_eyes_watch_the_path_while_a_run_works_and_settle_after() -> None:
-    app, schedulers = build_app()
-    async with app.run_test(size=SIZE) as pilot:
-        ferret = app.query_one(Banner)
-        assert ferret.timer is not None
-        assert ferret.eyes == banner.EYES["idle"]
-
-        await submit(pilot, "/check draft.md")
-        scheduler = schedulers[0]
-        run = scheduler.runs[0]
-        scheduler.move(run, "running")
-        await pilot.pause()
-        assert ferret.eyes == banner.EYES["busy"]
-        assert app.query_one(Banner).drawn.lines[1].startswith("  " + banner.EYES["busy"])
-
-        scheduler.move(run, "done", report=a_report())
-        await pilot.pause()
-        assert ferret.eyes == banner.EYES["clean"]
-
-        # Two seconds later the expression is over; the test moves the clock instead.
-        later = time.monotonic() + FLASH_SECONDS + 1
-        ferret.clock = lambda: later
-        ferret.tick()
-        assert ferret.eyes == banner.EYES["idle"]
-
-
-async def test_a_run_with_findings_gets_the_other_face() -> None:
-    app, schedulers = build_app()
-    async with app.run_test(size=SIZE) as pilot:
-        await submit(pilot, "/check draft.md")
-        scheduler = schedulers[0]
-        scheduler.move(scheduler.runs[0], "done", report=a_report(findings=(a_finding(),)))
-        await pilot.pause()
-        assert app.query_one(Banner).eyes == banner.EYES["findings"]
-
-
-async def test_a_failed_run_never_gets_the_clean_face() -> None:
-    app, schedulers = build_app()
-    async with app.run_test(size=SIZE) as pilot:
-        await submit(pilot, "/check draft.md")
-        scheduler = schedulers[0]
-        run = scheduler.runs[0]
-        run.error = "OSError: no such file"
-        scheduler.move(run, "failed")
-        await pilot.pause()
-        assert app.query_one(Banner).eyes == banner.EYES["findings"]
-
-
-async def test_the_ferret_blinks_on_its_own_schedule() -> None:
-    app, _ = build_app()
-    async with app.run_test(size=SIZE) as pilot:
-        ferret = app.query_one(Banner)
-        await pilot.pause()
-        start = time.monotonic()
-        ferret.clock = lambda: start + 11  # past the 6-10s window, whatever it drew
-        ferret.tick()
-        assert ferret.eyes == banner.EYES["blink"]
-        ferret.clock = lambda: start + 11.2  # 150 ms later it is over
-        ferret.tick()
-        assert ferret.eyes == banner.EYES["idle"]
-
-
-@pytest.mark.parametrize(
-    ("kwargs", "why"),
-    [({"no_color": True}, "--no-color"), ({"quiet": True}, "-q")],
-)
-async def test_no_animation_without_colour_or_under_quiet(kwargs: Any, why: str) -> None:
-    app, schedulers = build_app(out=ui.build(force_terminal=True, **kwargs))
-    async with app.run_test(size=SIZE) as pilot:
-        ferret = app.query_one(Banner)
-        assert ferret.timer is None, why
-        await submit(pilot, "/check draft.md")
-        schedulers[0].move(schedulers[0].runs[0], "running")
-        await pilot.pause()
-        assert ferret.eyes == banner.EYES["idle"], why
-
-
 # --- fix round 1: one engine-factory type, the scheduler's ---------------------------
 
 
@@ -1640,12 +1572,12 @@ async def test_config_set_of_the_network_permission_redraws_the_banner() -> None
     """Line 3 says online/offline; a session that changed it must not still say online."""
     app, _ = build_app()
     async with app.run_test(size=SIZE) as pilot:
-        assert " online " in app.query_one(Banner).drawn.lines[2]
+        assert " online " in app.query_one(Banner).drawn.lines[3]
         await submit(pilot, "/config set permissions.network deny")
         await lines_of(app, pilot)
         await until(
             pilot,
-            lambda: " offline " in _banner_lines(app)[2],
+            lambda: " offline " in _banner_lines(app)[3],
             "the banner to be redrawn offline",
         )
 
@@ -1712,20 +1644,6 @@ async def test_a_link_survives_no_color() -> None:
         await pilot.pause()
         rendered = app.query_one(FindingLine).render()
     assert "link https://doi.org/x" in " ".join(str(span.style) for span in rendered.spans)
-
-
-async def test_the_blink_falls_inside_the_six_to_ten_second_window() -> None:
-    app, _ = build_app()
-    async with app.run_test(size=SIZE) as pilot:
-        ferret = app.query_one(Banner)
-        await pilot.pause()
-        start = time.monotonic()
-        ferret.clock = lambda: start + 5.5  # never before six seconds
-        ferret.tick()
-        assert ferret.eyes == banner.EYES["idle"]
-        ferret.clock = lambda: start + 10.5  # and never later than ten
-        ferret.tick()
-        assert ferret.eyes == banner.EYES["blink"]
 
 
 async def test_an_unreadable_config_is_reported_not_raised(tmp_path: Path) -> None:

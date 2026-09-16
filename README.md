@@ -21,14 +21,18 @@ proofpath
 ```
 
 ```
-    ╭╮ ╭╮
-   ╭╯╰─╯╰────────────────────────────────────────────────────────────────────╮
-  ╸┤ o o                                                                     ╰~~~~~~~~~~~~~[PROOF]
-   ╰─┬─┬────────────────────────────────────────────────────────────────┬─┬──╯
-     ˘ ˘                                                                ˘ ˘
-      proofpath v0.4.1                                                  academic . online . coreml
-      paste a file path, a URL, or a claim.                                  /help  /config  /quit
+       ⣴⣿⠿⣷⣀
+      ⢀⣿⣿⣿⡿⠿⣿⠂
+     ⢠⣿⣿⣿⣿⡇
+    ⢠⣿⣿⣿⣿⣿⡇       proofpath v0.4.1                                      academic · online · coreml
+   ⢠⣿⣿⣿⣿⣿⡟        paste a file path, a URL, or a claim.                      /help  /config  /quit
+  ⣠⣿⣿⣿⣿⡿⠋
+⣠⣾⣿⣿⠿⣿⠉⡏⡇
+⠛⠙⠃  ⠛⠒⠓⠓⠒⠒⠒⠒⠒⠂⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒
 ```
+
+The bird is a raven — the same one as on the website — drawn in Braille cells in the
+`rich` theme and in ASCII in `plain`.
 
 Bare `proofpath` opens the terminal UI ([a recorded session in both themes](docs/eval/2026-09-15-tui-v2-live.md),
 with [SVG screenshots](docs/eval/tui-v2-rich.svg)). Each run is one panel in its own
@@ -57,10 +61,12 @@ sentence are identical, only the drawing changes. `PROOFPATH_THEME=rich|plain` f
 either, for screenshots and bug reports.
 
 ```
-   ,_,
-  (o.o)~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~[PROOF]
-   " "    proofpath v0.4.1                                              academic . online . coreml
-          paste a file path, a URL, or a claim.            /help  /config  /quit
+       __
+      (o >
+    _/ /
+   /  /       proofpath v0.4.1                                          academic . online . coreml
+  /__/        paste a file path, a URL, or a claim.                          /help  /config  /quit
+ ____||___________________________________________________________________________________________
 ```
 
 The same engine behind a pipe or in CI:

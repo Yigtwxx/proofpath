@@ -43,10 +43,11 @@ STAGE_BY_WIDTH = 34
 # no hex, so light and dark themes both work and NO_COLOR removes everything.
 # ACCENTS are for the TUI (Phase 8) but live here so one module owns every colour.
 ACCENTS = ("cyan", "magenta", "blue", "bright_cyan", "bright_magenta")
-# The single brand use of red (spec section 13.1): the banner's [PROOF] stamp, and the
-# only coloured element in it. It lives here because no other module names a colour --
-# ``tui/banner.py`` returns the stamp's column span and this says what to paint it.
-STAMP_COLOUR = "red"
+# The single brand use of red: the banner's raven in the ``plain`` theme (the ``rich``
+# theme has its own two crimsons in ``tui/theme.py``). It lives here because no other
+# module names a colour -- ``tui/banner.py`` returns colour runs and this says what to
+# paint them with.
+PET_COLOUR = "red"
 # The section 7.1 permission prompt, wherever it is drawn (spec section 13.3 lists it
 # under yellow): caution, not a finding. The terminal block is plain text on stderr,
 # so this is what the TUI's inline prompt paints its buttons with -- named here

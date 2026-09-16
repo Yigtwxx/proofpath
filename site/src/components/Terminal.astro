@@ -1,13 +1,12 @@
 ---
 /* The scripted run: a dark panel in the TUI's own colours, on the paper page.
    The full transcript is in the markup for screen readers and for no-JS. */
-import { frames, ferret } from '../data/demo';
+import { frames, raven } from '../data/demo';
 
 // Final state for the static transcript: last frame per id, in first-seen order.
 const finalLines = (() => {
     const map = new Map<string, (typeof frames)[number]>();
     frames.forEach((f, i) => {
-        if (f.id === 'ferret') return;
         map.set(f.id ?? `#${i}`, f);
     });
     return Array.from(map.values());
@@ -26,7 +25,7 @@ const finalLines = (() => {
             replay
         </button>
     </div>
-    <pre class="tui__banner" aria-hidden="true" data-tui-eyes>{ferret.idle.join('\n')}</pre>
+    <pre class="tui__banner" aria-hidden="true">{raven.join('\n')}</pre>
     <div class="tui__out" data-tui-out aria-hidden="true"></div>
     <pre class="visually-hidden">{finalLines.map((f) => f.spans.map((s) => s.text).join('')).join('\n')}</pre>
 </div>

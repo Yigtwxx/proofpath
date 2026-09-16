@@ -51,7 +51,7 @@ from proofpath.config import Config, ConfigError, load_config
 from proofpath.events import Event
 from proofpath.judge import Judge, JudgeClient, JudgeError, resolve_api_key
 from proofpath.report import Report, render_markdown, summary_silence
-from proofpath.tui import commands, pet
+from proofpath.tui import commands
 from proofpath.tui.history import History
 from proofpath.tui.runs import TERMINAL, Run, Scheduler
 from proofpath.tui.runs import EngineFactory as RunsEngineFactory
@@ -125,11 +125,8 @@ def key_help(arrows: str, shift_arrows: str, sep: str) -> tuple[str, str]:
 #: Which verbs hold the bar is the parser's decision, not this module's; it is
 #: re-exported here because the app is where the mode is entered and left.
 AWAITING_VERBS = commands.AWAITING_VERBS
-#: The run states the ferret watches the path in (spec section 13.1).
+#: The run states the raven is told about (raven design section 2).
 BUSY_STATES = frozenset({"running", "verifying"})
-#: How long a finished run's expression holds. The pet owns the animation; this is
-#: re-exported because the app is where a run ends and the face is asked for.
-FLASH_SECONDS = pet.FLASH_SECONDS
 
 
 def run_context(config: Config) -> str:
@@ -530,15 +527,15 @@ class ProofpathApp(App[None]):
         self._scroll_log()
 
     def _watch_eyes(self, run: Run) -> None:
-        """The ferret follows the runs: down the path while they work, up when done."""
+        """The raven is told about the runs; today it does not react (raven design §2)."""
         runs = self._scheduler.runs if self._scheduler is not None else ()
-        ferret = self.query_one(Banner)
-        ferret.set_busy(any(other.state in BUSY_STATES for other in runs))
+        raven = self.query_one(Banner)
+        raven.set_busy(any(other.state in BUSY_STATES for other in runs))
         if run.state == "done" and run.report is not None:
-            ferret.flash("findings" if run.report.findings else "clean")
+            raven.flash("findings" if run.report.findings else "clean")
         elif run.state == "failed":
-            # A run that fell over is not a clean run; it never gets the clean face.
-            ferret.flash("findings")
+            # A run that fell over is not a clean run; it never gets the clean mood.
+            raven.flash("findings")
 
     def _scroll_log(self) -> None:
         self.query_one(RunLog).scroll_end(animate=False)
@@ -912,7 +909,6 @@ def run(config: Config, out: ui.Ui) -> None:
 __all__ = [
     "ANSWER_LABELS",
     "AWAITING_VERBS",
-    "FLASH_SECONDS",
     "HINT",
     "Banner",
     "CommandBlock",
