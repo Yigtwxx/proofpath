@@ -6,6 +6,11 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- The TUI **sits on the terminal's own background** instead of Textual's grey: every
+  surface is `ansi_default` and palette names reach the terminal untranslated, so the app
+  no longer shows up as a layer over the terminal it runs in.
+
 ## [0.4.0] - 2026-09-16
 
 Sources that are not papers: a post's links, and the coverage block that finally says why
