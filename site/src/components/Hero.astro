@@ -1,0 +1,114 @@
+---
+/* The crimson field. One image, one sentence, one command. */
+import Halftone from './Halftone.astro';
+import InstallBox from './InstallBox.astro';
+import SketchUnderline from './sketch/SketchUnderline.astro';
+import { version } from '../data/commands';
+---
+
+<section class="hero" id="top" aria-labelledby="hero-title">
+    <div class="page hero__grid">
+        <div class="hero__copy">
+            <p class="hero__kicker">
+                proofpath <span class="hero__version">v{version}</span>
+            </p>
+            <h1 id="hero-title" class="hero__title">
+                Don't guess.
+                <br />
+                Show the{' '}
+                <SketchUnderline tone="paper" draw>
+                    evidence.
+                </SketchUnderline>
+            </h1>
+            <p class="hero__lede">
+                proofpath checks whether the sources behind a claim{' '}
+                <em class="key">actually say what the claim says</em>. Point it at a paper or a
+                draft; it verifies every citation on three levels and shows you{' '}
+                <em class="key">the passage</em> behind each verdict.
+            </p>
+            <InstallBox tone="paper" id="hero-install" />
+            <p class="hero__fine">
+                Runs locally and free. No API key, no Docker, no server. Windows, Linux, macOS.
+            </p>
+        </div>
+        <figure class="hero__figure">
+            <Halftone
+                id="corbeau"
+                tone="crimson"
+                loading="eager"
+                sizes="(min-width: 64rem) 46vw, 92vw"
+            />
+            <figcaption class="caption hero__caption">
+                Félix Bracquemond, <cite>Le Corbeau</cite>, 1854. The raven that stares back.
+            </figcaption>
+        </figure>
+    </div>
+</section>
+
+<style>
+    .hero {
+        --field: var(--crimson);
+        --pen: var(--rose-soft);
+        --caption: var(--rose-soft);
+        background: var(--crimson);
+        color: var(--paper);
+        padding-block: var(--space-7) var(--space-8);
+        overflow: clip;
+    }
+    .hero__grid {
+        display: grid;
+        gap: var(--space-6);
+        align-items: center;
+    }
+    @media (min-width: 64rem) {
+        .hero__grid {
+            grid-template-columns: minmax(0, 11fr) minmax(0, 9fr);
+            gap: var(--space-7);
+            min-height: calc(100vh - 3.5rem);
+        }
+    }
+    .hero__kicker {
+        font-family: var(--font-mono);
+        font-size: var(--step--1);
+        color: var(--rose-soft);
+        margin-bottom: var(--space-5);
+    }
+    .hero__version {
+        margin-left: 0.5em;
+    }
+    .hero__title {
+        font-size: clamp(3rem, 1.5rem + 7.5vw, 7rem);
+        font-weight: 340;
+        line-height: 0.98;
+        letter-spacing: -0.02em;
+        margin-bottom: var(--space-5);
+        color: var(--paper);
+        font-variation-settings:
+            'opsz' 144,
+            'SOFT' 60,
+            'WONK' 1;
+    }
+    .hero__lede {
+        font-size: var(--step-1);
+        line-height: 1.45;
+        max-width: 34rem;
+        margin-bottom: var(--space-5);
+        color: color-mix(in srgb, var(--paper) 92%, var(--crimson));
+    }
+    .hero__fine {
+        font-size: var(--step--1);
+        color: var(--rose-soft);
+        margin-top: var(--space-4);
+        max-width: 34rem;
+    }
+    .hero__figure {
+        margin: 0;
+        position: relative;
+    }
+    .hero__figure :global(.halftone) {
+        filter: url(#pencil-grain);
+    }
+    .hero__caption {
+        margin-top: var(--space-3);
+    }
+</style>

@@ -1,0 +1,158 @@
+---
+import Layout from '../layouts/Layout.astro';
+import Nav from '../components/Nav.astro';
+import Hero from '../components/Hero.astro';
+import Section from '../components/Section.astro';
+import Terminal from '../components/Terminal.astro';
+import Chapter from '../components/Chapter.astro';
+import Rules from '../components/Rules.astro';
+import Ci from '../components/Ci.astro';
+import Footer from '../components/Footer.astro';
+import InstallBox from '../components/InstallBox.astro';
+import SketchArrow from '../components/sketch/SketchArrow.astro';
+import { levels } from '../data/levels';
+
+const title = "proofpath — Don't guess. Show the evidence.";
+const description =
+    'proofpath checks whether the sources behind a claim actually say what the claim says: does the source exist, is it still valid, does it support the claim. Local, free, no API key.';
+---
+
+<Layout title={title} description={description}>
+    <div class="hero-shell">
+        <Nav />
+        <Hero />
+    </div>
+    <main id="main">
+        <Section
+            id="run"
+            title="A run, as it happens."
+            margin="Seven references from a draft. One of them does not exist. One says 3.5 days where the draft says 21."
+        >
+            <div class="run">
+                <Terminal />
+                <aside class="run__notes" aria-label="What to look at in the run">
+                    <div class="run__note">
+                        <SketchArrow direction="curve-left" size={56} />
+                        <p class="marginalia">
+                            Every stage names the provider that produced its number, and how long it
+                            took.
+                        </p>
+                    </div>
+                    <div class="run__note">
+                        <SketchArrow direction="curve-left" size={56} />
+                        <p class="marginalia">
+                            A ghost call comes with the list of indexes that were asked first.
+                        </p>
+                    </div>
+                    <div class="run__note">
+                        <SketchArrow direction="curve-left" size={56} />
+                        <p class="marginalia">
+                            <b>you</b> is your sentence; <b>source</b> is theirs. The verdict sits
+                            between them, never without them.
+                        </p>
+                    </div>
+                    <div class="run__note">
+                        <SketchArrow direction="curve-left" size={56} />
+                        <p class="marginalia">
+                            The last lines are the coverage: how much of this verdict is standing on
+                            text that was actually read.
+                        </p>
+                    </div>
+                </aside>
+            </div>
+        </Section>
+
+        <Section
+            id="levels"
+            title="Three questions, asked in order."
+            margin="Most tools stop at the first. The third is the point."
+        >
+            {levels.map((level) => (
+                <Chapter level={level} />
+            ))}
+        </Section>
+
+        <Section
+            id="rules"
+            field="crimson"
+            title="Six things it will never do."
+            margin="These are not preferences. Breaking one breaks the reason the tool exists."
+        >
+            <Rules />
+        </Section>
+
+        <Section
+            id="install"
+            title="The same engine behind a pipe."
+            margin="A report, a JSON document, a SARIF log — and an exit code you can gate on."
+        >
+            <div class="install-row">
+                <InstallBox id="page-install" />
+                <p class="install-row__fine">
+                    Python 3.10+. The first run downloads about 250 MB of ONNX models once; the{' '}
+                    <code>[gpu]</code> extra adds
+                    <code>torch</code> for CUDA, MPS and CPU, in that order. Nothing else is
+                    installed without asking.
+                </p>
+            </div>
+            <Ci />
+        </Section>
+    </main>
+    <Footer />
+</Layout>
+
+<style>
+    .hero-shell {
+        --field: var(--crimson);
+        background: var(--crimson);
+        color: var(--paper);
+    }
+    .run {
+        display: grid;
+        gap: var(--space-5);
+        align-items: start;
+    }
+    @media (min-width: 64rem) {
+        .run {
+            grid-template-columns: minmax(0, 1fr) var(--margin-col);
+            gap: var(--space-6);
+        }
+    }
+    .run__notes {
+        display: grid;
+        gap: var(--space-5);
+        padding-top: var(--space-6);
+    }
+    @media (min-width: 64rem) {
+        .run__notes {
+            grid-template-rows: repeat(4, auto);
+            align-content: space-between;
+            height: 100%;
+        }
+    }
+    .run__note {
+        display: flex;
+        gap: var(--space-2);
+        align-items: flex-start;
+    }
+    .run__note .marginalia {
+        margin: 0;
+    }
+    .install-row {
+        display: grid;
+        gap: var(--space-5);
+        align-items: center;
+        margin-bottom: var(--space-7);
+    }
+    @media (min-width: 64rem) {
+        .install-row {
+            grid-template-columns: minmax(0, 34rem) minmax(0, 1fr);
+            gap: var(--space-7);
+        }
+    }
+    .install-row__fine {
+        font-size: var(--step--1);
+        color: var(--ink-soft);
+        margin: 0;
+    }
+</style>

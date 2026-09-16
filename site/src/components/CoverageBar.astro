@@ -1,0 +1,105 @@
+---
+/* Coverage drawn as three pencil strokes of different weight: full text solid,
+   abstract hatched, unverified dotted. The strokes draw themselves on scroll. */
+import type { Coverage } from '../data/coverage';
+interface Props {
+    coverage: Coverage;
+    tone?: 'ink' | 'paper';
+    caption?: boolean;
+    class?: string;
+}
+const { coverage, tone = 'ink', caption = true, class: className } = Astro.props;
+const { full, abstract, unverified } = coverage;
+const W = 400;
+const x1 = (full / 100) * W;
+const x2 = x1 + (abstract / 100) * W;
+---
+
+<figure class:list={['coverage', `coverage--${tone}`, className]}>
+    <svg
+        class="coverage__bar"
+        viewBox={`0 0 ${W} 24`}
+        preserveAspectRatio="none"
+        aria-hidden="true"
+        focusable="false"
+        data-draw
+    >
+        <path class="coverage__full" d={`M0 12 L ${x1} 12`} style="--delay: 0ms"></path>
+        <path class="coverage__abstract" d={`M${x1} 12 L ${x2} 12`} style="--delay: 500ms"></path>
+        <path class="coverage__unverified" d={`M${x2} 12 L ${W} 12`} style="--delay: 800ms"></path>
+    </svg>
+    <figcaption class="coverage__legend">
+        <span>
+            <b>{full}%</b> full text
+        </span>
+        <span>
+            <b>{abstract}%</b> abstract only
+        </span>
+        <span>
+            <b>{unverified}%</b> unverified
+        </span>
+        {caption && coverage.reasons ? (
+            <span class="coverage__reasons">
+                {coverage.reasons.map((r) => (
+                    <span>
+                        {r.label}: {r.count}
+                    </span>
+                ))}
+            </span>
+        ) : null}
+    </figcaption>
+</figure>
+
+<style>
+    .coverage {
+        margin: 0;
+        --cov-ink: var(--ink);
+        --cov-soft: var(--slate);
+    }
+    .coverage--paper {
+        --cov-ink: var(--paper);
+        --cov-soft: var(--rose-soft);
+    }
+    .coverage__bar {
+        display: block;
+        width: 100%;
+        height: 24px;
+        overflow: visible;
+        filter: url(#pencil-soft);
+    }
+    .coverage__bar path {
+        fill: none;
+        stroke-linecap: butt;
+        vector-effect: non-scaling-stroke;
+        --draw-duration: 700ms;
+    }
+    .coverage__full {
+        stroke: var(--cov-ink);
+        stroke-width: 14px;
+    }
+    .coverage__abstract {
+        stroke: var(--cov-ink);
+        stroke-width: 8px;
+        opacity: 0.75;
+    }
+    .coverage__unverified {
+        stroke: var(--cov-soft);
+        stroke-width: 3px;
+    }
+    .coverage__legend {
+        display: flex;
+        flex-wrap: wrap;
+        gap: var(--space-2) var(--space-5);
+        font-family: var(--font-mono);
+        font-size: var(--step--1);
+        margin-top: var(--space-2);
+    }
+    .coverage__legend b {
+        font-weight: 500;
+    }
+    .coverage__reasons {
+        display: inline-flex;
+        gap: var(--space-3);
+        opacity: 0.75;
+    }
+</style>

@@ -1,0 +1,67 @@
+---
+/* A verdict word inside a hand-drawn ring. Tones follow what the word means in
+   proofpath: ok, bad, slate for "could not verify", ink for neutral. */
+interface Props {
+    label: string;
+    tone?: 'ok' | 'bad' | 'slate' | 'ink';
+    draw?: boolean;
+}
+const { label, tone = 'ink', draw = false } = Astro.props;
+---
+
+<span class:list={['sketch-badge', `tone-${tone}`]}>
+    <span class="sketch-badge__label">{label}</span>
+    <svg
+        class="sketch-badge__ring"
+        viewBox="0 0 120 40"
+        preserveAspectRatio="none"
+        aria-hidden="true"
+        focusable="false"
+        data-draw={draw ? '' : undefined}
+    >
+        <path d="M8 20 C 6 8, 30 3, 60 4 S 116 6, 114 20 S 90 37, 60 36 S 10 34, 8 20 C 7 12, 20 6, 40 5"></path>
+    </svg>
+</span>
+
+<style>
+    .sketch-badge {
+        position: relative;
+        display: inline-block;
+        padding: 0.15em 0.85em;
+        font-family: var(--font-mono);
+        font-size: 0.85em;
+        font-weight: 500;
+        letter-spacing: 0.01em;
+        white-space: nowrap;
+        --badge-stroke: var(--ink);
+        color: var(--ink);
+    }
+    .tone-ok {
+        --badge-stroke: #15803d;
+        color: #15803d;
+    }
+    .tone-bad {
+        --badge-stroke: var(--crimson);
+        color: var(--crimson);
+    }
+    .tone-slate {
+        --badge-stroke: var(--slate);
+        color: var(--slate);
+    }
+    .sketch-badge__ring {
+        position: absolute;
+        inset: -0.1em -0.15em;
+        width: calc(100% + 0.3em);
+        height: calc(100% + 0.2em);
+        overflow: visible;
+        filter: url(#pencil-soft);
+        pointer-events: none;
+    }
+    path {
+        fill: none;
+        stroke: var(--badge-stroke);
+        stroke-width: var(--stroke);
+        stroke-linecap: round;
+        vector-effect: non-scaling-stroke;
+    }
+</style>

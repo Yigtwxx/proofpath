@@ -1,0 +1,151 @@
+---
+/* The one-shot surface: what the same engine does behind a pipe. */
+import { commands, exitCodes } from '../data/commands';
+import Halftone from './Halftone.astro';
+import SketchBox from './sketch/SketchBox.astro';
+import SketchArrow from './sketch/SketchArrow.astro';
+---
+
+<div class="ci">
+    <div class="ci__main">
+        <SketchBox padding="md" draw class="ci__commands">
+            <div class="ci__pre" role="figure" aria-label="Command examples">
+                {commands.map((c) => (
+                    <div class="ci__line">
+                        <span class="ci__prompt" aria-hidden="true">
+                            $&nbsp;
+                        </span>
+                        <span class="ci__cmd">{c.cmd}</span>
+                        <span class="ci__comment">{`  # ${c.comment}`}</span>
+                    </div>
+                ))}
+            </div>
+        </SketchBox>
+        <div class="ci__exit">
+            <div class="ci__exit-arrow">
+                <SketchArrow direction="curve-down" size={56} />
+                <p class="marginalia">
+                    the exit code is the interface — no text parsing needed to gate a job
+                </p>
+            </div>
+            <table class="ci__table">
+                <caption class="visually-hidden">Exit codes</caption>
+                <tbody>
+                    {exitCodes.map((e) => (
+                        <tr>
+                            <th scope="row">
+                                <code>{e.code}</code>
+                            </th>
+                            <td>{e.meaning}</td>
+                        </tr>
+                    ))}
+                </tbody>
+            </table>
+        </div>
+        <div class="ci__prose">
+            <p>
+                <code>--format sarif</code> writes a SARIF 2.1.0 log: one result per finding on its
+                line, the quoted passage in the message, the exact honesty state in
+                <code>properties</code>, and the run's coverage in the run's properties, so a log
+                opened without the terminal still says how much was read. Any SARIF viewer reads it,
+                including VS Code's.
+            </p>
+            <p>
+                Piped or in CI there is no prompt: a permission set to <code>ask</code> is treated
+                as
+                <code>deny</code> and reported. A job never waits on a question nobody will answer.
+            </p>
+        </div>
+    </div>
+    <figure class="ci__figure">
+        <Halftone id="moon" tone="paper" sizes="(min-width: 64rem) 34vw, 92vw" />
+        <figcaption class="caption ci__caption">
+            Gustave Doré, frontispiece to <cite>The Raven</cite>, 1884.
+        </figcaption>
+    </figure>
+</div>
+
+<style>
+    .ci {
+        display: grid;
+        gap: var(--space-7);
+    }
+    @media (min-width: 64rem) {
+        .ci {
+            grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
+            gap: var(--space-8);
+            align-items: start;
+        }
+    }
+    .ci__main {
+        display: grid;
+        gap: var(--space-6);
+    }
+    .ci__pre {
+        font-family: var(--font-mono);
+        font-size: var(--step--1);
+        line-height: 1.6;
+        overflow-x: auto;
+    }
+    .ci__line {
+        display: grid;
+        grid-template-columns: auto 1fr;
+        white-space: nowrap;
+        padding-block: 0.15em;
+    }
+    .ci__comment {
+        grid-column: 2;
+        display: block;
+    }
+    .ci__prompt {
+        color: var(--ink-mute);
+    }
+    .ci__comment {
+        color: var(--ink-mute);
+    }
+    .ci__exit {
+        display: grid;
+        gap: var(--space-4);
+    }
+    @media (min-width: 48rem) {
+        .ci__exit {
+            grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr);
+            align-items: center;
+        }
+    }
+    .ci__exit-arrow {
+        display: flex;
+        gap: var(--space-3);
+        align-items: flex-start;
+    }
+    .ci__exit-arrow .marginalia {
+        margin: 0;
+    }
+    .ci__table {
+        border-collapse: collapse;
+        font-size: var(--step-0);
+    }
+    .ci__table th,
+    .ci__table td {
+        text-align: left;
+        padding: var(--space-2) var(--space-3);
+        border-bottom: 1px solid var(--paper-line);
+        vertical-align: top;
+    }
+    .ci__table th code {
+        font-size: var(--step-1);
+        background: none;
+        padding: 0;
+        color: var(--crimson);
+    }
+    .ci__prose p {
+        font-size: var(--step-0);
+    }
+    .ci__figure {
+        margin: 0;
+    }
+    .ci__caption {
+        color: var(--ink-mute);
+        margin-top: var(--space-3);
+    }
+</style>
