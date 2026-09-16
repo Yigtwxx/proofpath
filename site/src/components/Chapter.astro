@@ -1,0 +1,147 @@
+---
+/* One of the three questions. The image sits on the side the raven is flying
+   to: odd chapters image-right, even chapters image-left. */
+import type { Level } from '../data/levels';
+import Halftone from './Halftone.astro';
+import SketchBadge from './sketch/SketchBadge.astro';
+import Finding from './Finding.astro';
+import { mark } from '../lib/mark';
+import type { ImageId } from '../data/images.generated';
+
+interface Props {
+    level: Level;
+}
+const { level } = Astro.props;
+const flip = level.n % 2 === 0;
+---
+
+<article
+    class:list={['chapter', { 'chapter--flip': flip }]}
+    id={`level-${level.slug}`}
+    aria-labelledby={`level-${level.slug}-title`}
+>
+    <div class="chapter__text">
+        <p class="chapter__n" aria-hidden="true">
+            {level.n}
+        </p>
+        <h3 id={`level-${level.slug}-title`} class="chapter__title">
+            {level.question}
+        </h3>
+        <div class="chapter__raven">
+            <Halftone
+                id={level.raven}
+                tone="paper"
+                hover={false}
+                vignette
+                sizes="10rem"
+                class="chapter__raven-img"
+            />
+            <p class="marginalia">{level.ravenDoes}</p>
+        </div>
+        {level.body.map((p) => (
+            <p set:html={mark(p)} />
+        ))}
+        <p class="chapter__sources">
+            <span class="chapter__sources-label">asks</span>
+            {level.sources.map((s) => (
+                <code>{s}</code>
+            ))}
+        </p>
+        <p class="chapter__states">
+            {level.states.map((s) => (
+                <SketchBadge label={s.label} tone={s.tone} draw />
+            ))}
+        </p>
+    </div>
+    <div class="chapter__side">
+        <Halftone
+            id={level.imageId as ImageId}
+            tone="paper"
+            sizes="(min-width: 64rem) 38vw, 92vw"
+        />
+        <div class="chapter__finding">
+            <Finding
+                finding={level.example}
+                caption={
+                    level.n === 2
+                        ? 'An illustrative line; the run above had no retractions.'
+                        : undefined
+                }
+            />
+        </div>
+    </div>
+</article>
+
+<style>
+    .chapter {
+        display: grid;
+        gap: var(--space-6);
+        align-items: start;
+        padding-block: var(--space-7);
+        border-top: 1px solid var(--paper-line);
+    }
+    @media (min-width: 64rem) {
+        .chapter {
+            grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+            gap: var(--space-8);
+        }
+        .chapter--flip .chapter__text {
+            order: 2;
+        }
+    }
+    .chapter__n {
+        font-family: var(--font-display);
+        font-size: var(--step-6);
+        line-height: 1;
+        color: var(--crimson);
+        margin: 0 0 var(--space-2);
+        font-variation-settings:
+            'opsz' 144,
+            'WONK' 1;
+    }
+    .chapter__title {
+        font-size: var(--step-4);
+        max-width: 16ch;
+    }
+    .chapter__raven {
+        display: grid;
+        grid-template-columns: 10rem 1fr;
+        gap: var(--space-4);
+        align-items: center;
+        margin-block: var(--space-4) var(--space-5);
+    }
+    .chapter__raven :global(.chapter__raven-img) {
+        width: 10rem;
+    }
+    .chapter__raven .marginalia {
+        max-width: 30ch;
+        margin: 0;
+    }
+    .chapter__sources {
+        display: flex;
+        flex-wrap: wrap;
+        gap: var(--space-2);
+        align-items: baseline;
+        font-size: var(--step--1);
+        margin-top: var(--space-5);
+    }
+    .chapter__sources-label {
+        font-family: var(--font-hand);
+        font-size: var(--step-0);
+        color: var(--ink-mute);
+        margin-right: var(--space-1);
+    }
+    .chapter__states {
+        display: flex;
+        flex-wrap: wrap;
+        gap: var(--space-3);
+        margin-top: var(--space-3);
+    }
+    .chapter__side {
+        display: grid;
+        gap: var(--space-5);
+    }
+    .chapter__finding {
+        margin-inline: var(--space-3);
+    }
+</style>

@@ -1,0 +1,89 @@
+---
+/* The social card, rendered as a page and screenshotted at 1200x630 into
+   public/og.png (see scripts/og.md). Not linked, not indexed, not in the sitemap. */
+import '../styles/global.css';
+import PencilDefs from '../components/sketch/PencilDefs.astro';
+import Halftone from '../components/Halftone.astro';
+import SketchUnderline from '../components/sketch/SketchUnderline.astro';
+---
+
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="utf-8" />
+        <meta name="robots" content="noindex, nofollow" />
+        <title>og</title>
+        <style>
+            html,
+            body {
+                margin: 0;
+                width: 1200px;
+                height: 630px;
+                overflow: hidden;
+            }
+            body::before {
+                display: none;
+            }
+            .og {
+                width: 1200px;
+                height: 630px;
+                background: var(--crimson);
+                color: var(--paper);
+                display: grid;
+                grid-template-columns: 620px 1fr;
+                align-items: center;
+                padding: 56px 64px;
+                box-sizing: border-box;
+                gap: 40px;
+            }
+            .og h1 {
+                font-size: 92px;
+                font-weight: 340;
+                line-height: 0.98;
+                letter-spacing: -0.02em;
+                color: var(--paper);
+                margin: 0 0 28px;
+                font-variation-settings:
+                    'opsz' 144,
+                    'SOFT' 60,
+                    'WONK' 1;
+            }
+            .og p {
+                font-size: 26px;
+                line-height: 1.35;
+                margin: 0;
+                max-width: 560px;
+            }
+            .og .name {
+                font-family: var(--font-mono);
+                font-size: 22px;
+                opacity: 0.8;
+                margin-bottom: 24px;
+            }
+            .og .figure {
+                height: 518px;
+                overflow: hidden;
+            }
+        </style>
+    </head>
+    <body>
+        <PencilDefs />
+        <div class="og">
+            <div>
+                <div class="name">proofpath</div>
+                <h1>
+                    Don't guess.
+                    <br />
+                    Show the <SketchUnderline tone="paper">evidence.</SketchUnderline>
+                </h1>
+                <p>
+                    Checks whether the sources behind a claim actually say what the claim says.
+                    Locally, free, no API key.
+                </p>
+            </div>
+            <div class="figure">
+                <Halftone id="corbeau" tone="crimson" hover={false} loading="eager" sizes="520px" />
+            </div>
+        </div>
+    </body>
+</html>

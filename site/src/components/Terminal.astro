@@ -1,0 +1,127 @@
+---
+/* The scripted run: a dark panel in the TUI's own colours, on the paper page.
+   The full transcript is in the markup for screen readers and for no-JS. */
+import { frames, ferret } from '../data/demo';
+
+// Final state for the static transcript: last frame per id, in first-seen order.
+const finalLines = (() => {
+    const map = new Map<string, (typeof frames)[number]>();
+    frames.forEach((f, i) => {
+        if (f.id === 'ferret') return;
+        map.set(f.id ?? `#${i}`, f);
+    });
+    return Array.from(map.values());
+})();
+---
+
+<div class="tui" data-tui>
+    <div class="tui__bar">
+        <span class="tui__dots" aria-hidden="true">
+            <i></i>
+            <i></i>
+            <i></i>
+        </span>
+        <span class="tui__title">proofpath — draft-live.md</span>
+        <button class="tui__replay" type="button" data-tui-replay>
+            replay
+        </button>
+    </div>
+    <pre class="tui__banner" aria-hidden="true" data-tui-eyes>{ferret.idle.join('\n')}</pre>
+    <div class="tui__out" data-tui-out aria-hidden="true"></div>
+    <pre class="visually-hidden">{finalLines.map((f) => f.spans.map((s) => s.text).join('')).join('\n')}</pre>
+</div>
+
+<style>
+    .tui {
+        max-width: 100%;
+        min-width: 0;
+        background: var(--tui-bg);
+        color: var(--tui-fg);
+        font-family: var(--font-mono);
+        font-size: clamp(0.66rem, 0.55rem + 0.55vw, 0.9rem);
+        line-height: 1.5;
+        border-radius: 6px;
+        padding: 0 0 var(--space-4);
+        min-height: 34em;
+        overflow: hidden;
+        box-shadow:
+            0 1px 0 color-mix(in srgb, var(--ink) 30%, transparent),
+            0 24px 60px -30px color-mix(in srgb, var(--ink) 60%, transparent);
+    }
+    .tui__bar {
+        display: flex;
+        align-items: center;
+        gap: var(--space-3);
+        padding: 0.6em 1em;
+        border-bottom: 1px solid color-mix(in srgb, var(--tui-fg) 12%, transparent);
+        color: color-mix(in srgb, var(--tui-fg) 60%, transparent);
+    }
+    .tui__dots i {
+        display: inline-block;
+        width: 0.7em;
+        height: 0.7em;
+        border-radius: 50%;
+        margin-right: 0.35em;
+        background: color-mix(in srgb, var(--tui-fg) 22%, transparent);
+    }
+    .tui__title {
+        flex: 1;
+    }
+    .tui__replay {
+        background: none;
+        border: 1px solid color-mix(in srgb, var(--tui-fg) 30%, transparent);
+        color: inherit;
+        border-radius: 3px;
+        padding: 0.1em 0.6em;
+        cursor: pointer;
+        font: inherit;
+    }
+    .tui__replay:hover {
+        color: var(--tui-fg);
+        border-color: var(--tui-fg);
+    }
+    .tui__banner {
+        padding: 1em 1.2em 0;
+        color: color-mix(in srgb, var(--tui-fg) 70%, transparent);
+    }
+    .tui__banner::after {
+        content: '';
+    }
+    .tui__out {
+        padding: 0.6em 1.2em 0;
+        white-space: pre;
+        overflow-x: auto;
+    }
+    .tui__out :global([data-tone='ok']) {
+        color: var(--tui-ok);
+    }
+    .tui__out :global([data-tone='warn']) {
+        color: #111;
+        background: var(--tui-warn);
+    }
+    .tui__out :global([data-tone='bad']) {
+        color: var(--tui-bad);
+    }
+    .tui__out :global(.tui__line > [data-tone='bad'] + span + [data-tone='bad']),
+    .tui__out :global(.tui__line > span + span + [data-tone='bad']) {
+        color: #fff;
+        background: var(--tui-bad);
+    }
+    .tui__out :global([data-tone='dim']) {
+        color: var(--tui-dim);
+    }
+    .tui__out :global([data-tone='accent']) {
+        color: var(--tui-accent);
+    }
+    .tui__out :global([data-tone='you']) {
+        color: var(--tui-accent);
+    }
+    .tui__out :global([data-tone='source']) {
+        color: #a78bfa;
+    }
+</style>
+
+<script>
+    import { initTerminals } from '../scripts/terminal';
+    initTerminals();
+</script>

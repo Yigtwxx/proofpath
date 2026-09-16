@@ -1,0 +1,182 @@
+{
+  "$comment": "Public-domain sources for the site's halftones. Every entry was checked on its Commons page for licence before being added. Run `npm run images` after editing; the outputs in public/images are committed.",
+  "images": [
+    {
+      "id": "corbeau",
+      "alt": "A large raven, hunched on cobblestones, staring straight at the viewer. Etching.",
+      "title": "Le Corbeau",
+      "author": "Félix Bracquemond",
+      "year": 1854,
+      "licence": "CC0 1.0",
+      "licence_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+      "page_url": "https://commons.wikimedia.org/wiki/File:The_Raven_MET_DP814037.jpg",
+      "source": "The Metropolitan Museum of Art, Open Access",
+      "source_url": "https://upload.wikimedia.org/wikipedia/commons/c/ce/The_Raven_MET_DP814037.jpg",
+      "crop": {
+        "x": 0.3,
+        "y": 0.46,
+        "w": 0.65,
+        "h": 0.45
+      },
+      "gamma": 1.1,
+      "tones": ["crimson", "paper"]
+    },
+    {
+      "id": "bust",
+      "alt": "A raven perched on a marble bust of Pallas, a halo of faces behind it. Wood engraving.",
+      "title": "Perched upon a bust of Pallas (The Raven, plate 15)",
+      "author": "Gustave Doré",
+      "year": 1884,
+      "licence": "Public domain",
+      "licence_url": "https://commons.wikimedia.org/wiki/Template:PD-old",
+      "page_url": "https://commons.wikimedia.org/wiki/File:Paul_Gustave_Dore_Raven15.jpg",
+      "source_url": "https://upload.wikimedia.org/wikipedia/commons/7/73/Paul_Gustave_Dore_Raven15.jpg",
+      "crop": {
+        "x": 0.0,
+        "y": 0.0,
+        "w": 1.0,
+        "h": 0.98
+      },
+      "tones": ["paper"],
+      "gamma": 1.15
+    },
+    {
+      "id": "door",
+      "alt": "A tall double door standing ajar, a figure half visible in the gap, light pouring through. Wood engraving.",
+      "title": "Here I opened wide the door (The Raven)",
+      "author": "Gustave Doré",
+      "year": 1884,
+      "licence": "CC0 1.0",
+      "licence_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+      "page_url": "https://commons.wikimedia.org/wiki/File:The_Raven_MET_MM61687.jpg",
+      "source": "The Metropolitan Museum of Art, Open Access",
+      "source_url": "https://upload.wikimedia.org/wikipedia/commons/2/29/The_Raven_MET_MM61687.jpg",
+      "crop": {
+        "x": 0.04,
+        "y": 0.03,
+        "w": 0.92,
+        "h": 0.93
+      },
+      "tones": ["paper"],
+      "gamma": 1.5,
+      "contrast": 1.6
+    },
+    {
+      "id": "lamp",
+      "alt": "A man reading at a table by lamplight, a child asleep against him. Wood engraving.",
+      "title": "Over many a quaint and curious volume (The Raven, plate 2)",
+      "author": "Gustave Doré",
+      "year": 1884,
+      "licence": "Public domain",
+      "licence_url": "https://commons.wikimedia.org/wiki/Template:PD-old",
+      "page_url": "https://commons.wikimedia.org/wiki/File:Paul_Gustave_Dore_Raven2.jpg",
+      "source_url": "https://upload.wikimedia.org/wikipedia/commons/9/9b/Paul_Gustave_Dore_Raven2.jpg",
+      "crop": {
+        "x": 0.0,
+        "y": 0.0,
+        "w": 1.0,
+        "h": 0.98
+      },
+      "tones": ["paper"]
+    },
+    {
+      "id": "nevermore",
+      "alt": "A raven flying out from behind a heavy curtain that a figure is pulling aside; a banner reads Nevermore. Wood engraving.",
+      "title": "Nevermore (The Raven)",
+      "author": "Gustave Doré",
+      "year": 1884,
+      "licence": "CC0 1.0",
+      "licence_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+      "page_url": "https://commons.wikimedia.org/wiki/File:The_Raven_MET_MM89635.jpg",
+      "source": "The Metropolitan Museum of Art, Open Access",
+      "source_url": "https://upload.wikimedia.org/wikipedia/commons/c/c7/The_Raven_MET_MM89635.jpg",
+      "crop": {
+        "x": 0.04,
+        "y": 0.04,
+        "w": 0.94,
+        "h": 0.68
+      },
+      "tones": ["paper", "crimson"],
+      "gamma": 0.8
+    },
+    {
+      "id": "moon",
+      "alt": "A veiled figure with a scythe seated on the moon among clouds, a raven flying beneath. Wood engraving.",
+      "title": "Frontispiece to The Raven",
+      "author": "Gustave Doré",
+      "year": 1884,
+      "licence": "CC0 1.0",
+      "licence_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+      "page_url": "https://commons.wikimedia.org/wiki/File:The_Raven_MET_MM61688.jpg",
+      "source": "The Metropolitan Museum of Art, Open Access",
+      "source_url": "https://upload.wikimedia.org/wikipedia/commons/5/5f/The_Raven_MET_MM61688.jpg",
+      "crop": {
+        "x": 0.03,
+        "y": 0.22,
+        "w": 0.94,
+        "h": 0.6
+      },
+      "tones": ["paper", "crimson"],
+      "gamma": 1.25
+    },
+    {
+      "id": "shore",
+      "alt": "Two framed panels: a sleeping figure among waves, and a raven over a dark sea beneath cliffs; the caption reads The Night's Plutonian Shore. Pen drawing.",
+      "title": "The Night's Plutonian Shore",
+      "author": "William Heath Robinson",
+      "year": 1909,
+      "licence": "CC0 1.0",
+      "licence_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+      "page_url": "https://commons.wikimedia.org/wiki/File:%22The_Night%27s_Plutonian_Shore%22-_The_Raven_MET_DP821071.jpg",
+      "source": "The Metropolitan Museum of Art, Open Access",
+      "source_url": "https://upload.wikimedia.org/wikipedia/commons/7/7b/%22The_Night%27s_Plutonian_Shore%22-_The_Raven_MET_DP821071.jpg",
+      "crop": {
+        "x": 0.04,
+        "y": 0.09,
+        "w": 0.92,
+        "h": 0.82
+      },
+      "tones": ["crimson", "paper"]
+    },
+    {
+      "id": "huginn",
+      "alt": "A raven in flight, wings spread, cropped from Doré's Nevermore plate.",
+      "title": "Nevermore (detail: the raven)",
+      "author": "Gustave Doré",
+      "year": 1884,
+      "licence": "CC0 1.0",
+      "licence_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+      "page_url": "https://commons.wikimedia.org/wiki/File:The_Raven_MET_MM89635.jpg",
+      "source": "The Metropolitan Museum of Art, Open Access",
+      "source_url": "https://upload.wikimedia.org/wikipedia/commons/c/c7/The_Raven_MET_MM89635.jpg",
+      "crop": {
+        "x": 0.56,
+        "y": 0.17,
+        "w": 0.36,
+        "h": 0.19
+      },
+      "gamma": 0.8,
+      "tones": ["paper", "crimson"]
+    },
+    {
+      "id": "muninn",
+      "alt": "A raven gliding beneath the moon, cropped from Doré's frontispiece to The Raven.",
+      "title": "Frontispiece to The Raven (detail: the raven)",
+      "author": "Gustave Doré",
+      "year": 1884,
+      "licence": "CC0 1.0",
+      "licence_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+      "page_url": "https://commons.wikimedia.org/wiki/File:The_Raven_MET_MM61688.jpg",
+      "source": "The Metropolitan Museum of Art, Open Access",
+      "source_url": "https://upload.wikimedia.org/wikipedia/commons/5/5f/The_Raven_MET_MM61688.jpg",
+      "crop": {
+        "x": 0.4,
+        "y": 0.55,
+        "w": 0.3,
+        "h": 0.17
+      },
+      "tones": ["paper", "crimson"],
+      "gamma": 1.2
+    }
+  ]
+}

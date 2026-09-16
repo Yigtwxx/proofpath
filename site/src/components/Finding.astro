@@ -1,0 +1,106 @@
+---
+/* One finding, laid out the way the TUI lays it out: glyph, line, reference,
+   the state word as a badge, the tier; then notes, then the claim (`you`) and
+   the passage (`source`) it was checked against. */
+import type { Finding } from '../data/levels';
+import SketchBox from './sketch/SketchBox.astro';
+interface Props {
+    finding: Finding;
+    caption?: string;
+}
+const { finding, caption } = Astro.props;
+const bad = finding.verdict.tone === 'bad';
+---
+
+<SketchBox padding="sm" draw class="finding">
+    <div class="finding__head">
+        <span class="finding__glyph" data-tone={finding.verdict.tone} aria-hidden="true">
+            {bad ? '✗' : '·'}
+        </span>
+        <span class="finding__line">{finding.line}</span>
+        <span class="finding__ref">{finding.ref}</span>
+        <span class="finding__verdict" data-tone={finding.verdict.tone}>
+            {finding.verdict.label}
+        </span>
+        {finding.tier ? <span class="finding__tier">{finding.tier}</span> : null}
+    </div>
+    {finding.note ? <p class="finding__note">{finding.note}</p> : null}
+    {finding.claim ? (
+        <p class="finding__quote">
+            <span class="finding__who finding__who--you">you</span>
+            <span>“{finding.claim}”</span>
+        </p>
+    ) : null}
+    {finding.passage ? (
+        <p class="finding__quote">
+            <span class="finding__who finding__who--source">source</span>
+            <span>“{finding.passage}” ⧉</span>
+        </p>
+    ) : null}
+    {caption ? <p class="finding__caption">{caption}</p> : null}
+</SketchBox>
+
+<style>
+    .finding {
+        font-family: var(--font-mono);
+        font-size: var(--step--1);
+        line-height: 1.55;
+    }
+    .finding__head {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: baseline;
+        gap: 0.25em 0.6em;
+    }
+    .finding__glyph[data-tone='bad'],
+    .finding__verdict[data-tone='bad'] {
+        color: var(--crimson);
+    }
+    .finding__line {
+        color: var(--ink-mute);
+    }
+    .finding__ref {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        max-width: 100%;
+    }
+    .finding__verdict {
+        font-weight: 500;
+        padding: 0.05em 0.4em;
+        border: var(--stroke) solid currentColor;
+        white-space: nowrap;
+    }
+    .finding__verdict[data-tone='slate'] {
+        color: var(--slate);
+    }
+    .finding__verdict[data-tone='ok'] {
+        color: #15803d;
+    }
+    .finding__tier,
+    .finding__note {
+        color: var(--ink-mute);
+    }
+    .finding__note {
+        margin: 0.4em 0 0 1.6em;
+    }
+    .finding__quote {
+        display: grid;
+        grid-template-columns: 4.5em 1fr;
+        gap: 0.6em;
+        margin: 0.5em 0 0 1.6em;
+        max-width: none;
+    }
+    .finding__who--you {
+        color: var(--crimson);
+    }
+    .finding__who--source {
+        color: var(--slate);
+    }
+    .finding__caption {
+        font-family: var(--font-hand);
+        font-size: var(--step-0);
+        color: var(--ink-mute);
+        margin: var(--space-3) 0 0;
+    }
+</style>

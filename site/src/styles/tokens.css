@@ -1,0 +1,74 @@
+/* Design tokens for the proofpath site.
+   The page is a field notebook: warm paper, dark ink, a red margin line.
+   Crimson is the "pen" that annotates; rose is the wash behind photographs;
+   slate is reserved for the states where nothing could be verified. */
+:root {
+    /* paper and ink */
+    --paper: #f6f1e7;
+    --paper-deep: #ede5d5;
+    --paper-line: #d9cfbd;
+    --ink: #1e1a17;
+    --ink-soft: #4a433d;
+    --ink-mute: #6f6659; /* 5.01:1 on --paper */
+
+    /* the pen */
+    --crimson: #c4173a; /* 5.27:1 on --paper, AA for body text */
+    --crimson-deep: #8f0f2b;
+    --rose: #f2a0b3; /* fills and halftone only, never text */
+    --rose-soft: #fbdde4; /* 4.69:1 on --crimson, AA for text on the field */
+    --rose-wash: #fbe7ec;
+
+    /* the unverified */
+    --slate: #5a6878; /* 5.07:1 on --paper */
+    --slate-soft: #b7c1ce;
+
+    /* terminal demo only: these mean things inside proofpath */
+    --tui-bg: #1b1815;
+    --tui-fg: #e9e2d6;
+    --tui-ok: #22c55e;
+    --tui-warn: #f59e0b;
+    --tui-bad: #ef4444;
+    --tui-dim: #8a847c;
+    --tui-accent: #22d3ee;
+
+    /* type */
+    --font-display: 'Fraunces Variable', 'Iowan Old Style', Georgia, serif;
+    --font-body: 'Inter Variable', system-ui, -apple-system, sans-serif;
+    --font-mono: 'IBM Plex Mono', ui-monospace, 'SFMono-Regular', Menlo, monospace;
+    --font-hand: 'Caveat Variable', 'Bradley Hand', 'Segoe Print', cursive;
+
+    /* fluid type scale: ratio 1.2 at 360px → 1.25 at 1280px */
+    --step--1: clamp(0.83rem, 0.8rem + 0.15vw, 0.92rem);
+    --step-0: clamp(1rem, 0.95rem + 0.25vw, 1.15rem);
+    --step-1: clamp(1.2rem, 1.1rem + 0.5vw, 1.44rem);
+    --step-2: clamp(1.44rem, 1.25rem + 0.9vw, 1.8rem);
+    --step-3: clamp(1.73rem, 1.4rem + 1.6vw, 2.25rem);
+    --step-4: clamp(2.07rem, 1.5rem + 2.7vw, 2.81rem);
+    --step-5: clamp(2.49rem, 1.6rem + 4.4vw, 3.52rem);
+    --step-6: clamp(2.99rem, 1.6rem + 6.8vw, 4.4rem);
+
+    /* fluid spacing */
+    --space-1: clamp(0.25rem, 0.23rem + 0.1vw, 0.31rem);
+    --space-2: clamp(0.5rem, 0.46rem + 0.2vw, 0.63rem);
+    --space-3: clamp(0.75rem, 0.69rem + 0.3vw, 0.94rem);
+    --space-4: clamp(1rem, 0.92rem + 0.4vw, 1.25rem);
+    --space-5: clamp(1.5rem, 1.38rem + 0.6vw, 1.88rem);
+    --space-6: clamp(2rem, 1.84rem + 0.8vw, 2.5rem);
+    --space-7: clamp(3rem, 2.76rem + 1.2vw, 3.75rem);
+    --space-8: clamp(4rem, 3.68rem + 1.6vw, 5rem);
+    --space-9: clamp(6rem, 5.5rem + 2.4vw, 7.5rem);
+
+    /* the pencil */
+    --stroke: 1.5px;
+    --stroke-bold: 2.5px;
+
+    /* layout: a notebook page with a margin column */
+    --page-max: 72rem;
+    --gutter: clamp(1rem, 4vw, 2.5rem);
+    --margin-col: clamp(0px, 18vw, 16rem);
+    --measure: 62ch;
+
+    /* motion */
+    --draw-duration: 900ms;
+    --ease-pen: cubic-bezier(0.3, 0, 0.2, 1);
+}

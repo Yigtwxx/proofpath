@@ -1,0 +1,66 @@
+---
+/* A page section with a display heading and an optional margin note.
+   `field` chooses the ground: paper (default) or crimson. */
+interface Props {
+    id: string;
+    title: string;
+    field?: 'paper' | 'crimson';
+    margin?: string;
+    class?: string;
+}
+const { id, title, field = 'paper', margin, class: className } = Astro.props;
+---
+
+<section
+    class:list={['section', `section--${field}`, className]}
+    id={id}
+    aria-labelledby={`${id}-title`}
+>
+    <div class="page">
+        <header class="section__head">
+            <h2 id={`${id}-title`} class="section__title">
+                {title}
+            </h2>
+            {margin ? <p class="marginalia section__margin">{margin}</p> : null}
+        </header>
+        <slot />
+    </div>
+</section>
+
+<style>
+    .section {
+        padding-block: var(--space-8);
+    }
+    .section--paper {
+        --field: var(--paper);
+        background: var(--paper);
+        color: var(--ink);
+    }
+    .section--crimson {
+        --field: var(--crimson);
+        --pen: var(--rose-soft);
+        --caption: var(--rose-soft);
+        background: var(--crimson);
+        color: var(--paper);
+    }
+    .section__head {
+        display: grid;
+        gap: var(--space-4);
+        align-items: end;
+        margin-bottom: var(--space-6);
+    }
+    @media (min-width: 64rem) {
+        .section__head {
+            grid-template-columns: minmax(0, 1fr) var(--margin-col);
+            gap: var(--space-6);
+        }
+    }
+    .section__title {
+        margin: 0;
+        font-size: var(--step-5);
+        max-width: 18ch;
+    }
+    .section--crimson .section__title {
+        color: var(--paper);
+    }
+</style>

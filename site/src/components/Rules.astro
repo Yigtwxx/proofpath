@@ -1,0 +1,135 @@
+---
+/* The six rules on the crimson field, with the Nevermore plate: the raven
+   leaving with nothing is the picture for rule two. */
+import { rules } from '../data/rules';
+import { specCoverage, weakCoverageLine } from '../data/coverage';
+import Halftone from './Halftone.astro';
+import SketchBox from './sketch/SketchBox.astro';
+import CoverageBar from './CoverageBar.astro';
+import { mark } from '../lib/mark';
+---
+
+<div class="rules">
+    <figure class="rules__figure">
+        <Halftone id="nevermore" tone="crimson" sizes="(min-width: 64rem) 34vw, 92vw" />
+        <figcaption class="caption rules__caption">
+            Gustave Doré, <cite>Nevermore</cite>, 1884. The raven leaves; the curtain stays.
+        </figcaption>
+        <div class="rules__raven">
+            <Halftone
+                id="muninn"
+                tone="crimson"
+                hover={false}
+                vignette
+                sizes="11rem"
+                class="rules__raven-img"
+            />
+            <p class="marginalia">
+                Muninn, back with nothing. He reports an empty beak, not an empty world.
+            </p>
+        </div>
+    </figure>
+    <ol class="rules__list">
+        {rules.map((rule, i) => (
+            <SketchBox as="li" tone="paper" padding="md" draw class="rule">
+                <span class="rule__n" aria-hidden="true">
+                    {i + 1}
+                </span>
+                <h3 class="rule__title">{rule.title}</h3>
+                <p class="rule__body" set:html={mark(rule.body)} />
+                <p class="marginalia rule__margin">{rule.margin}</p>
+                {rule.id === 'coverage' ? (
+                    <div class="rule__coverage">
+                        <CoverageBar coverage={specCoverage} tone="paper" />
+                        <p class="rule__weak">{weakCoverageLine}</p>
+                    </div>
+                ) : null}
+            </SketchBox>
+        ))}
+    </ol>
+</div>
+
+<style>
+    .rules {
+        display: grid;
+        gap: var(--space-7);
+    }
+    @media (min-width: 64rem) {
+        .rules {
+            grid-template-columns: minmax(0, 2fr) minmax(0, 3fr);
+            gap: var(--space-8);
+            align-items: start;
+        }
+        .rules__figure {
+            position: sticky;
+            top: 5rem;
+        }
+    }
+    .rules__figure {
+        margin: 0;
+    }
+    .rules__caption {
+        margin-top: var(--space-3);
+    }
+    .rules__raven {
+        display: grid;
+        grid-template-columns: 11rem 1fr;
+        gap: var(--space-4);
+        align-items: center;
+        margin-top: var(--space-6);
+        color: var(--paper);
+    }
+    .rules__raven :global(.rules__raven-img) {
+        width: 11rem;
+    }
+    .rules__raven .marginalia {
+        margin: 0;
+        max-width: 26ch;
+    }
+    .rules__list {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+        display: grid;
+        gap: var(--space-5);
+    }
+    @media (min-width: 48rem) {
+        .rules__list {
+            grid-template-columns: 1fr 1fr;
+            align-items: start;
+        }
+    }
+    .rule__n {
+        font-family: var(--font-display);
+        font-size: var(--step-3);
+        line-height: 1;
+        color: var(--rose-soft);
+        font-variation-settings:
+            'opsz' 72,
+            'WONK' 1;
+    }
+    .rule__title {
+        font-size: var(--step-2);
+        color: var(--paper);
+        margin: var(--space-2) 0 var(--space-3);
+        max-width: 20ch;
+    }
+    .rule__body {
+        font-size: var(--step-0);
+        color: var(--paper);
+        margin-bottom: var(--space-3);
+    }
+    .rule__margin {
+        margin: 0;
+    }
+    .rule__coverage {
+        margin-top: var(--space-5);
+        max-width: 40rem;
+    }
+    .rule__weak {
+        font-family: var(--font-mono);
+        font-size: var(--step--1);
+        color: var(--rose-soft);
+        margin: var(--space-3) 0 0;
+    }
+</style>
