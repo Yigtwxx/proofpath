@@ -26,7 +26,7 @@ proofpath
   ╸┤ o o                                                                     ╰~~~~~~~~~~~~~[PROOF]
    ╰─┬─┬────────────────────────────────────────────────────────────────┬─┬──╯
      ˘ ˘                                                                ˘ ˘
-      proofpath v0.2.1                                                  academic . online . coreml
+      proofpath v0.4.0                                                  academic . online . coreml
       paste a file path, a URL, or a claim.                                  /help  /config  /quit
 ```
 
@@ -59,7 +59,7 @@ either, for screenshots and bug reports.
 ```
    ,_,
   (o.o)~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~[PROOF]
-   " "    proofpath v0.2.1                                              academic . online . coreml
+   " "    proofpath v0.4.0                                              academic . online . coreml
           paste a file path, a URL, or a claim.            /help  /config  /quit
 ```
 
@@ -146,6 +146,7 @@ distinct, printed state (spec §15), never collapsed into a verdict:
 | `UNVERIFIED (reached, no text extracted)` | 200 answered, nothing readable came back |
 | `UNVERIFIED (network not permitted)` | `permissions.network = deny` |
 | `UNVERIFIED (provider unavailable)` | API down, rate limited after backoff, or answering with a page instead of a record |
+| `UNVERIFIED (credentials missing)` | the platform reads only with a credential this machine has none of — Reddit's free app, `REDDIT_CLIENT_ID` and `REDDIT_CLIENT_SECRET`. Nobody was asked, so it is not "unreachable"; the coverage block names both variables |
 | `UNVERIFIED (not in bibliographic indexes)` | web page, blog, report — indexes do not cover it, so absence proves nothing |
 | `AMBIGUOUS` | several plausible records, all listed |
 | `NEI` | the source was read and neither supports nor contradicts |
@@ -222,6 +223,32 @@ TablePlus or DBeaver — plain tables, no extension. Raw publisher text expires 
 7 days; verdicts keep the passage they quote; a provider outage is never stored.
 `proofpath resolve REF` and `proofpath fetch URL|DOI` run either half on its own.
 
+## Posts and the links inside them (v0.4)
+
+A social post is not a source. What proofpath checks is whether the **links inside it**
+back what it says:
+
+```bash
+proofpath check --url https://bsky.app/profile/bsky.app/post/3movpwtbjgs2d
+proofpath check --url https://news.ycombinator.com/item?id=8863
+proofpath check -                 # paste the text of a post that cannot be read
+```
+
+Every sentence of the post is checked against the pages its links point to, and the post's
+own words are never allowed to stand as their own evidence.
+
+| Platform | How it is read |
+|---|---|
+| Bluesky | `public.api.bsky.app`, no account, first-class. Link cards, rich-text links and one level of quoted post |
+| Hacker News | the official Firebase API, no account, first-class. A story's URL and the links in a comment |
+| Reddit | with a **free app you register yourself**: put `REDDIT_CLIENT_ID` and `REDDIT_CLIENT_SECRET` in `.env`. Without them the run says `UNVERIFIED (credentials missing)` and names both variables — it never quietly skips the post |
+| Mastodon | best effort, per instance. Many instances now require a login for the public API, and that answer is reported as `UNVERIFIED (blocked)`, not as a missing post |
+| X / Twitter | cannot be read at all. `check --url` says so and asks you to paste the text; the links inside it are then verified normally |
+
+The Reddit path is built against Reddit's documented shapes and covered by fixtures, but it
+has never run against Reddit on this machine — nobody here has an app to register. Bluesky,
+Hacker News and Mastodon were each read live before release.
+
 ## Optional LLM judge (v0.3)
 
 Everything above runs locally, and the default run makes **zero** LLM calls. Two flags
@@ -279,6 +306,21 @@ in the environment or a `.env` file, never from config, and is never printed.
 | Source access | 50 DOIs | 72 % full text, 18 % abstract only, 10 % nothing ([details](docs/eval/2026-09-11-coverage.md)) — a real biomedical paper in the live runs reached 33 % full text |
 | Citation pairing, numeric | 61 hand-built passages | 0.99 ([details](docs/eval/2026-09-11-pairing.md)) |
 | Citation pairing, author-year | 55 hand-built passages, 83 expectations | 0.940 ([details](docs/eval/2026-09-12-pairing-author-year.md)) |
+| **End to end on real web claims** | AVeriTeC dev, 100 claims | **0.270 3-way accuracy against a 0.708 majority baseline — worse than always guessing "refuted"** ([details](docs/eval/2026-09-16-averitec.md)) |
+
+**The AVeriTeC row is the one to read before trusting this tool on a news claim.** A third
+of those claims had no readable source at all: 32 of the source URLs needed the browser
+step, 29 were unreachable, 14 were refused by `robots.txt`. On the claims that *did* have a
+readable source the score is 0.361 — still below the baseline, and every one of the 19
+`Supported` claims was missed. The retrieval and entailment models were calibrated on
+scientific abstracts, and a fact-check page is a different object: long, discursive, and
+usually quoting the claim it debunks. Nothing was tuned after that measurement, and no
+blocked URL was dropped from it.
+
+What proofpath is good at is the academic path the other rows measure: finding out whether a
+cited paper exists, whether it was retracted, and whether its text says what the sentence
+citing it claims. Pointed at a news claim on the open web, it is currently a coverage
+report with a weak verdict attached.
 
 Published SciFact results sit around 70–75 F1, not 95. Nothing is tuned on a test
 split, and no number is quoted without the run that produced it.

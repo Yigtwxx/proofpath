@@ -492,7 +492,16 @@ def _print_gate(out: ui.Ui, gate: ConsentGate) -> None:
 @app.command()
 def check(
     ctx: typer.Context,
-    target: Annotated[str, typer.Argument(help="Document to check, or - to read it from stdin.")],
+    target: Annotated[
+        str | None, typer.Argument(help="Document to check, or - to read it from stdin.")
+    ] = None,
+    url: Annotated[
+        str | None,
+        typer.Option(
+            "--url",
+            help="A post to check instead of a file: Bluesky, Hacker News, Reddit or Mastodon.",
+        ),
+    ] = None,
     fmt: Annotated[Format, typer.Option("--format", help="Output format.")] = Format.TEXT,
     judge: Annotated[
         bool, typer.Option("--judge", help="Ask an LLM about the claims the models left open.")
@@ -517,12 +526,12 @@ def check(
         ),
     ] = None,
 ) -> None:
-    """Verify every citation in a document and write a report."""
+    """Verify every citation in a document, or in a post, and write a report."""
     out = _ui(ctx)
     if allow_browser and no_browser:
         ui.error(out, "--allow-browser and --no-browser cannot be combined.")
         raise typer.Exit(EXIT_ERROR)
-    source, name = _check_target(out, target)
+    source, name = _check_target(out, target, url)
     config = _load_config(out)
     # ``--summarize`` is a judge call too (spec section 11.1), so it builds the same
     # judge ``--judge`` builds and stops here for the same missing key -- saying which
@@ -591,7 +600,9 @@ def check(
     if fmt is Format.SARIF:
         # The log is the output: ``--out`` holds the same document stdout carries
         # (that file is what an editor opens), and no markdown is left behind.
-        log = sarif.to_sarif(report, artifact=target)
+        # The target as the caller named it, never ``source``: for ``-`` that is the
+        # decoded document, and an artifact URI is a location, not a payload.
+        log = sarif.to_sarif(report, artifact=url if url is not None else str(target))
         _write_file(out, out_path, ui.json_text(log))
         ui.emit_json(out, log)
     elif fmt is Format.JSON:
@@ -662,12 +673,20 @@ def _flush_streams() -> None:
             stream.flush()
 
 
-def _check_target(out: ui.Ui, target: str) -> tuple[Path | str, str | None]:
+def _check_target(out: ui.Ui, target: str | None, url: str | None) -> tuple[Path | str, str | None]:
     """The document and the name its locations carry.
 
-    ``-`` is the document itself, arriving on stdin and named for where it came from;
-    anything else is a file that has to exist, and a file names itself.
+    ``--url`` is a post, handed on as the address it is: what can be read at one is
+    ``verify``'s to decide, not the CLI's. ``-`` is the document itself, arriving on
+    stdin and named for where it came from; anything else is a file that has to
+    exist, and a file names itself.
     """
+    if (target is None) == (url is None):
+        ui.error(out, "give exactly one of TARGET or --url.")
+        raise typer.Exit(EXIT_ERROR)
+    if url is not None:
+        return url, None
+    assert target is not None  # the check above leaves no third case
     if target == "-":
         # Decoded here rather than by ``sys.stdin``, whose encoding is the locale's:
         # on Windows that is the ANSI code page, which turns a UTF-8 paper into

@@ -1,0 +1,27 @@
+[
+  {
+    "kind": "Listing",
+    "data": {
+      "children": [
+        {
+          "kind": "t3",
+          "data": {
+            "id": "3removed",
+            "subreddit": "science",
+            "author": "someone",
+            "title": "Our 2025 moderation report is out",
+            "selftext": "[removed]",
+            "url": "https://www.reddit.com/r/science/comments/3removed/our_2025_moderation_report_is_out/",
+            "permalink": "/r/science/comments/3removed/our_2025_moderation_report_is_out/",
+            "is_self": true,
+            "removed_by_category": "moderator"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "kind": "Listing",
+    "data": { "children": [] }
+  }
+]

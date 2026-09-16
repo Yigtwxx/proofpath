@@ -461,8 +461,52 @@ Findings from inspecting the installed base environment, and the decisions they 
 | 14.11 | The unanswered judge is absent from the SARIF log | `_run_properties` carries `models` and `apiCalls` but no `judge status` / `summary status`, so a `--format sarif` log of a run whose provider was down reads like one with nothing to escalate. SARIF is a findings document, and the markdown, JSON and terminal all say it; still, a viewer-only workflow does not see it |
 | 14.12 | Groq's free tier is metered on prompt **plus** requested answer | the whole-phase review caught `TOKEN_CAP = 7000` left over from the 1,024-token answer budget: with the 4,096-token budget of 9.3 a full batch would ask for ~11.1k against an 8K/minute tier. The cap is now 3,500. Nothing measured this live — the live escalation set was one item |
 
+### Carried into Phase 10
+
+| # | Item | Note |
+|---|---|---|
+| 14.21 | `Document.kind` now mixes origin with citation style | the five original values say where a document came from (`pdf`, `docx`, `markdown`, `text`, `post`); `linked`, added so `claims.extract` could stay a pure function of the document, says how it cites — a paste is `text` in origin and the field no longer records that. The clean shape is a second field (`cites: "marker" | "link"`), blocked today only because `Report.document` is serialised field by field into the frozen golden payload, so any new field rewrites it. Visible to a user only as `document.kind` in `--format json` |
+| 14.16 | A post is never cached | the fetch cache lives inside `Fetcher`, which the social provider bypasses, so a post is re-read on every run and `--no-cache` changes nothing for one. Nothing stale is served (the chunk cache is pinned to the text's digest), but the `Fetching` line can never attribute a post to `cache` |
+| 14.17 | A post's text is graded `fulltext` at any length | `text_kind` answers "how much of the source was read", and an API-returned post is complete, so `fulltext` is the honest word — but a three-word post cited by a bibliography then counts as a full-text source in the coverage block. Distinguishing "short source, read whole" from "long document read whole" is a `Coverage` change, not a grading one |
+| 14.18 | A directly constructed `Engine` builds a `PoliteClient` it never closes | `Engine.default` is clean (it passes the client already on `_closers`); a hand-built one allocates an `httpx` transport per engine. No socket opens until a post is read, so nothing leaks functionally |
+| 14.19 | Pasted text with no links gets no "nothing to verify" note | the stage-1 note is gated on the post path, and a paste carrying no addresses never becomes `kind="linked"`, so it prints zero findings — which is what a clean run looks like. Spec §6.2 makes this the designated path for an unreadable post, so it is the one place the gap matters |
+| 14.20 | `check --url` flattens two §15 states into one exit code | an unreachable post and an unavailable provider both exit 2; the hint distinguishes them, the exit code does not |
+| 14.15 | The resolution cache is shared across routing changes | `cache.put_resolution` stores whatever the entry's provider answered under the entry's raw string, so a row written by one release is read back by another whose routing differs. Both of Task 10.1's warm-cache defects (a `doi:` source read by the web provider; the same source skipping the retraction check) reached the code through exactly this door, and it will open again whenever a provider's routing moves |
+
 ### Next session
 
 1. **Phase 10** (`providers/` refactor, Bluesky/HN, Reddit/Mastodon/X, AVeriTeC) runs
    from `plans/2026-09-12-phases-9-10-plan.md`; Task 10.4a (AVeriTeC loader and scorer)
    is already implemented and reviewed, unstaged behind the v0.3.0 tag.
+
+## 15. Phase 10 — v0.4.0, 2026-09-16
+
+- Shipped: the `providers/` package (10.1; academic and web moved behind the §5.2 protocol
+  with the report byte-identical, pinned by a golden payload written before the refactor),
+  Bluesky and Hacker News with `check --url` and pasted-text links (10.2), Reddit/Mastodon/X
+  and the per-reason coverage block (10.3), and the AVeriTeC harness (10.4).
+- **The headline measurement is below baseline and is reported as such everywhere**:
+  0.270 3-way against a 0.708 majority baseline on 100 AVeriTeC dev claims
+  (`docs/eval/2026-09-16-averitec.md`). A third of the claims had no readable source; on the
+  rest the score is 0.361; every `Supported` claim was missed. Nothing was tuned after the
+  run and no blocked URL was dropped from it.
+- Reviewers caught, before the tag: a bare DOI/arXiv URL losing its record and its retraction
+  check; a warm-cache `doi:` source read up the web ladder with the open-access chain never
+  asked, and retraction-checked by a provider that always answers "no notice"; the `Resolving`
+  line naming providers nobody called; a PDF's body sentences paired to a bibliography entry
+  they never cited; `check --url` fetching before the network permission was read. Five
+  product-rule failures the 1,900-test suite did not catch on its own.
+
+### New open items
+
+| # | Item | Note |
+|---|---|---|
+| 15.1 | proofpath is below baseline on real-world web claims | the two causes are separable: a third of the claims had nothing readable (the browser step is off by default, `robots.txt` is honoured, news sites block), and the entailment models were calibrated on scientific abstracts. Neither is fixed by tuning a threshold. A browser-enabled run was not measured |
+| 15.2 | The Reddit path has never run against Reddit | fixtures reproduce the documented shapes; nobody on this machine has an app to register. The first real-credential run should check the comment-listing shape first |
+| 15.3 | `/r/<sub>/s/<hash>` share links are unrecognised | they degrade to the web ladder, so nothing is invented; the shape is simply not parsed |
+| 15.4 | The TUI footer ignores `Footer.reasons` | the per-reason coverage lines reach the terminal and the markdown report but not the TUI, so a TUI run whose sources were half blocked still shows three numbers and no reason |
+| 15.7 | A Mastodon status is read outside the fetch ladder | `check --url https://<any host>/@a/123` issues a request to that host's `/api/v1/statuses/123` directly: no `robots.txt` check and no entry in `polite.MIN_INTERVAL`. The user typed the address, so it is not a rule breach, but it is the one read path that skips the politeness machinery |
+| 15.8 | `target_document`'s `network_allowed` defaults to `True` | every in-tree caller passes the resolved permission, so the default is unreachable today; it is a footgun for the next caller and should be a required keyword |
+| 15.9 | The Reddit token exchange follows redirects with basic auth attached | httpx re-applies the credential along a redirect chain. The URL is a fixed Reddit constant, so it needs Reddit itself to be the attacker, but `follow_redirects=False` on that one call costs nothing |
+| 15.5 | `NO_REASON_RECORDED` is a user-visible state outside §15 | it is a guard that should never print; if it can print, it belongs in the table |
+| 15.6 | `NOT_READ_HERE` is provably unreachable through `verify` | kept deliberately for a sixth platform, like `checker_for`'s `arxiv:` row |

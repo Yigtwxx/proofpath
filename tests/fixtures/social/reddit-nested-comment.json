@@ -1,0 +1,55 @@
+[
+  {
+    "kind": "Listing",
+    "data": {
+      "children": [
+        {
+          "kind": "t3",
+          "data": {
+            "id": "1abcdef",
+            "subreddit": "science",
+            "author": "someone",
+            "title": "Our 2025 moderation report is out",
+            "selftext": "The tally is in [the report](https://example.test/moderation-report-2025).",
+            "url": "https://www.reddit.com/r/science/comments/1abcdef/our_2025_moderation_report_is_out/",
+            "permalink": "/r/science/comments/1abcdef/our_2025_moderation_report_is_out/",
+            "is_self": true
+          }
+        }
+      ]
+    }
+  },
+  {
+    "kind": "Listing",
+    "data": {
+      "children": [
+        {
+          "kind": "t1",
+          "data": {
+            "id": "c0ffee0",
+            "author": "another",
+            "body": "Which paper is this about?",
+            "permalink": "/r/science/comments/1abcdef/our_2025_moderation_report_is_out/c0ffee0/",
+            "replies": {
+              "kind": "Listing",
+              "data": {
+                "children": [
+                  {
+                    "kind": "t1",
+                    "data": {
+                      "id": "c0ffee1",
+                      "author": "reader",
+                      "body": "The paper is at https://example.test/paper.pdf and the data at https://example.test/data.csv.",
+                      "permalink": "/r/science/comments/1abcdef/our_2025_moderation_report_is_out/c0ffee1/",
+                      "replies": ""
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+]

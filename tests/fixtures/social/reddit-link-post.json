@@ -1,0 +1,26 @@
+[
+  {
+    "kind": "Listing",
+    "data": {
+      "children": [
+        {
+          "kind": "t3",
+          "data": {
+            "id": "2linkid",
+            "subreddit": "science",
+            "author": "submitter",
+            "title": "Air quality guidance was revised this week",
+            "selftext": "",
+            "url": "https://example.test/air-quality-guidance",
+            "permalink": "/r/science/comments/2linkid/air_quality_guidance_was_revised_this_week/",
+            "is_self": false
+          }
+        }
+      ]
+    }
+  },
+  {
+    "kind": "Listing",
+    "data": { "children": [] }
+  }
+]

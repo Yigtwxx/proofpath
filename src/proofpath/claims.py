@@ -35,7 +35,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 from proofpath import resolve
-from proofpath.document import CitationMarker, Claim, Document, Paragraph
+from proofpath.document import LINK_CITED, CitationMarker, Claim, Document, Paragraph
 
 # "[12]", "[12, 15]", "[3; 7]", "[12-15]" with a hyphen, en dash (\u2013) or em dash
 # (\u2014) -- both are written escaped so the pattern cannot be misread on screen. The group
@@ -287,8 +287,112 @@ def pair(doc: Document, markers: Sequence[CitationMarker]) -> Claims:
 
 
 def extract(doc: Document) -> Claims:
-    """Find every marker in ``doc`` and pair it. The entry point for the pipeline."""
+    """Find every marker in ``doc`` and pair it. The entry point for the pipeline.
+
+    :func:`pair_links` is taken only for a document whose ``kind`` says it cites by
+    linking -- ``post`` and ``linked``, which ``ingest.from_post`` and
+    ``ingest.with_link_references`` are the only two builders to produce (spec
+    section 6.2). The declared kind rather than the shape of the document: a paper
+    that prints a bibliography and carries no marker this version detects
+    (superscript letters, footnote-only styles, anything ``headless_fallback``
+    recovers) is not a paper that cites by linking, and pairing its sentences against
+    its entries would give them a SUPPORTED or REFUTED verdict on a source they never
+    cited (product rule 1).
+
+    The declared kind decides it *whatever the body prints*, markers included. A
+    document that cites by linking prints no numbered bibliography, so a bracketed
+    number in its prose -- "[2024]", a redacted "[1]", a chess move -- names no entry
+    and is not a citation. Letting one switch the document onto the numbered branch
+    lost every link pairing it had, which left a post that cites its sources reading
+    as a post that cites nothing (product rule 6). Nothing is reported unresolved for
+    such a number either: there is no list for it to have failed to name.
+    """
+    if doc.kind in LINK_CITED:
+        return pair_links(doc)
     return pair(doc, find_markers(doc))
+
+
+def pair_links(doc: Document) -> Claims:
+    """Claims for a document whose references are the links inside its paragraphs.
+
+    Every sentence of a paragraph becomes a claim citing *all* of that paragraph's
+    links, under one ``group``: the post as a whole is what its links are supposed to
+    back, so no sentence of it is given a confident verdict on its own -- the rule
+    ``_claims_for`` applies to a marker that ends a paragraph, applied here to a
+    paragraph that ends in nothing else.
+
+    A reference is placed by its locator's line, not by searching the paragraph for
+    its address: a platform shortens the link it displays (Bluesky) or keeps it out
+    of the body altogether (a Hacker News submission), and a source found by string
+    match would then be attached to the wrong paragraph or to none.
+
+    The page is part of that key. A PDF locator counts lines *within* its page, so
+    line 3 of page 9 and line 3 of page 1 are two different places and a key made of
+    the line alone would collide them -- pointing a claim at whatever happened to
+    share its line number elsewhere in the file (product rule 1).
+    """
+    paragraph_of = {
+        (paragraph.locator.page, line): paragraph.index
+        for paragraph in doc.paragraphs
+        for line, _ in paragraph.lines
+    }
+    cited: dict[int, list[int]] = {}
+    for reference in doc.references:
+        index = paragraph_of.get((reference.locator.page, reference.locator.line))
+        if index is not None:
+            cited.setdefault(index, []).append(reference.number)
+    markers: list[CitationMarker] = []
+    claims: list[Claim] = []
+    for index, numbers in sorted(cited.items()):
+        paragraph = doc.paragraphs[index]
+        refs = tuple(sorted(set(numbers)))
+        # The citation is the act of linking, and it stands at the end of what it
+        # backs. An empty span: there is no marker printed in the text to point at,
+        # and inventing one would put characters in the document that nobody wrote.
+        marker = CitationMarker(
+            style="numeric",
+            text=" ".join(doc.references[number - 1].raw for number in refs),
+            refs=refs,
+            paragraph=index,
+            start=len(paragraph.text),
+            end=len(paragraph.text),
+        )
+        markers.append(marker)
+        # One sentence *is* its paragraph, so a citation over it is not wider than
+        # the sentence and the group would say something the run cannot support.
+        scoped = len(paragraph.sentences) > 1
+        group = f"p{index}:links" if scoped else None
+        claims.extend(
+            Claim(
+                text=text,
+                locator=sentence.locator,
+                cited_refs=refs,
+                paragraph=index,
+                sentence=position,
+                paragraph_scoped=scoped,
+                group=group,
+                marker=marker,
+            )
+            for position, sentence in enumerate(paragraph.sentences)
+            if _WORD.search(text := strip_links(sentence.text))
+        )
+    return Claims(claims=tuple(claims), markers=tuple(markers), unsupported=(), unresolved=())
+
+
+def strip_links(text: str) -> str:
+    """A sentence with the addresses in it taken out, whitespace normalised.
+
+    The counterpart of :func:`strip_markers` for a document that cites by linking:
+    the address is the citation, not the assertion, and leaving it in the claim text
+    would have the model score a URL as part of what the author said.
+    """
+    # By offset, back to front, so each cut is the address ``find_urls`` recorded.
+    # ``replace`` would take the first match instead, which for a pair like
+    # ``https://a.test/x/y`` and ``https://a.test/x`` is the wrong one -- it cuts
+    # into the longer address and leaves the shorter one standing in the claim.
+    for url, offset in reversed(resolve.find_urls(text)):
+        text = f"{text[:offset]} {text[offset + len(url) :]}"
+    return _BEFORE_PUNCTUATION.sub("", " ".join(text.split()))
 
 
 def pair_numeric(

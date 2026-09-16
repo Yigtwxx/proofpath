@@ -6,6 +6,53 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-16
+
+Sources that are not papers: a post's links, and the coverage block that finally says why
+a source could not be read. Also the first end-to-end measurement on real web claims, which
+says plainly that this is not yet the thing to point at a news story
+(`docs/eval/2026-09-16-averitec.md`).
+
+### Added
+- **`check --url`** reads a post and verifies **the links inside it**, never the post's own
+  words (spec §6.2). Bluesky (`public.api.bsky.app`) and Hacker News (the Firebase API) are
+  first-class and need no account; Reddit reads with a free app you register yourself
+  (`REDDIT_CLIENT_ID` / `REDDIT_CLIENT_SECRET` in `.env`); Mastodon is best effort per
+  instance; X cannot be read and says so, asking you to paste the text. Pasted text with
+  links in it is verified the same way.
+- **`UNVERIFIED (credentials missing)`** (spec §15): a platform that reads only with a
+  credential this machine does not have is its own state, never "unreachable". No request is
+  made, both variable names are printed, and the secret itself never reaches a log, an error
+  or a `repr`.
+- **The coverage block now prints a line per reason** on the terminal and in the markdown
+  report, not only in SARIF. `blocked: 3`, `credentials missing: 1`, `unreachable: 2` — a
+  source with no recorded reason is listed rather than dropped, so the lines account for
+  every unverified source. Product rule 6 on its main surface. The TUI footer does not carry
+  them yet.
+- **A `providers/` package** (`academic`, `web`, `social`) behind the `EvidenceProvider`
+  protocol of spec §5.2, so a new source family no longer means touching the core. The
+  academic and web paths came through byte-identical, pinned by a golden report.
+- **`docs/eval/2026-09-16-averitec.md`**: 100 AVeriTeC dev claims through the whole product.
+
+### Fixed
+- A bare DOI or arXiv **URL** is resolved as a record again instead of being fetched as a
+  web page, so it keeps its retraction check and its open-access full text.
+- A `doi:` source is read through the open-access chain and retraction-checked by the
+  academic provider whoever resolved the entry — a warm cache could previously route both
+  to the web ladder, where a missing retraction notice was reported as "no notice".
+- The `Resolving` stage no longer names Crossref and Semantic Scholar on a run that asked
+  neither.
+- A document that cites by linking is never paired as if it printed a numbered bibliography,
+  and vice versa: a PDF with a bibliography and no detected marker could previously pair a
+  body sentence to a reference it never cited.
+- `check --url` consults the network permission before reading anything; a denied run makes
+  no request at all.
+
+### Measured
+- AVeriTeC dev, 100 claims: **0.270 3-way accuracy against a 0.708 majority baseline**
+  (4-way 0.240). A third of the claims had no readable source; on the rest the score is
+  0.361. Every `Supported` claim was missed. Nothing was tuned after the measurement.
+
 ## [0.3.0] - 2026-09-15
 
 The judge layer: an opt-in LLM second opinion and an opt-in model-written summary.

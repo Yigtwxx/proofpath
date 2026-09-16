@@ -1,0 +1,28 @@
+{
+  "thread": {
+    "$type": "app.bsky.feed.defs#threadViewPost",
+    "post": {
+      "uri": "at://did:plc:z72i7hdynmk6r22z27h6tvur/app.bsky.feed.post/3lxmodreport",
+      "cid": "bafyreihpostcid",
+      "author": {
+        "did": "did:plc:z72i7hdynmk6r22z27h6tvur",
+        "handle": "bsky.app",
+        "displayName": "Bluesky"
+      },
+      "record": {
+        "$type": "app.bsky.feed.post",
+        "createdAt": "2026-09-14T09:30:00.000Z",
+        "text": "Quoting the thread below, which says the same thing we did."
+      },
+      "embed": {
+        "$type": "app.bsky.embed.record#view",
+        "record": {
+          "$type": "app.bsky.embed.record#viewBlocked",
+          "uri": "at://did:plc:pressexampletest/app.bsky.feed.post/3lxpressnote",
+          "blocked": true,
+          "author": { "did": "did:plc:pressexampletest", "viewer": { "blockedBy": true } }
+        }
+      }
+    }
+  }
+}

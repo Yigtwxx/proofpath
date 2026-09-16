@@ -1,0 +1,70 @@
+{
+  "thread": {
+    "$type": "app.bsky.feed.defs#threadViewPost",
+    "post": {
+      "uri": "at://did:plc:z72i7hdynmk6r22z27h6tvur/app.bsky.feed.post/3lxmodreport",
+      "cid": "bafyreihpostcid",
+      "author": {
+        "did": "did:plc:z72i7hdynmk6r22z27h6tvur",
+        "handle": "bsky.app",
+        "displayName": "Bluesky"
+      },
+      "record": {
+        "$type": "app.bsky.feed.post",
+        "createdAt": "2026-09-14T09:30:00.000Z",
+        "text": "Our 2025 moderation report is out. Reports rose 17% year on year. The methodology is written up in the appendix.",
+        "facets": [
+          {
+            "index": { "byteStart": 4, "byteEnd": 27 },
+            "features": [
+              {
+                "$type": "app.bsky.richtext.facet#link",
+                "uri": "https://example.test/moderation-report-2025"
+              }
+            ]
+          }
+        ]
+      },
+      "embed": {
+        "$type": "app.bsky.embed.recordWithMedia#view",
+        "media": {
+          "$type": "app.bsky.embed.external#view",
+          "external": {
+            "uri": "https://example.test/appendix.pdf",
+            "title": "Appendix: methodology",
+            "description": "How the counts were produced."
+          }
+        },
+        "record": {
+          "$type": "app.bsky.embed.record#view",
+          "record": {
+            "$type": "app.bsky.embed.record#viewRecord",
+            "uri": "at://did:plc:aaaapressaaaa/app.bsky.feed.post/3lxpressnote",
+            "cid": "bafyreiquotedcid",
+            "author": {
+              "did": "did:plc:aaaapressaaaa",
+              "handle": "press.example.test",
+              "displayName": "Example Press"
+            },
+            "value": {
+              "$type": "app.bsky.feed.post",
+              "createdAt": "2026-09-13T18:00:00.000Z",
+              "text": "The regulator published its own tally this morning.",
+              "facets": [
+                {
+                  "index": { "byteStart": 4, "byteEnd": 13 },
+                  "features": [
+                    {
+                      "$type": "app.bsky.richtext.facet#link",
+                      "uri": "https://example.test/regulator-tally"
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        }
+      }
+    }
+  }
+}

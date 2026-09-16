@@ -821,7 +821,7 @@ stage so a regression can be located.
 |---|---|---|
 | SciFact (AI2 tarball, sha256 pinned; not the HF loader) | retrieval + entailment on scientific claims | label accuracy, macro-F1, rationale F1 |
 | FEVER | retrieval + entailment baseline | label accuracy |
-| AVeriTeC | real-world web claim verification | AVeriTeC score |
+| AVeriTeC | real-world web claim verification | AVeriTeC score. **Measured 2026-09-16 on 100 dev claims: 0.270 3-way against a 0.708 majority baseline** (4-way 0.240) — below the baseline. A third of the claims had no readable source (browser step off, unreachable, `robots.txt`); on the rest, 0.361, and every `Supported` claim was missed. `docs/eval/2026-09-16-averitec.md` |
 | PubHealth | high-harm domain behaviour | label accuracy |
 | X Community Notes | social provider sanity check | agreement with human notes |
 | Hand-built ghost set | reference resolution (§8) | precision/recall on ghosts, **false-ghost rate** |
@@ -885,11 +885,13 @@ presented as evidence of absence.
 | `LOW CONFIDENCE (abstract only)` | full text unavailable, abstract used |
 | `UNVERIFIED (blocked)` | 403/bot protection, Scrapling absent or defeated |
 | `UNVERIFIED (unreachable)` | dead link, Wayback miss |
+| `UNVERIFIED (no identifier to fetch)` | the reference resolved to a record that carries no DOI, arXiv id or address, so there is nothing to fetch |
 | `UNVERIFIED (reached, no text extracted)` | the page answered 200 but no text could be extracted (bot wall, image-only page) |
 | `UNVERIFIED (blocked, browser not permitted)` | steps 1–2 blocked and the §7.1 consent was denied, absent, or impossible without a TTY |
 | `UNVERIFIED (blocked, robots.txt)` | the site's `robots.txt` disallows the fetch; steps 3–4 are not attempted |
 | `UNVERIFIED (network not permitted)` | `permissions.network = deny`; nothing was fetched |
 | `UNVERIFIED (provider unavailable)` | API down or rate limited after backoff |
+| `UNVERIFIED (credentials missing)` | the source is on a platform that reads only with a credential this machine does not have — today Reddit, whose free app is `REDDIT_CLIENT_ID` and `REDDIT_CLIENT_SECRET`. Nobody was asked, so it is neither unreachable nor blocked; the coverage block names the two variables (§6.2) |
 | `AMBIGUOUS` | multiple plausible reference candidates — all listed |
 | `NEI` | source read, but it neither supports nor contradicts |
 | `UNVERIFIED (not in bibliographic indexes)` | web page, blog, report, manual or organisation-authored document; indexes do not cover it, so absence proves nothing (§8.1) |
@@ -905,7 +907,15 @@ Every report ends with a coverage summary:
 verified against full text   62%
 abstract only                21%
 unverified                   17%
+  blocked: 3
+  credentials missing: 1
 ```
+
+Whenever anything is unverified, every reason is listed under the share it
+explains — most common first, then by name — in the terminal and in the markdown
+report alike. Three percentages with no reason beside them let a run whose sources
+were half blocked read exactly like a thin one. `UNVERIFIED (credentials missing)`
+also puts the names of the variables that would fix it under the block.
 
 A run where coverage is low is a run whose conclusions are weak, and the user is
 told so directly.
@@ -953,6 +963,14 @@ an unanswered judge reported on every surface but SARIF. Live run: `docs/eval/20
 **v0.4 — social provider.** Bluesky and Hacker News first, Reddit via user-supplied
 OAuth app (missing credentials are reported, never silently skipped), Mastodon
 best-effort, Community Notes dumps for X. Measured on AVeriTeC.
+*Shipped 2026-09-16 as v0.4.0:* the `providers/` package (§5.2) with the academic and web
+families moved behind it byte-identically; `check --url` reading a post and verifying the
+links inside it; Bluesky, Hacker News, Reddit (user's own app), Mastodon best effort, X by
+pasting; `UNVERIFIED (credentials missing)` as its own state; the coverage block printing a
+line per reason on the terminal and in the markdown report (the TUI footer does not yet
+carry them — OPEN-ITEMS 15.4). X Community Notes dumps were **not** built — the paste
+path replaced them (OPEN-ITEMS 3.5). Measured: `docs/eval/2026-09-16-averitec.md`, and the
+number is bad — see §14.
 
 **Later.** Turkish sources as a separate provider (TR Dizin / DergiPark class),
 `spiyweb` graph retrieval as an alternative backend, GROBID parser.

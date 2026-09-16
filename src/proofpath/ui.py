@@ -9,6 +9,7 @@ defined once. Nothing else in the package imports ``rich`` or names a colour, ex
 from __future__ import annotations
 
 import os
+from collections.abc import Sequence
 from dataclasses import dataclass, fields, is_dataclass
 from datetime import datetime
 from enum import Enum
@@ -19,7 +20,16 @@ import orjson
 from rich.console import Console
 from rich.text import Text
 
-from proofpath.report import BROWSER_SKIPPED_REASON, Diagnostic, Footer, Level, no_bibliography
+from proofpath.report import (
+    BROWSER_SKIPPED_REASON,
+    REASON_INDENT,
+    Diagnostic,
+    Footer,
+    Level,
+    no_bibliography,
+    reason_label,
+)
+from proofpath.secrets import CREDENTIALS_MISSING, CREDENTIALS_NOTE
 
 KEY_WIDTH = 10
 
@@ -238,8 +248,16 @@ def coverage(
     *,
     weak: bool,
     unchecked_markers: int = 0,
+    reasons: Sequence[tuple[str, int]] = (),
 ) -> None:
     """The section 15 coverage block. Never suppressed, never abbreviated (rule 6).
+
+    ``reasons`` is ``report.coverage_reasons``: every state the unverified share is
+    made of, worst first, each on its own line under the percentage it explains.
+    Three numbers with no reason beside them let a run whose sources were half
+    blocked read exactly like a thin one, which is the shape of report rule 6 exists
+    to prevent. They are printed at the indent the markdown block uses, and the
+    states are shortened the same way, so the two surfaces read alike.
 
     ``unchecked_markers`` wins over ``weak``: a run whose bibliography was never
     found has 0/0/0 and no weak share to report, and the three zeroes on their own
@@ -252,6 +270,17 @@ def coverage(
         if ui.color:
             number.stylize(style)
         kv(ui, key, number)
+    for state, count in reasons:
+        line = Text(f"{REASON_INDENT}{reason_label(state)}: {count}")
+        if ui.color:
+            line.stylize(state_colour(state) or COVERAGE_STYLES[-1])
+        ui.out.print(line)
+    if any(state == CREDENTIALS_MISSING for state, _ in reasons):
+        # The only state the reader can fix from here, so the two variables are
+        # named. Its own line, above the weak-coverage hint rather than instead of
+        # it: what the run did not read and what would let it read next time are
+        # two facts, and neither is dropped to make room for the other.
+        hint(ui, CREDENTIALS_NOTE)
     if unchecked_markers:
         hint(ui, no_bibliography(unchecked_markers))
     elif weak:
@@ -292,7 +321,13 @@ def footer(ui: Ui, item: Footer) -> None:
     if item.cancelled:
         state_line(ui, "run", "cancelled")
     ui.out.print(item.counts)
-    coverage(ui, *item.coverage, weak=item.weak, unchecked_markers=item.unchecked_markers)
+    coverage(
+        ui,
+        *item.coverage,
+        weak=item.weak,
+        unchecked_markers=item.unchecked_markers,
+        reasons=item.reasons,
+    )
     skipped(ui, item.browser_skipped)
     if item.note:
         hint(ui, item.note)

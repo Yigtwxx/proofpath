@@ -1,0 +1,8 @@
+{
+  "by": "norvig",
+  "id": 8952,
+  "parent": 8863,
+  "text": "The figures are in the <a href=\"https://example.test/paper.pdf\" rel=\"nofollow\">2025 paper</a>.<p>The raw counts are published <a href=\"https://example.test/data.csv\" rel=\"nofollow\">as a CSV</a>, so &quot;revised&quot; is the author&#x27;s word &amp; not mine.",
+  "time": 1175715000,
+  "type": "comment"
+}

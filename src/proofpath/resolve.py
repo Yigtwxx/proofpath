@@ -183,6 +183,8 @@ def find_doi(raw: str) -> str | None:
 
 
 _HTTP_URL = re.compile(r"https?://\S+")
+# Punctuation a sentence or a citation style leaves stuck to the end of an address.
+_URL_TAIL = ".,;)"
 
 
 def find_url(raw: str) -> str | None:
@@ -195,7 +197,22 @@ def find_url(raw: str) -> str | None:
     an unverified state whenever the document printed the address (product rule 2).
     """
     match = _HTTP_URL.search(raw)
-    return match.group(0).rstrip(".,;)") if match else None
+    return match.group(0).rstrip(_URL_TAIL) if match else None
+
+
+def find_urls(raw: str) -> list[tuple[str, int]]:
+    """Every http(s) URL in ``raw``, with its offset, in order of appearance.
+
+    :func:`find_url`'s rule applied to a whole paragraph rather than to one entry: a
+    pasted post cites by linking, so every address in it is a source (spec section
+    6.2). Repeats are left in -- the caller decides whether two mentions of one
+    address are one source or two, and only it knows which offsets it needs.
+    """
+    return [
+        (url, match.start())
+        for match in _HTTP_URL.finditer(raw)
+        if (url := match.group(0).rstrip(_URL_TAIL))
+    ]
 
 
 _ARXIV_ID = re.compile(

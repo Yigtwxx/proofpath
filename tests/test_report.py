@@ -16,6 +16,7 @@ from proofpath.report import (
     BROWSER_SKIPPED_REASON,
     JUDGE_DETAIL_PREFIX,
     LEVELS,
+    NO_REASON_RECORDED,
     SNIPPET_LIMIT,
     STATE_WORDS,
     ClaimResult,
@@ -26,10 +27,12 @@ from proofpath.report import (
     Report,
     SourceStatus,
     Stage,
+    coverage_reasons,
     judge_detail,
     judge_unavailable,
     judge_unavailable_line,
     no_bibliography,
+    reason_label,
     render_diagnostics,
     render_footer,
     render_markdown,
@@ -37,6 +40,11 @@ from proofpath.report import (
     summary_unavailable,
 )
 from proofpath.resolve import State
+from proofpath.secrets import (
+    CREDENTIALS_MISSING,
+    REDDIT_CLIENT_ID_ENV,
+    REDDIT_CLIENT_SECRET_ENV,
+)
 
 DOCUMENT = Document(name="paper.pdf", kind="pdf", paragraphs=(), references=(), pages=24)
 REFERENCE = Reference(number=12, raw="Zhang, K. et al. (2021).", locator=Locator(line=112, page=4))
@@ -1477,3 +1485,108 @@ def test_the_footer_carries_the_judge_tokens_when_there_are_any() -> None:
 
 def test_the_footer_has_no_judge_tokens_on_a_run_without_a_judge() -> None:
     assert render_footer(report_with()).judge_tokens is None
+
+
+# --- Task 10.3: the coverage block names every reason, not just the percentages ----
+
+
+def with_reasons(
+    references: int, fulltext: int, abstract: int, unverified: int, reasons: dict[str, int]
+) -> Report:
+    report = covered(references, fulltext, abstract, unverified)
+    return dataclasses.replace(
+        report, coverage=dataclasses.replace(report.coverage, reasons=reasons)
+    )
+
+
+HALF_BLOCKED = {
+    Outcome.BLOCKED.value: 3,
+    CREDENTIALS_MISSING: 1,
+    Outcome.UNREACHABLE.value: 3,
+}
+
+
+def test_a_reason_is_labelled_by_the_short_form_the_coverage_block_uses() -> None:
+    assert reason_label(Outcome.BLOCKED.value) == "blocked"
+    assert reason_label(CREDENTIALS_MISSING) == "credentials missing"
+    assert reason_label(ABSTRACT_ONLY) == "abstract only"
+    # A state from outside the two families is printed as it stands, never guessed at.
+    assert reason_label(State.GHOST.value) == State.GHOST.value
+
+
+def test_the_reasons_are_ordered_by_how_many_sources_each_one_cost() -> None:
+    """Most common first, then by name, so two runs of the same shape read the same."""
+    assert coverage_reasons(with_reasons(8, 1, 0, 7, HALF_BLOCKED).coverage) == (
+        (Outcome.BLOCKED.value, 3),
+        (Outcome.UNREACHABLE.value, 3),
+        (CREDENTIALS_MISSING, 1),
+    )
+
+
+def test_a_source_that_was_read_is_not_a_reason_anything_went_unverified() -> None:
+    """``LOW CONFIDENCE (abstract only)`` is a source that *was* read, and the block
+    already has a line for it. Listing it under the unverified share would count one
+    source twice and make the run look worse than it was."""
+    listed = coverage_reasons(
+        with_reasons(4, 1, 2, 1, {ABSTRACT_ONLY: 2, "GHOST REFERENCE": 1}).coverage
+    )
+    assert listed == (("GHOST REFERENCE", 1),)
+
+
+def test_every_unverified_source_is_accounted_for_even_when_nobody_recorded_why() -> None:
+    """Product rule 6: a reason nobody wrote down must not shrink the block. The
+    remainder is listed as itself rather than left as a gap between two numbers."""
+    assert coverage_reasons(with_reasons(10, 4, 0, 6, {Outcome.BLOCKED.value: 2}).coverage) == (
+        (Outcome.BLOCKED.value, 2),
+        (NO_REASON_RECORDED, 4),
+    )
+
+
+def test_two_reasons_of_equal_weight_are_ordered_by_label_whatever_its_case() -> None:
+    """``GHOST REFERENCE`` prints as itself and ``blocked`` as a lowercase word, so
+    an ASCII sort would file every bare state ahead of every shortened one. The
+    labels are ordered as a reader reads them, not as their bytes fall."""
+    equal = {State.GHOST.value: 2, Outcome.BLOCKED.value: 2, CREDENTIALS_MISSING: 2}
+    assert coverage_reasons(with_reasons(8, 2, 0, 6, equal).coverage) == (
+        (Outcome.BLOCKED.value, 2),
+        (CREDENTIALS_MISSING, 2),
+        (State.GHOST.value, 2),
+    )
+
+
+def test_a_run_that_read_everything_lists_no_reasons_at_all() -> None:
+    assert coverage_reasons(covered(4, 4, 0, 0).coverage) == ()
+
+
+def test_markdown_coverage_block_names_every_reason_under_the_unverified_line() -> None:
+    text = render_markdown(with_reasons(8, 1, 0, 7, HALF_BLOCKED), written_at=WHEN)
+    assert (
+        "unverified                   88%\n"
+        "  blocked: 3\n"
+        "  unreachable: 3\n"
+        "  credentials missing: 1\n"
+    ) in text
+
+
+def test_markdown_names_the_two_variables_a_missing_reddit_app_needs() -> None:
+    """The one surface where the fix is spelled out: the reader is told which two
+    variables to set, and the state is never collapsed into blocked or unreachable."""
+    text = render_markdown(with_reasons(8, 1, 0, 7, HALF_BLOCKED), written_at=WHEN)
+    assert REDDIT_CLIENT_ID_ENV in text
+    assert REDDIT_CLIENT_SECRET_ENV in text
+
+
+def test_markdown_says_nothing_about_the_reddit_app_when_nothing_needed_one() -> None:
+    text = render_markdown(with_reasons(8, 1, 0, 7, {Outcome.BLOCKED.value: 7}), written_at=WHEN)
+    assert REDDIT_CLIENT_ID_ENV not in text
+    assert "  blocked: 7" in text
+
+
+def test_the_footer_carries_the_reasons_so_the_terminal_can_print_them() -> None:
+    footer = render_footer(with_reasons(8, 1, 0, 7, HALF_BLOCKED))
+    assert footer.reasons == (
+        (Outcome.BLOCKED.value, 3),
+        (Outcome.UNREACHABLE.value, 3),
+        (CREDENTIALS_MISSING, 1),
+    )
+    assert render_footer(covered(4, 4, 0, 0)).reasons == ()

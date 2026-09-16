@@ -26,6 +26,7 @@ the two halves composed, for a caller that wants neither on its own.
 
 from __future__ import annotations
 
+import re
 import sqlite3
 import threading
 import time
@@ -35,15 +36,13 @@ from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from functools import partial
 from pathlib import Path
-from typing import Protocol
 
 import httpx
 
 from proofpath import cache as cache_mod
 from proofpath import claims as claims_mod
 from proofpath import device as device_mod
-from proofpath import fetch as fetch_mod
-from proofpath import ingest, oa, pipeline, retrieval
+from proofpath import ingest, pipeline, retrieval
 from proofpath import resolve as resolve_mod
 from proofpath.browser import Answer, ConsentGate
 from proofpath.cache import Cache
@@ -61,18 +60,40 @@ from proofpath.events import (
     StageEnd,
     StageStart,
 )
-from proofpath.fetch import Fetched, Fetcher, FetchStats, Outcome
+from proofpath.fetch import Fetcher, Outcome
 from proofpath.judge import Judge, JudgeCost, JudgeItem, JudgeOpinion
 from proofpath.models import Label, Passage, Verdict
-from proofpath.oa import ABSTRACT_ONLY, Evidence, OpenAccess
+from proofpath.oa import OpenAccess
 from proofpath.paths import models_dir
 from proofpath.pipeline import DEFAULT_THRESHOLDS, Thresholds
 from proofpath.polite import PoliteClient, ProviderError, user_agent
+from proofpath.providers import (  # noqa: F401 - two names re-exported, see below
+    ARXIV_PREFIX,
+    DOI_PREFIX,
+    NO_IDENTIFIER,
+    NO_TEXT,
+    URL_PREFIX,
+    EvidenceDoc,
+    EvidenceProvider,
+    FetchesOpenAccess,
+    FetchesUrl,
+    Providers,
+    Resolves,
+    Scheme,
+    checker_for,
+    identifiers,
+    is_social,
+    provider_for,
+    reader_for,
+    social,
+)
+from proofpath.providers.academic import AcademicProvider
+from proofpath.providers.social import SocialProvider
+from proofpath.providers.web import WebProvider
 from proofpath.report import (
     LEVELS,
     STATE_WORDS,
     SUMMARY,
-    UNVERIFIED_PREFIX,
     ClaimResult,
     Coverage,
     Finding,
@@ -85,7 +106,7 @@ from proofpath.report import (
     judge_unavailable,
     render_markdown,
 )
-from proofpath.resolve import Candidate, Resolver, ResolveResult, Retraction, State
+from proofpath.resolve import Resolver, ResolveResult, Retraction, State
 from proofpath.retrieval import Embedder, FastEmbedder, PassageIndex
 
 # Stage names, as the report and the TUI print them (spec section 13.2).
@@ -102,6 +123,11 @@ SUMMARISING = "Summarising"
 # computed; these three are fixed by which providers the stage consults.
 CLAIMS_BY = "rules"
 RESOLVERS_BY = "Crossref, Semantic Scholar"
+# Whose ``resolve`` actually opens those two indexes. A provider declares its family
+# and ``verify`` learns nothing else about it (spec 5.2), and this is the only family
+# whose resolutions may be attributed to them: the web family answers out of the
+# entry itself and the social family will answer its own platform.
+INDEXED_FAMILY: Scheme = "academic"
 RETRACTIONS_BY = "Retraction Watch"
 FETCH_BY = "fetch ladder"
 # What the resolving and retraction stages are attributed to when every reference
@@ -114,6 +140,12 @@ CACHE_BY = "cache"
 # and none was a ghost); a stage that ran on nothing has nothing to count.
 NOT_ATTEMPTED = "not attempted (network not permitted)"
 
+# What a stage is attributed to when nobody answered for it -- the fetching stage's
+# own word for a run in which no provider won a document, reused rather than
+# reworded. Not the same statement as ``NOT_ATTEMPTED``: that one says the run was
+# not allowed to ask, this one says it asked nobody because there was nobody to ask.
+NOBODY = "none"
+
 # What a source says when every retraction provider failed. ``Resolver.retraction``
 # returns ``None`` for "checked, and there is no notice" and raises for "nobody
 # answered"; the two must never read alike, and the second is never cached -- a
@@ -121,11 +153,19 @@ NOT_ATTEMPTED = "not attempted (network not permitted)"
 # product rule 2 forbids.
 RETRACTION_UNAVAILABLE = "retraction check unavailable"
 
-# Two states section 15 does not name, because they are not a provider's answer:
-# both are this module's own reading of what happened, and both keep the shape of
-# the family so no renderer has to special-case them (product rule 2).
-NO_IDENTIFIER = "UNVERIFIED (no identifier to fetch)"
-NO_TEXT = "UNVERIFIED (reached, no text extracted)"
+# ``NO_IDENTIFIER`` and ``NO_TEXT`` are imported above and re-exported from here --
+# the only two names in that import this module does not use itself. Both are
+# section 15 states that no provider answers with, because neither is a source's own
+# word: each is a reading of what happened. They moved to ``providers`` in v0.4.0
+# with the code that produces them, and the rest of the tool still reads them off
+# this module.
+
+# What a source says when its provider answered the fetching stage with no document
+# at all. Unlike the two above, no provider produces this one: it is the core's
+# reading of a provider's silence about a source it had already planned to read.
+# Saying nothing about it would leave a status that looks fetched and textless and a
+# stage count that has lost it (product rule 6).
+NO_DOCUMENT = "UNVERIFIED (the provider returned no document)"
 
 # What the verifying stage says when the models had nothing to run on. It is not the
 # same statement as "0 claims": a document can cite plenty and still have no source
@@ -146,59 +186,28 @@ NUMERIC_REASON = "numeric mismatch"
 
 EMBEDDING_MODEL = "BAAI/bge-small-en-v1.5"
 
-_PARSER_BY_KIND = {"pdf": "pymupdf", "docx": "python-docx"}
+POST_READER = "post"
+# What ``check --url`` says when the address is a page rather than a post. A page
+# makes no claim of its own, so there is nothing in it to verify; the claim is the
+# user's, and spec section 13 already has a way to give it.
+NOT_A_POST = (
+    "{url} is a page, not a post: give the claim as text instead "
+    "(proofpath check - with the claim, and the address inside it)"
+)
+# A target that is one http(s) address and nothing else. Anchored, because an
+# address *inside* a pasted paragraph is a source that paragraph cites, not the
+# document itself.
+_BARE_URL = re.compile(r"https?://\S+")
+
+_PARSER_BY_KIND = {"pdf": "pymupdf", "docx": "python-docx", "post": POST_READER}
 _PARSER_BY_SUFFIX = {".pdf": "pymupdf", ".docx": "python-docx"}
 _TEXT_PARSER = "text"
 
-# What a fetched source is attributed to in the stage line. ``oa.Evidence.source``
-# is a provider label or ``"abstract:<provider>"``; the ladder's is a step name.
-_PROVIDERS = {
-    "s2": "Semantic Scholar",
-    "s2_pdf": "Semantic Scholar",
-    "crossref": "Crossref",
-    "crossref_link": "Crossref",
-    "unpaywall": "Unpaywall",
-    "europepmc": "Europe PMC",
-    "arxiv": "arXiv",
-    "openalex": "OpenAlex",
-    "landing": "publisher page",
-    "cache": "cache",
-}
-
-
-# --- what prepare() needs from the outside world ---------------------------------
-#
-# Protocols rather than the concrete classes: every provider in this module is
-# network-bound, and a unit test may not touch the network. The real classes
-# satisfy these structurally, so ``Engine.default`` hands over the real thing and a
-# test hands over a stub without either side knowing.
-
-
-class Resolves(Protocol):
-    """``resolve.Resolver``, reduced to what the resolving and retraction stages use."""
-
-    def resolve(self, raw: str) -> ResolveResult: ...
-
-    def retraction(self, doi: str) -> Retraction | None: ...
-
-
-class FetchesOpenAccess(Protocol):
-    """``oa.OpenAccess``: a DOI or an arXiv id in, text or a labelled state out."""
-
-    def fetch(self, doi: str | None, arxiv_id: str | None = None) -> Evidence: ...
-
-
-class FetchesUrl(Protocol):
-    """``fetch.Fetcher``: one URL up the ladder, plus the network permission it resolved."""
-
-    network_allowed: bool
-    network_note: str
-
-    def fetch(
-        self, url: str, *, text_kind: str = "fulltext", counts_as_source: bool = True
-    ) -> Fetched: ...
-
-    def summary(self) -> FetchStats: ...
+# ``Resolves``, ``FetchesOpenAccess`` and ``FetchesUrl`` are imported above and
+# re-exported from here. They describe what a provider needs from the outside world
+# -- protocols rather than the concrete classes, because everything behind them is
+# network-bound and a unit test may not touch the network -- so they live beside the
+# providers that consume them.
 
 
 @dataclass
@@ -232,6 +241,11 @@ class Engine:
     # for the final summary alone, and spec section 11.1 caps the summary at one
     # call: escalating as well would quietly turn "one call" into several.
     escalate: bool = True
+    # The polite HTTP client the social family reads posts through, and the one
+    # ``target_document`` uses when the target *is* a post (spec section 6.2). Built
+    # here by default so that every engine has one source family per spec section
+    # 5.2 -- a run assembled by hand in a test reads a post exactly as a real one.
+    client: PoliteClient = field(default_factory=PoliteClient, repr=False)
     _closers: list[Callable[[], None]] = field(default_factory=list, repr=False)
     # The models, once built. They live on the engine and nowhere else, so that
     # ``close()`` can release their native sessions while the interpreter is still
@@ -240,6 +254,18 @@ class Engine:
     # of spec section 13.3 does not allow.
     _embedder: Embedder | None = field(default=None, repr=False)
     _scorer: Scorer | None = field(default=None, repr=False)
+    # The source families this run can read from (spec section 5.2). Derived rather
+    # than passed: the three collaborators above are what every caller already builds
+    # and what every test already stubs, and a second way to say the same thing could
+    # only ever disagree with the first.
+    providers: Providers = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        self.providers = Providers(
+            academic=AcademicProvider(self.resolver, self.oa),
+            web=WebProvider(self.fetcher),
+            social=SocialProvider(self.client, self.fetcher),
+        )
 
     @classmethod
     def default(
@@ -313,6 +339,7 @@ class Engine:
             fetcher=fetcher,
             oa=chain,
             gate=gate,
+            client=client,
             embedder=embedder,
             scorer=scorer,
             k=k,
@@ -388,22 +415,145 @@ class Prepared:
     started: float  # time.monotonic() when the run began
 
 
-def target_document(target: Path | str, *, name: str | None = None) -> Document:
+def target_document(
+    target: Path | str,
+    *,
+    name: str | None = None,
+    client: PoliteClient | None = None,
+    network_allowed: bool = True,
+) -> Document:
     """Parse a file, or take a string that is not a path as the document itself.
 
-    A ``Path`` is always a file. A ``str`` is a file when one exists at that path
-    and pasted text otherwise, which is what makes ``proofpath verify "..."`` work
-    without a flag to say which of the two it was given.
+    A ``Path`` is always a file. A ``str`` is a file when one exists at that path; a
+    string that is nothing but an address is the post at that address (spec section
+    13's ``check --url``); anything else is pasted text, which is what makes
+    ``proofpath verify "..."`` work without a flag to say which it was given.
+
+    ``client`` is the engine's polite client, so a run reads a post on the same
+    throttle as everything else it talks to. A caller with no engine gets one of its
+    own for the length of the read.
+
+    ``network_allowed`` is the run's network permission, which the caller has already
+    resolved. Reading a post is a network call like any other, so a denied run must
+    reach this with ``False`` and get the refusal rather than two HTTPS requests
+    (spec section 7.1, product rule 4). Only a file and pasted text are readable
+    without it, and neither consults this.
     """
+    address = _post_address(target)
+    if address is not None:
+        return _post_document(address, client, network_allowed=network_allowed)[0]
     if isinstance(target, Path):
         return ingest.load(target)
     with suppress(OSError, ValueError):
-        # A pasted paragraph is not a path, and asking the filesystem about one
-        # can fail on its own (too long, embedded NUL) rather than answering.
         path = Path(target)
         if path.is_file():
             return ingest.load(path)
-    return ingest.from_text(target, name=name or "pasted text", kind="text")
+    return _pasted(target, name or "pasted text")
+
+
+def _target(
+    target: Path | str,
+    *,
+    name: str | None,
+    client: PoliteClient | None,
+    network_allowed: bool,
+) -> tuple[Document, tuple[str, ...]]:
+    """:func:`target_document`, plus what the reader could not put into the document.
+
+    The notes belong to the *reading*, not to the document: a quoted post nobody may
+    read leaves no trace in the paragraphs it is missing from, so the reader is the
+    only thing that ever knows it was there. :func:`prepare` reports them, which is
+    what keeps a post that lost a paragraph from reading as a post that quoted
+    nothing (product rule 2).
+
+    Only a post is read here. Everything else goes through :func:`target_document`
+    itself, because that is the seam a caller replaces to hand the pipeline a
+    document of its own, and a second way in would quietly stop honouring it.
+    """
+    address = _post_address(target)
+    if address is not None:
+        return _post_document(address, client, network_allowed=network_allowed)
+    return (
+        target_document(target, name=name, client=client, network_allowed=network_allowed),
+        (),
+    )
+
+
+def _post_address(target: Path | str) -> str | None:
+    """The address of the post a target names, when a post is what it names.
+
+    The filesystem is asked first and a ``Path`` never asked at all, so a file that
+    happens to be called ``https...`` is still read from disk.
+    """
+    if isinstance(target, Path):
+        return None
+    with suppress(OSError, ValueError):
+        # A pasted paragraph is not a path, and asking the filesystem about one
+        # can fail on its own (too long, embedded NUL) rather than answering.
+        if Path(target).is_file():
+            return None
+    return _bare_address(target)
+
+
+def _bare_address(target: str) -> str | None:
+    """The target when it is one http(s) address and nothing else, else ``None``."""
+    stripped = target.strip()
+    return stripped if _BARE_URL.fullmatch(stripped) else None
+
+
+def _post_document(
+    url: str, client: PoliteClient | None, *, network_allowed: bool = True
+) -> tuple[Document, tuple[str, ...]]:
+    """The post at ``url``, or the reason there is no document to check at all.
+
+    The three refusals are in the order the facts rank, not the order they are
+    cheapest to test:
+
+    * the network permission first, because reading a post *is* a network call and a
+      denied run must make none at all (spec section 7.1). It is refused in the
+      fetching stage's own words for the same permission -- one wording per fact.
+    * then the platform. A post on a platform with no reader here is not "a page,
+      not a post": saying that would tell the user something untrue about their own
+      link and hide the hint that says what to do instead. Every platform spec
+      section 6.2 lists has a reader since task 10.3 -- X's says the post cannot be
+      read and the text should be pasted -- so this branch waits for the sixth.
+    * then the shape. A profile or a front page on a platform that *is* read has no
+      one post to check, and no set of links to check it against.
+
+    A post that could not be read is refused too: there is nothing to report on, and
+    a report about nothing would state a coverage it never had (product rule 6).
+    """
+    if not network_allowed:
+        raise ingest.IngestError(f"{url} could not be read: {Outcome.NETWORK_DENIED.value}")
+    if not social.is_read_here(url) and is_social(url):
+        raise ingest.IngestError(f"{url} could not be read: {social.UNSUPPORTED_HINT}")
+    if not social.is_post_url(url):
+        raise ingest.IngestError(NOT_A_POST.format(url=url))
+    if client is not None:
+        read = social.read_post(url, client)
+    else:
+        own = PoliteClient()
+        try:
+            read = social.read_post(url, own)
+        finally:
+            own.client.close()
+    if isinstance(read, social.Unreadable):
+        raise ingest.IngestError(f"{url} could not be read: {read.hint}")
+    document, dropped = ingest.from_post(read)
+    # The platform's own notes first -- a quote nobody may read costs the document a
+    # paragraph -- then what the ingest left out of the bibliography. Both are things
+    # the post carried and the document does not, so both are reported (rule 2).
+    return document, (*read.notes, *dropped)
+
+
+def _pasted(text: str, name: str) -> Document:
+    """Pasted text, with the addresses inside it as its bibliography when it prints
+    no other one. A draft that numbers its citations keeps every one of them: the
+    links are only read as the sources when there is nothing else claiming to be."""
+    document = ingest.from_text(text, name=name, kind="text")
+    if document.references or claims_mod.find_markers(document):
+        return document
+    return ingest.with_link_references(document)
 
 
 def prepare(
@@ -450,9 +600,20 @@ def prepare(
         stages.append(Stage(name=stage, by=by, summary=summary, elapsed=elapsed))
         emit(StageEnd(name=stage, by=by, summary=summary, elapsed=elapsed))
 
+    # The permission is resolved once, before anything at all is read -- the
+    # document included. ``check --url`` reads its post over the network, so a
+    # permission consulted after the parsing stage would already have been overtaken
+    # by two HTTPS calls on a run that was told not to make any (spec 7.1, rule 4).
+    # The note it prints stays below, where the run announces the stages it is about
+    # to skip; what moves up here is only the reading of the permission.
+    allowed = engine.fetcher.network_allowed
+    denied_note = engine.fetcher.network_note
+
     # --- 1. parsing ---------------------------------------------------------
     began = opened(PARSING, _parser_for(target))
-    document = target_document(target, name=name)
+    document, parse_notes = _target(
+        target, name=name, client=engine.client, network_allowed=allowed
+    )
     parser = _PARSER_BY_KIND.get(document.kind, _TEXT_PARSER)
     for error in document.errors:
         add(
@@ -461,6 +622,23 @@ def prepare(
                 Locator(line=1, page=error.page),
                 "page could not be parsed",
                 detail=(error.detail,),
+            )
+        )
+    for note in parse_notes:
+        # Something the parser could not put into the text: a quoted post nobody may
+        # read, whose paragraph and links are missing from the document. Reporting it
+        # is what keeps the loss visible instead of it reading as a post that quoted
+        # nothing (product rule 2).
+        add(_finding(Kind.PARSE_ERROR, Locator(line=1), note))
+    if document.kind == "post" and not document.references:
+        # A post that links to nothing has nothing behind it to check. Reporting it
+        # as a document with no findings would make "nothing was verified" look
+        # exactly like "everything checked out" (product rule 6).
+        add(
+            _finding(
+                Kind.PARSE_ERROR,
+                Locator(line=1),
+                "post carries no links; nothing to verify against",
             )
         )
     if not document.paragraphs and not document.references:
@@ -514,11 +692,9 @@ def prepare(
         began,
     )
 
-    # The permission is resolved once, before any provider is consulted. Every
-    # stage below is network-bound — the resolver and Retraction Watch as much as
-    # the ladder — so a denied run says so once and then calls nobody (spec 7.1).
-    allowed = engine.fetcher.network_allowed
-    denied_note = engine.fetcher.network_note
+    # Every stage below is network-bound — the resolver and Retraction Watch as much
+    # as the ladder — so a denied run says so once, here, and then calls nobody. The
+    # permission itself was read before the parsing stage; see the comment there.
     if not allowed and denied_note:
         emit(Note(denied_note))
 
@@ -530,13 +706,19 @@ def prepare(
     by_number = {reference.number: reference for reference in document.references}
     cited = sorted({number for claim in claims.claims for number in claim.cited_refs})
     sources: dict[int, SourceStatus] = {}
-    # number -> (doi, arxiv_id, url): what stage 5 has to work with. A number with
-    # an entry but no identifier at all is in here too, so it is reported rather
-    # than dropped between the two stages.
-    pending: dict[int, tuple[str | None, str | None, str]] = {}
+    # number -> the result it resolved to, for every reference stage 5 still has
+    # something to ask a provider for. A number with an entry but no identifier at
+    # all is in here too, so it is reported rather than dropped between the stages.
+    pending: dict[int, ResolveResult] = {}
+    # number -> the provider that resolved it, so stages 4 and 5 ask the same one.
+    chosen: dict[int, EvidenceProvider] = {}
     tally: Counter[State] = Counter()
     resolved_total = 0
+    # Split three ways for the stage line, because the three are different claims:
+    # what the cache answered, what the bibliographic indexes were actually asked,
+    # and (whatever is left over) what a family answered without asking anyone.
     resolved_from_cache = 0
+    resolved_from_indexes = 0
     for index, number in enumerate(cited, start=1):
         reference = by_number.get(number)
         if reference is None:
@@ -570,11 +752,17 @@ def prepare(
             emit(Progress(name=RESOLVING, done=index, total=len(cited), detail=f"[{number}]"))
             check()
             continue
+        # Which family this entry belongs to, decided once and used by all three
+        # stages below. The core never learns what the answer means (spec 5.2).
+        provider = provider_for(reference, engine.providers)
+        chosen[number] = provider
         # The cache answers for a reference, not for a source: a reference has no
         # source id until it resolves. A miss costs exactly what it used to.
         stored = None if engine.cache is None else engine.cache.get_resolution(reference.raw)
         if stored is None:
-            result = engine.resolver.resolve(reference.raw)
+            result = provider.resolve(reference)
+            if provider.scheme == INDEXED_FAMILY:
+                resolved_from_indexes += 1
             if engine.cache is not None:
                 # ``put_resolution`` drops UNVERIFIED (provider unavailable) itself:
                 # an outage is not knowledge about the reference (product rule 2).
@@ -584,18 +772,18 @@ def prepare(
             resolved_from_cache += 1
         resolved_total += 1
         tally[result.state] += 1
-        state, source_id, plan = _placed(result, reference, add)
-        if plan is not None:
-            pending[number] = plan
+        placed = _placed(result, reference, add)
+        if placed.fetchable:
+            pending[number] = result
         sources[number] = SourceStatus(
             reference=reference,
             resolve=result,
             retraction=None,
-            source_id=source_id,
+            source_id=placed.source_id,
             text_kind="none",
-            state=state,
+            state=placed.state,
             fetch_step=None,
-            url=plan[2] if plan is not None else "",
+            url=placed.url,
             from_cache=False,
             resolve_from_cache=stored is not None,
         )
@@ -604,7 +792,9 @@ def prepare(
     # "0 ghost" would be a claim about the references; nothing was looked at.
     closed(
         RESOLVING,
-        _attribution(RESOLVERS_BY, total=resolved_total, cached=resolved_from_cache),
+        _resolving_attribution(
+            total=resolved_total, indexes=resolved_from_indexes, cached=resolved_from_cache
+        ),
         _resolve_summary(tally) if allowed else NOT_ATTEMPTED,
         began,
     )
@@ -612,9 +802,9 @@ def prepare(
     # --- 4. retractions -----------------------------------------------------
     began = opened(RETRACTIONS, RETRACTIONS_BY)
     dois = [
-        (number, status.source_id.removeprefix("doi:"))
+        (number, status.source_id.removeprefix(DOI_PREFIX))
         for number, status in sources.items()
-        if status.source_id is not None and status.source_id.startswith("doi:")
+        if status.source_id is not None and status.source_id.startswith(DOI_PREFIX)
     ]
     retracted = 0
     unavailable = 0
@@ -623,7 +813,10 @@ def prepare(
         hit = None if engine.cache is None else engine.cache.get_retraction(doi)
         if hit is None:
             try:
-                notice = engine.resolver.retraction(doi)
+                # The DOI is the cache's key, not the provider's argument: the
+                # provider asks about the record it resolved, which is where that
+                # DOI came from in the first place.
+                notice = _resolved_retraction(engine, chosen[number], sources[number])
             except ProviderError as exc:
                 # Nothing was learned, so nothing is stored and nothing is claimed.
                 unavailable += 1
@@ -659,7 +852,7 @@ def prepare(
     # were none, which is not what a denied run knows.
     closed(
         RETRACTIONS,
-        _attribution(RETRACTIONS_BY, total=len(dois), cached=checked_from_cache),
+        _retraction_attribution(total=len(dois), cached=checked_from_cache),
         _retraction_summary(retracted, unavailable) if allowed else NOT_ATTEMPTED,
         began,
     )
@@ -673,9 +866,10 @@ def prepare(
     # Whatever it says — a download, a failed install, a permission that could not
     # be saved — belongs in the report rather than on someone's terminal.
     logged = len(engine.gate.install_log)
-    for index, (number, plan) in enumerate(pending.items(), start=1):
+
+    def record(number: int, read: EvidenceDoc) -> None:
+        """One document a provider read, into the status, the texts and a finding."""
         status = sources[number]
-        read = _read_source(engine, plan, allowed=allowed)
         counts[read.text_kind] += 1
         if read.winner and read.winner not in winners:
             winners.append(read.winner)
@@ -718,13 +912,33 @@ def prepare(
                     detail=read.notes,
                 )
             )
+        if (
+            engine.cache is not None
+            and read.text_kind == "abstract"
+            and not read.from_cache
+            and read.source_id.startswith(URL_PREFIX)
+        ):
+            # The ladder filed the page as the "fulltext" it was asked for; the word
+            # count now says what the url: row really holds, and the next run must
+            # not read an abstract back as full text (mirrors ``oa._climb_all``).
+            engine.cache.set_text_kind(read.source_id, "abstract")
+
+    for index, (number, result) in enumerate(pending.items(), start=1):
+        # A list because a post can be a thread; v0.4.0's two providers answer one
+        # for one, so the loop runs exactly once per pending reference. An empty
+        # list is not one of the answers: a source that was planned and then
+        # silently dropped would keep the ``state=""`` of a row nobody touched,
+        # which reads as fetched and simply textless (product rule 6).
+        docs = _read_source(engine, chosen[number], sources[number], result, allowed=allowed)
+        for read in docs or [_nothing_read(sources[number])]:
+            record(number, read)
         logged = _forward_log(engine.gate, logged, emit)
         emit(Progress(name=FETCHING, done=index, total=len(pending), detail=f"[{number}]"))
         check()
     _forward_log(engine.gate, logged, emit)
     closed(
         FETCHING,
-        ", ".join(winners) or "none",
+        ", ".join(winners) or NOBODY,
         f"{counts['fulltext']} full text, {counts['abstract']} abstract, "
         f"{counts['none']} unverified"
         if allowed
@@ -1416,19 +1630,36 @@ def _attribution(providers: str, *, total: int, cached: int) -> str:
     return CACHE_BY if total > 0 and cached == total else providers
 
 
-@dataclass(frozen=True)
-class _Read:
-    """What one source's fetch came to, whichever path produced it."""
+def _retraction_attribution(*, total: int, cached: int) -> str:
+    """Who the retraction stage is attributed to. ``_attribution``'s rule, plus the
+    row it was missing: a run with no DOI in it asks Retraction Watch nothing, and a
+    line naming them beside "none" reads as a clean sheet somebody checked. It is the
+    same untruth :data:`CACHE_BY` exists to prevent (product rule 2), and it became
+    visible on an all-bare-URL report, next to ``Resolving ... none``."""
+    if total == 0:
+        return NOBODY
+    return _attribution(RETRACTIONS_BY, total=total, cached=cached)
 
-    text_kind: TextKind
-    state: str
-    text: str
-    url: str
-    step: int | None
-    from_cache: bool
-    winner: str  # attribution for the stage line, "" when nothing was consulted
-    notes: tuple[str, ...]
-    title: str = ""  # the finding's line, for the states that owe one
+
+def _resolving_attribution(*, total: int, indexes: int, cached: int) -> str:
+    """Who the resolving stage is attributed to, counted per family.
+
+    ``_attribution``'s rule applied to a stage whose references no longer all go to
+    the same place. ``RESOLVERS_BY`` names Crossref and Semantic Scholar, and only
+    the :data:`INDEXED_FAMILY` opens them: a bibliography of bare addresses is
+    resolved out of the entries themselves, so a line naming two indexes nobody
+    opened is the untruth :data:`CACHE_BY` exists to prevent, by a different route
+    (product rule 2).
+
+    ``total`` is every reference the stage placed, ``indexes`` the ones that really
+    went to those two, ``cached`` the ones the cache answered; whatever is left over
+    asked nobody anything and so can claim nobody. A stage that placed nothing at all
+    -- a denied run, a document that cites nothing -- keeps the provider it announced
+    at the start, because it has no units to speak for either way.
+    """
+    if total == 0 or indexes:
+        return RESOLVERS_BY
+    return CACHE_BY if cached else NOBODY
 
 
 def _ignore(event: Event) -> None:
@@ -1475,7 +1706,13 @@ def _finding(
 
 
 def _parser_for(target: Path | str) -> str:
-    """The parser a target will need, before it has been read. Suffix is all we have."""
+    """The parser a target will need, before it has been read.
+
+    An address that names a post is read by the platform's API, not by a parser;
+    everything else has only its suffix to go on.
+    """
+    if isinstance(target, str) and social.is_post_url(target.strip()):
+        return POST_READER
     with suppress(ValueError):
         return _PARSER_BY_SUFFIX.get(Path(target).suffix.lower(), _TEXT_PARSER)
     return _TEXT_PARSER
@@ -1494,18 +1731,26 @@ def _cited_locator(claims: Claims, number: int) -> Locator:
     return Locator(line=1)
 
 
+@dataclass(frozen=True)
+class _Placed:
+    """One resolve result as the resolving stage records it."""
+
+    state: str
+    source_id: str | None
+    # Whether the fetching stage still has something to ask a provider for. ``False``
+    # for a ghost, an ambiguous match, a provider that was down and a source no index
+    # covers and no address points at: each is a different fact, keeps its own
+    # wording (product rule 2), and none of them is ever softened into "unverified".
+    fetchable: bool
+    url: str = ""  # the address the entry printed, when that is what will be read
+
+
 def _placed(
     result: ResolveResult,
     reference: Reference,
     add: Callable[[Finding], None],
-) -> tuple[str, str | None, tuple[str | None, str | None, str] | None]:
-    """One resolve result as ``(state, source_id, plan)``; emits the state's finding.
-
-    ``plan`` is ``None`` when there is nothing left to try — a ghost, an ambiguous
-    match, a provider that was down, a source no index covers and no URL points at.
-    Each of those is a different fact and keeps its own wording (product rule 2);
-    none of them is ever softened into "unverified".
-    """
+) -> _Placed:
+    """Where a resolve result leaves a reference; emits the state's own finding."""
     if result.state is State.GHOST:
         add(
             _finding(
@@ -1516,7 +1761,7 @@ def _placed(
                 detail=tuple(result.notes),
             )
         )
-        return State.GHOST.value, None, None
+        return _Placed(State.GHOST.value, None, fetchable=False)
     if result.state is State.AMBIGUOUS:
         add(
             _finding(
@@ -1527,7 +1772,7 @@ def _placed(
                 detail=tuple(candidate.title for candidate in result.candidates),
             )
         )
-        return State.AMBIGUOUS.value, None, None
+        return _Placed(State.AMBIGUOUS.value, None, fetchable=False)
     if result.state is State.UNAVAILABLE:
         add(
             _finding(
@@ -1538,13 +1783,13 @@ def _placed(
                 detail=tuple(result.notes),
             )
         )
-        return State.UNAVAILABLE.value, None, None
+        return _Placed(State.UNAVAILABLE.value, None, fetchable=False)
     if result.state is State.NOT_INDEXED:
         url = resolve_mod.find_url(reference.raw)
         if url:
             # Absence from a bibliographic index says nothing about a web page that
             # prints its own address: it is fetched like any other source.
-            return "", f"url:{url}", (None, None, url)
+            return _Placed("", f"{URL_PREFIX}{url}", fetchable=True, url=url)
         add(
             _finding(
                 Kind.UNVERIFIED,
@@ -1555,17 +1800,16 @@ def _placed(
                 detail=tuple(result.notes),
             )
         )
-        return State.NOT_INDEXED.value, None, None
+        return _Placed(State.NOT_INDEXED.value, None, fetchable=False)
 
-    doi = _doi_of(result.best)
-    arxiv_id = None if doi else resolve_mod.find_arxiv_id(reference.raw)
+    doi, arxiv_id = identifiers(reference, result)
     if doi:
-        return "", f"doi:{doi}", (doi, None, "")
+        return _Placed("", f"{DOI_PREFIX}{doi}", fetchable=True)
     if arxiv_id:
-        return "", f"arxiv:{arxiv_id}", (None, arxiv_id, "")
+        return _Placed("", f"{ARXIV_PREFIX}{arxiv_id}", fetchable=True)
     # Resolved, and still nothing to fetch it with: a book, or a record whose
     # provider has no identifier for it. Reported by stage 5 like any other miss.
-    return "", None, (None, None, "")
+    return _Placed("", None, fetchable=True)
 
 
 def _not_attempted(reference: Reference, note: str) -> SourceStatus:
@@ -1588,10 +1832,6 @@ def _not_attempted(reference: Reference, note: str) -> SourceStatus:
     )
 
 
-def _doi_of(best: Candidate | None) -> str | None:
-    return best.doi if best is not None and best.doi else None
-
-
 def _resolve_summary(tally: Counter[State]) -> str:
     """``"38 ok, 3 amb, 1 ghost"``, plus whatever else actually happened."""
     parts = [
@@ -1606,129 +1846,68 @@ def _resolve_summary(tally: Counter[State]) -> str:
     return ", ".join(parts)
 
 
+def _resolved_retraction(
+    engine: Engine, provider: EvidenceProvider, status: SourceStatus
+) -> Retraction | None:
+    """The provider's retraction check for a source that resolved to an identifier.
+
+    The provider that is asked is the source id's, not the entry's --
+    ``providers.checker_for`` explains why they can differ. ``SourceStatus.resolve``
+    is ``None`` only for a reference nobody was asked about, and such a reference has
+    no source id to have reached this stage with.
+    """
+    if status.resolve is None:
+        return None
+    checker = checker_for(status.source_id, provider, engine.providers)
+    return checker.retraction(status.resolve)
+
+
 def _read_source(
     engine: Engine,
-    plan: tuple[str | None, str | None, str],
+    provider: EvidenceProvider,
+    status: SourceStatus,
+    resolved: ResolveResult,
     *,
     allowed: bool,
-) -> _Read:
-    """Read one planned source: the open-access chain for an id, the ladder for a URL."""
-    doi, arxiv_id, url = plan
-    if doi is None and arxiv_id is None and not url:
-        return _Read(
-            text_kind="none",
-            state=NO_IDENTIFIER,
-            text="",
-            url="",
-            step=None,
-            from_cache=False,
-            winner="",
-            notes=(),
-            title="the record carries no identifier to fetch it with",
-        )
-    if not allowed:
-        # Nothing is called at all; the permission is the answer (spec section 7.1).
-        return _Read(
-            text_kind="none",
-            state=Outcome.NETWORK_DENIED.value,
-            text="",
-            url=url,
-            step=None,
-            from_cache=False,
-            winner="",
-            notes=(engine.fetcher.network_note,) if engine.fetcher.network_note else (),
-            title="the source was not fetched",
-        )
-    if url:
-        read = _from_page(engine.fetcher.fetch(url))
-        if engine.cache is not None and read.text_kind == "abstract" and not read.from_cache:
-            # The ladder filed the page as the "fulltext" it was asked for; the word
-            # count now says what the url: row really holds, and the next run must
-            # not read an abstract back as full text (mirrors ``oa._climb_all``).
-            engine.cache.set_text_kind(f"url:{url}", "abstract")
-        return read
-    return _from_evidence(engine.oa.fetch(doi, arxiv_id))
+) -> list[EvidenceDoc]:
+    """Ask a provider to read one planned source, unless the permission says no.
 
-
-def _from_evidence(evidence: Evidence) -> _Read:
-    """The open-access chain already labelled its own result; it is carried as it is."""
-    step = 0 if evidence.from_cache else _winning_step(evidence)
-    winner = "cache" if evidence.from_cache else _provider_name(evidence.source)
-    state, extra = _honest(evidence.state, evidence.kind)
-    return _Read(
-        text_kind=evidence.kind,
-        state=state,
-        text=evidence.text,
-        url=evidence.url,
-        step=step,
-        from_cache=evidence.from_cache,
-        winner=winner,
-        notes=(*extra, *evidence.notes),
-        title="the source text could not be read",
-    )
-
-
-def _from_page(fetched: Fetched) -> _Read:
-    """A bare URL. Length decides the grade: a page under the full-text bar is an
-    abstract however the link was labelled, and a page that was reached but held no
-    text is not the same thing as a page that could not be reached."""
-    winner = "cache" if fetched.from_cache else fetch_mod.STEP_NAMES.get(fetched.step, "web")
-    url = fetched.final_url or fetched.url
-    if not fetched.ok:
-        state, extra = _honest(fetched.outcome.value, "none")
-        return _Read(
-            text_kind="none",
-            state=state,
-            text="",
-            url=url,
-            step=fetched.step,
-            from_cache=fetched.from_cache,
-            winner=winner,
-            notes=(*extra, *fetched.notes),
-            title="the source text could not be read",
-        )
-    kind: TextKind
-    if fetched.words >= oa.FULLTEXT_MIN_WORDS:
-        kind, state = "fulltext", ""
-    elif fetched.words:
-        kind, state = "abstract", ABSTRACT_ONLY
-    else:
-        kind, state = "none", NO_TEXT
-    return _Read(
-        text_kind=kind,
-        state=state,
-        text=fetched.text if kind != "none" else "",
-        url=url,
-        step=fetched.step,
-        from_cache=fetched.from_cache,
-        winner=winner,
-        notes=tuple(fetched.notes),
-        title="the page was reached but held no text",
-    )
-
-
-def _honest(state: str, kind: str) -> tuple[str, tuple[str, ...]]:
-    """A state for a source with no text, guaranteed to be one the report can carry.
-
-    Every producer words its own state and it is passed through untouched. A string
-    from outside the ``UNVERIFIED (...)`` family would make the finding
-    unconstructible, so it becomes a note under a state that fits rather than
-    crashing the run or disappearing from it.
+    The gate is here rather than in a provider because it is a property of the run,
+    not of a source family: a denied run calls nobody at all, and says so once (spec
+    section 7.1). The provider that reads is not always the one that resolved --
+    ``providers.reader_for`` explains the one case where it is not.
     """
-    if kind != "none" or state.startswith(UNVERIFIED_PREFIX):
-        return state, ()
-    return NO_TEXT, (state,) if state else ()
+    if not allowed:
+        # Nothing is called at all; the permission is the answer.
+        return [
+            EvidenceDoc(
+                source_id=status.source_id or "",
+                text="",
+                text_kind="none",
+                state=Outcome.NETWORK_DENIED.value,
+                url=status.url,
+                step=None,
+                notes=(engine.fetcher.network_note,) if engine.fetcher.network_note else (),
+                title="the source was not fetched",
+            )
+        ]
+    reader = reader_for(status.source_id, provider, engine.providers)
+    return reader.fetch(status.reference, resolved)
 
 
-def _winning_step(evidence: Evidence) -> int | None:
-    """Which ladder step produced the text the chain kept."""
-    for attempt in evidence.attempts:
-        if attempt.location.url == evidence.url:
-            return attempt.step
-    return evidence.attempts[-1].step if evidence.attempts else None
+def _nothing_read(status: SourceStatus) -> EvidenceDoc:
+    """The document the fetching stage files when its provider returned none.
 
-
-def _provider_name(source: str) -> str:
-    """``"s2_pdf"`` and ``"abstract:s2"`` both read as "Semantic Scholar"."""
-    label = source.removeprefix("abstract:")
-    return _PROVIDERS.get(label, label)
+    It is one source, unverified, in the only words the core can honestly use: it
+    cannot say the page was unreachable or the text was empty, because nobody told
+    it either. What it can say is that the source it planned to read was not read.
+    """
+    return EvidenceDoc(
+        source_id=status.source_id or "",
+        text="",
+        text_kind="none",
+        state=NO_DOCUMENT,
+        url=status.url,
+        step=None,
+        title="the source was not read",
+    )

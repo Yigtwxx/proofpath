@@ -1,0 +1,26 @@
+[
+  {
+    "kind": "Listing",
+    "data": {
+      "children": [
+        {
+          "kind": "t3",
+          "data": {
+            "id": "1abcdef",
+            "subreddit": "science",
+            "author": "someone",
+            "title": "Our 2025 moderation report is out",
+            "selftext": "The tally is in [the report](https://example.test/moderation-report-2025) and the method is at https://example.test/appendix.pdf.",
+            "url": "https://www.reddit.com/r/science/comments/1abcdef/our_2025_moderation_report_is_out/",
+            "permalink": "/r/science/comments/1abcdef/our_2025_moderation_report_is_out/",
+            "is_self": true
+          }
+        }
+      ]
+    }
+  },
+  {
+    "kind": "Listing",
+    "data": { "children": [] }
+  }
+]

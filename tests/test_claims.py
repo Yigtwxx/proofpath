@@ -17,9 +17,11 @@ from proofpath.claims import (
     extract,
     find_markers,
     pair,
+    pair_links,
+    strip_links,
     strip_markers,
 )
-from proofpath.document import Document
+from proofpath.document import Document, Locator, Paragraph, Reference, Sentence
 
 EN_DASH = "\u2013"
 EM_DASH = "\u2014"
@@ -727,3 +729,122 @@ def test_author_year_a_paragraph_final_marker_scopes_every_sentence() -> None:
     result = extract(document)
     assert all(claim.paragraph_scoped for claim in result.claims)
     assert [claim.cited_refs for claim in result.claims] == [(2,), (2,), (2,)]
+
+
+# --- citing by linking, and the documents that do not (spec section 6.2) --------------
+
+
+def _pdf_page(index: int, page: int, line: int, sentences: Sequence[str]) -> Paragraph:
+    """One body paragraph on a PDF page, printed on a single line of that page."""
+    text = " ".join(sentences)
+    offset = 0
+    spans: list[Sentence] = []
+    for sentence in sentences:
+        start = text.index(sentence, offset)
+        spans.append(
+            Sentence(
+                text=sentence,
+                locator=Locator(line=line, column=start + 1, page=page),
+                start=start,
+                end=start + len(sentence),
+            )
+        )
+        offset = start + len(sentence)
+    return Paragraph(
+        index=index,
+        text=text,
+        locator=Locator(line=line, page=page),
+        sentences=tuple(spans),
+        lines=((line, 0),),
+    )
+
+
+def _scanned_pdf() -> Document:
+    """A PDF whose body sits on page 1 and whose bibliography sits on page 9.
+
+    Both are printed on line 3 of their own page, because a PDF locator counts lines
+    *within* the page. Neither carries a citation marker: the styles ingest leaves
+    unmarked (superscript letters, footnote-only) and ``headless_fallback`` both
+    produce exactly this shape.
+    """
+    return Document(
+        name="paper.pdf",
+        kind="pdf",
+        paragraphs=(
+            _pdf_page(
+                0,
+                page=1,
+                line=3,
+                sentences=["Subsidence accelerated after 2015.", "The trend has not reversed."],
+            ),
+        ),
+        references=(
+            Reference(
+                number=1, raw="Smith, J. A paper. Journal, 2020.", locator=Locator(line=3, page=9)
+            ),
+        ),
+        pages=9,
+    )
+
+
+def test_a_pdf_that_prints_a_bibliography_and_no_marker_is_never_paired_by_its_links() -> None:
+    """Product rule 1. A PDF cites by marker; a marker-free one cites nothing this
+    version can pair. Pairing its body against its bibliography by position would put
+    a SUPPORTED/REFUTED verdict on a source the sentence never cited."""
+    document = _scanned_pdf()
+    assert find_markers(document) == []
+
+    result = extract(document)
+
+    assert result.claims == ()
+    assert result.markers == ()
+
+
+def test_pair_links_places_a_reference_by_its_page_as_well_as_its_line() -> None:
+    """A PDF locator's line number is counted within its page, so line 3 of page 9 is
+    not line 3 of page 1. Keying on the line alone collides across pages."""
+    result = pair_links(_scanned_pdf())
+
+    assert result.claims == ()
+
+
+def test_a_document_that_cites_by_linking_still_pairs_every_sentence_to_its_links() -> None:
+    document = ingest.with_link_references(
+        ingest.from_text(
+            "The tally rose 17% https://a.test/report. Nothing else was measured.",
+            name="stdin",
+            kind="text",
+        )
+    )
+    result = extract(document)
+
+    assert [claim.cited_refs for claim in result.claims] == [(1,), (1,)]
+    assert all(claim.paragraph_scoped for claim in result.claims)
+
+
+def test_strip_links_takes_out_the_address_recorded_at_each_offset() -> None:
+    """The offsets are what ``find_urls`` reported; replacing by value instead hits
+    the first match, which for a nested pair is the wrong address and leaves one in."""
+    text = "See https://a.test/x/y and then https://a.test/x."
+
+    assert "http" not in strip_links(text)
+
+
+def test_a_bracketed_number_in_a_link_citing_documents_prose_is_not_a_citation() -> None:
+    """A document whose references *are* its links prints no numbered bibliography,
+    so "[2024]" in its prose names no entry. Reading it as a marker switched the whole
+    document onto the numbered branch and lost every link pairing, which left a
+    sentence that does cite a source reading as one that cites nothing (rule 6)."""
+    document = ingest.with_link_references(
+        ingest.from_text(
+            "The [2024] tally rose 17% https://a.test/report. Nothing else was measured.",
+            name="stdin",
+            kind="text",
+        )
+    )
+    assert find_markers(document), "the bracketed number is found; what it means is the point"
+
+    result = extract(document)
+
+    assert [claim.cited_refs for claim in result.claims] == [(1,), (1,)]
+    assert result.unresolved == ()

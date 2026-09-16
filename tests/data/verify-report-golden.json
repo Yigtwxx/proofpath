@@ -1,0 +1,630 @@
+{
+  "document": {
+    "name": "pasted text",
+    "kind": "text",
+    "paragraphs": [
+      {
+        "index": 0,
+        "text": "Transformers improved translation quality [1]. A fabricated finding [2]. Air quality limits were tightened in 2021 [3]. The paper reports a measured effect [4]. Nothing further was measured.",
+        "locator": {
+          "line": 1,
+          "column": 1,
+          "page": null
+        },
+        "sentences": [
+          {
+            "text": "Transformers improved translation quality [1].",
+            "locator": {
+              "line": 1,
+              "column": 1,
+              "page": null
+            },
+            "start": 0,
+            "end": 46
+          },
+          {
+            "text": "A fabricated finding [2].",
+            "locator": {
+              "line": 1,
+              "column": 48,
+              "page": null
+            },
+            "start": 47,
+            "end": 72
+          },
+          {
+            "text": "Air quality limits were tightened in 2021 [3].",
+            "locator": {
+              "line": 1,
+              "column": 74,
+              "page": null
+            },
+            "start": 73,
+            "end": 119
+          },
+          {
+            "text": "The paper reports a measured effect [4].",
+            "locator": {
+              "line": 1,
+              "column": 121,
+              "page": null
+            },
+            "start": 120,
+            "end": 160
+          },
+          {
+            "text": "Nothing further was measured.",
+            "locator": {
+              "line": 1,
+              "column": 162,
+              "page": null
+            },
+            "start": 161,
+            "end": 190
+          }
+        ],
+        "lines": [
+          [
+            1,
+            0
+          ]
+        ]
+      }
+    ],
+    "references": [
+      {
+        "number": 1,
+        "raw": "[1] Vaswani, A. Attention is all you need. NeurIPS, 2017.",
+        "locator": {
+          "line": 5,
+          "column": 1,
+          "page": null
+        }
+      },
+      {
+        "number": 2,
+        "raw": "[2] Nobody, N. A study that was never written. Journal of Nothing, 2019.",
+        "locator": {
+          "line": 6,
+          "column": 1,
+          "page": null
+        }
+      },
+      {
+        "number": 3,
+        "raw": "[3] WHO. Air quality guidelines. https://example.test/air-quality.html Accessed 2024.",
+        "locator": {
+          "line": 7,
+          "column": 1,
+          "page": null
+        }
+      },
+      {
+        "number": 4,
+        "raw": "[4] Smith, J. A closed paper. Journal of Paywalls, 2020.",
+        "locator": {
+          "line": 8,
+          "column": 1,
+          "page": null
+        }
+      }
+    ],
+    "pages": 1,
+    "errors": []
+  },
+  "claims": 4,
+  "markers": 4,
+  "sources": [
+    {
+      "reference": {
+        "number": 1,
+        "raw": "[1] Vaswani, A. Attention is all you need. NeurIPS, 2017.",
+        "locator": {
+          "line": 5,
+          "column": 1,
+          "page": null
+        }
+      },
+      "resolve": {
+        "state": "RESOLVED",
+        "best": {
+          "doi": "10.1038/s41586-021-03819-2",
+          "title": "Attention is all you need",
+          "first_author": "Vaswani",
+          "year": 2017,
+          "venue": "NeurIPS",
+          "provider": "crossref",
+          "url": ""
+        },
+        "candidates": [
+          {
+            "doi": "10.1038/s41586-021-03819-2",
+            "title": "Attention is all you need",
+            "first_author": "Vaswani",
+            "year": 2017,
+            "venue": "NeurIPS",
+            "provider": "crossref",
+            "url": ""
+          }
+        ],
+        "notes": [],
+        "match": null
+      },
+      "retraction": null,
+      "source_id": "doi:10.1038/s41586-021-03819-2",
+      "text_kind": "fulltext",
+      "state": "",
+      "fetch_step": 1,
+      "url": "https://arxiv.test/paper.pdf",
+      "from_cache": false,
+      "notes": [],
+      "resolve_from_cache": false
+    },
+    {
+      "reference": {
+        "number": 2,
+        "raw": "[2] Nobody, N. A study that was never written. Journal of Nothing, 2019.",
+        "locator": {
+          "line": 6,
+          "column": 1,
+          "page": null
+        }
+      },
+      "resolve": {
+        "state": "GHOST REFERENCE",
+        "best": null,
+        "candidates": [],
+        "notes": [
+          "no record anywhere"
+        ],
+        "match": null
+      },
+      "retraction": null,
+      "source_id": null,
+      "text_kind": "none",
+      "state": "GHOST REFERENCE",
+      "fetch_step": null,
+      "url": "",
+      "from_cache": false,
+      "notes": [],
+      "resolve_from_cache": false
+    },
+    {
+      "reference": {
+        "number": 3,
+        "raw": "[3] WHO. Air quality guidelines. https://example.test/air-quality.html Accessed 2024.",
+        "locator": {
+          "line": 7,
+          "column": 1,
+          "page": null
+        }
+      },
+      "resolve": {
+        "state": "UNVERIFIED (not in bibliographic indexes)",
+        "best": null,
+        "candidates": [],
+        "notes": [
+          "not in any index"
+        ],
+        "match": null
+      },
+      "retraction": null,
+      "source_id": "url:https://example.test/air-quality.html",
+      "text_kind": "fulltext",
+      "state": "",
+      "fetch_step": 1,
+      "url": "https://example.test/air-quality.html",
+      "from_cache": false,
+      "notes": [],
+      "resolve_from_cache": false
+    },
+    {
+      "reference": {
+        "number": 4,
+        "raw": "[4] Smith, J. A closed paper. Journal of Paywalls, 2020.",
+        "locator": {
+          "line": 8,
+          "column": 1,
+          "page": null
+        }
+      },
+      "resolve": {
+        "state": "RESOLVED",
+        "best": {
+          "doi": "10.5555/closed-access-2020",
+          "title": "A closed paper",
+          "first_author": "Smith",
+          "year": 2020,
+          "venue": "NeurIPS",
+          "provider": "crossref",
+          "url": ""
+        },
+        "candidates": [
+          {
+            "doi": "10.5555/closed-access-2020",
+            "title": "A closed paper",
+            "first_author": "Smith",
+            "year": 2020,
+            "venue": "NeurIPS",
+            "provider": "crossref",
+            "url": ""
+          }
+        ],
+        "notes": [],
+        "match": null
+      },
+      "retraction": null,
+      "source_id": "doi:10.5555/closed-access-2020",
+      "text_kind": "abstract",
+      "state": "LOW CONFIDENCE (abstract only)",
+      "fetch_step": null,
+      "url": "https://api.test/abstract",
+      "from_cache": false,
+      "notes": [
+        "no open-access full text"
+      ],
+      "resolve_from_cache": false
+    }
+  ],
+  "results": [
+    {
+      "claim": {
+        "text": "Transformers improved translation quality.",
+        "locator": {
+          "line": 1,
+          "column": 1,
+          "page": null
+        },
+        "cited_refs": [
+          1
+        ],
+        "paragraph": 0,
+        "sentence": 0,
+        "paragraph_scoped": false,
+        "group": null,
+        "marker": {
+          "style": "numeric",
+          "text": "[1]",
+          "refs": [
+            1
+          ],
+          "paragraph": 0,
+          "start": 42,
+          "end": 45
+        }
+      },
+      "reference": 1,
+      "source_id": "doi:10.1038/s41586-021-03819-2",
+      "verdict": {
+        "label": "SUPPORTED",
+        "score": 0.95,
+        "tier": "medium",
+        "passage": {
+          "text": "Transformers improved translation quality on every benchmark.",
+          "source_id": "doi:10.1038/s41586-021-03819-2",
+          "index": 0
+        },
+        "reason": ""
+      },
+      "from_cache": false,
+      "judge": null
+    },
+    {
+      "claim": {
+        "text": "Air quality limits were tightened in 2021.",
+        "locator": {
+          "line": 1,
+          "column": 74,
+          "page": null
+        },
+        "cited_refs": [
+          3
+        ],
+        "paragraph": 0,
+        "sentence": 2,
+        "paragraph_scoped": false,
+        "group": null,
+        "marker": {
+          "style": "numeric",
+          "text": "[3]",
+          "refs": [
+            3
+          ],
+          "paragraph": 0,
+          "start": 115,
+          "end": 118
+        }
+      },
+      "reference": 3,
+      "source_id": "url:https://example.test/air-quality.html",
+      "verdict": {
+        "label": "NEI",
+        "score": 0.3,
+        "tier": "low",
+        "passage": null,
+        "reason": ""
+      },
+      "from_cache": false,
+      "judge": null
+    },
+    {
+      "claim": {
+        "text": "The paper reports a measured effect.",
+        "locator": {
+          "line": 1,
+          "column": 121,
+          "page": null
+        },
+        "cited_refs": [
+          4
+        ],
+        "paragraph": 0,
+        "sentence": 3,
+        "paragraph_scoped": false,
+        "group": null,
+        "marker": {
+          "style": "numeric",
+          "text": "[4]",
+          "refs": [
+            4
+          ],
+          "paragraph": 0,
+          "start": 156,
+          "end": 159
+        }
+      },
+      "reference": 4,
+      "source_id": "doi:10.5555/closed-access-2020",
+      "verdict": {
+        "label": "NEI",
+        "score": 0.3,
+        "tier": "low",
+        "passage": null,
+        "reason": ""
+      },
+      "from_cache": false,
+      "judge": null
+    }
+  ],
+  "findings": [
+    {
+      "kind": "nei",
+      "level": "note",
+      "locator": {
+        "line": 1,
+        "column": 74,
+        "page": null
+      },
+      "title": "source neither supports nor contradicts the claim",
+      "state": "NEI",
+      "reference": {
+        "number": 3,
+        "raw": "[3] WHO. Air quality guidelines. https://example.test/air-quality.html Accessed 2024.",
+        "locator": {
+          "line": 7,
+          "column": 1,
+          "page": null
+        }
+      },
+      "claim": {
+        "text": "Air quality limits were tightened in 2021.",
+        "locator": {
+          "line": 1,
+          "column": 74,
+          "page": null
+        },
+        "cited_refs": [
+          3
+        ],
+        "paragraph": 0,
+        "sentence": 2,
+        "paragraph_scoped": false,
+        "group": null,
+        "marker": {
+          "style": "numeric",
+          "text": "[3]",
+          "refs": [
+            3
+          ],
+          "paragraph": 0,
+          "start": 115,
+          "end": 118
+        }
+      },
+      "verdict": {
+        "label": "NEI",
+        "score": 0.3,
+        "tier": "low",
+        "passage": null,
+        "reason": ""
+      },
+      "source_id": "url:https://example.test/air-quality.html",
+      "fetch_step": 1,
+      "tier": "low",
+      "detail": [],
+      "group": null,
+      "judge": null
+    },
+    {
+      "kind": "nei",
+      "level": "note",
+      "locator": {
+        "line": 1,
+        "column": 121,
+        "page": null
+      },
+      "title": "source neither supports nor contradicts the claim",
+      "state": "NEI",
+      "reference": {
+        "number": 4,
+        "raw": "[4] Smith, J. A closed paper. Journal of Paywalls, 2020.",
+        "locator": {
+          "line": 8,
+          "column": 1,
+          "page": null
+        }
+      },
+      "claim": {
+        "text": "The paper reports a measured effect.",
+        "locator": {
+          "line": 1,
+          "column": 121,
+          "page": null
+        },
+        "cited_refs": [
+          4
+        ],
+        "paragraph": 0,
+        "sentence": 3,
+        "paragraph_scoped": false,
+        "group": null,
+        "marker": {
+          "style": "numeric",
+          "text": "[4]",
+          "refs": [
+            4
+          ],
+          "paragraph": 0,
+          "start": 156,
+          "end": 159
+        }
+      },
+      "verdict": {
+        "label": "NEI",
+        "score": 0.3,
+        "tier": "low",
+        "passage": null,
+        "reason": ""
+      },
+      "source_id": "doi:10.5555/closed-access-2020",
+      "fetch_step": null,
+      "tier": "low",
+      "detail": [],
+      "group": null,
+      "judge": null
+    },
+    {
+      "kind": "ghost-reference",
+      "level": "error",
+      "locator": {
+        "line": 6,
+        "column": 1,
+        "page": null
+      },
+      "title": "cited source does not exist",
+      "state": "GHOST REFERENCE",
+      "reference": {
+        "number": 2,
+        "raw": "[2] Nobody, N. A study that was never written. Journal of Nothing, 2019.",
+        "locator": {
+          "line": 6,
+          "column": 1,
+          "page": null
+        }
+      },
+      "claim": null,
+      "verdict": null,
+      "source_id": null,
+      "fetch_step": null,
+      "tier": null,
+      "detail": [
+        "no record anywhere"
+      ],
+      "group": null,
+      "judge": null
+    },
+    {
+      "kind": "abstract-only",
+      "level": "note",
+      "locator": {
+        "line": 8,
+        "column": 1,
+        "page": null
+      },
+      "title": "only the abstract could be read",
+      "state": "LOW CONFIDENCE (abstract only)",
+      "reference": {
+        "number": 4,
+        "raw": "[4] Smith, J. A closed paper. Journal of Paywalls, 2020.",
+        "locator": {
+          "line": 8,
+          "column": 1,
+          "page": null
+        }
+      },
+      "claim": null,
+      "verdict": null,
+      "source_id": "doi:10.5555/closed-access-2020",
+      "fetch_step": null,
+      "tier": null,
+      "detail": [
+        "no open-access full text"
+      ],
+      "group": null,
+      "judge": null
+    }
+  ],
+  "coverage": {
+    "references": 4,
+    "fulltext": 2,
+    "abstract": 1,
+    "unverified": 1,
+    "reasons": {
+      "GHOST REFERENCE": 1,
+      "LOW CONFIDENCE (abstract only)": 1
+    },
+    "browser_skipped": 0,
+    "network_denied": false
+  },
+  "stages": [
+    {
+      "name": "Parsing",
+      "by": "text",
+      "summary": "1 pages, 4 refs",
+      "elapsed": 0.0
+    },
+    {
+      "name": "Claims",
+      "by": "rules",
+      "summary": "4 citations, 0 unresolved",
+      "elapsed": 0.0
+    },
+    {
+      "name": "Resolving",
+      "by": "Crossref, Semantic Scholar",
+      "summary": "2 ok, 0 amb, 1 ghost, 1 not indexed",
+      "elapsed": 0.0
+    },
+    {
+      "name": "Retractions",
+      "by": "Retraction Watch",
+      "summary": "none",
+      "elapsed": 0.0
+    },
+    {
+      "name": "Fetching",
+      "by": "arXiv, httpx, Semantic Scholar",
+      "summary": "2 full text, 1 abstract, 0 unverified",
+      "elapsed": 0.0
+    },
+    {
+      "name": "Verifying",
+      "by": "cpu",
+      "summary": "3 claims: 1 supported, 0 not supported, 2 NEI",
+      "elapsed": 0.0
+    }
+  ],
+  "models": {
+    "nli": "keyword",
+    "embedder": "words",
+    "device": "cpu",
+    "thresholds": "decide=0.45;high=0.99933;medium=0.457948"
+  },
+  "api_calls": 0,
+  "elapsed": 0.0,
+  "tier_note": "",
+  "cancelled": false,
+  "summary": null,
+  "summary_model": null,
+  "judge_cost": null
+}

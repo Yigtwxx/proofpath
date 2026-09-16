@@ -25,13 +25,15 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from itertools import pairwise
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
+from urllib.parse import urlsplit
 
 import docx
 import pymupdf
 from docx.opc.exceptions import OpcError
 from docx.table import Table
 
+from proofpath import resolve
 from proofpath.document import (
     Document,
     Kind,
@@ -42,6 +44,9 @@ from proofpath.document import (
     Sentence,
 )
 from proofpath.retrieval import sentence_spans
+
+if TYPE_CHECKING:  # a post is read by a provider, which imports this module back
+    from proofpath.providers.social import Post as SocialPost
 
 
 class IngestError(ValueError):
@@ -468,6 +473,136 @@ def from_text(text: str, *, name: str, kind: Kind, markdown: bool = False) -> Do
     """Build a Document from one string: body paragraphs first, bibliography after."""
     paragraphs = paragraphs_from_lines(text.splitlines(), markdown=markdown)
     return _assemble(paragraphs, name=name, kind=kind, pages=1)
+
+
+#: A link a post carries that is the post's own address, and which is therefore left
+#: out of the bibliography. The reader is told rather than left to notice: one of the
+#: post's own links is missing from the report, and this says which and why.
+SELF_LINK_DROPPED = "a link back to the post itself was dropped: {url}"
+
+
+def _address_key(url: str) -> str:
+    """What a post address *names*, for telling one post's link from its own address.
+
+    Only the parts that choose a post are kept. Host case and a ``www.`` prefix say
+    nothing about which post is meant -- every matcher in ``providers.social`` reads a
+    host that way -- and neither does the scheme, a trailing slash, or a fragment
+    naming a place inside the same post. The path keeps its own case: a Bluesky rkey
+    and a Mastodon status id are case-sensitive, and two rkeys that differ only in
+    case are two posts. The query stays because it is where a Hacker News item's
+    number is written. An address with no host at all matches nothing.
+    """
+    split = urlsplit(url.strip())
+    host = (split.hostname or "").lower().removeprefix("www.")
+    if not host:
+        return ""
+    try:
+        port = f":{split.port}" if split.port else ""
+    except ValueError:
+        # A netloc whose port is not a number names no host anyone can reach; the
+        # rest of the address is still compared, and the malformed port is ignored.
+        port = ""
+    query = f"?{split.query}" if split.query else ""
+    return f"{host}{port}{split.path.rstrip('/')}{query}"
+
+
+def from_post(post: SocialPost) -> tuple[Document, tuple[str, ...]]:
+    """A post and the posts it quotes, as a document whose references are its links.
+
+    Spec section 6.2: a post cites by linking, so the addresses inside it are the
+    bibliography and the post's own words are what stands on them. One paragraph per
+    post, the quoted ones after the quoter in the order they were read, and one
+    :class:`~proofpath.document.Reference` per link numbered in order of appearance
+    across the whole thing.
+
+    Each link's locator is the first line of the post that carried it, which is what
+    ``claims.pair_links`` pairs on: a quoted post's sources are its own author's, and
+    must not end up backing the words of whoever quoted it.
+
+    A link that points back at the post carrying it is not a source and is dropped.
+    Kept, it would be resolved like any other reference, routed back to
+    ``SocialProvider.fetch``, and the post would be read a second time -- handing its
+    own sentence back as the passage that supports it, which is product rule 1's
+    whole subject. Posts reach this shape by ordinary means: a Bluesky facet or link
+    card pointing at its own permalink, a Mastodon anchor, and a Hacker News story
+    whose submitted ``url`` is the item itself. ``providers.social`` already refuses
+    the same thing for a Reddit self post, whose ``url`` is the post; this is that
+    rule where every platform passes. The returned notes name each dropped link, so a
+    reader comparing the report against the post can see why one is not in it.
+    """
+    lines: list[str] = []
+    links: list[tuple[str, int]] = []
+    notes: list[str] = []
+    for item in (post, *post.quoted):
+        # A post with no words gets no paragraph -- there would be no sentence for a
+        # claim to be made of -- but its links are still listed, so nothing it cited
+        # disappears between the reader and the report (product rule 6). They stay
+        # uncited: there is no sentence of this author's for them to stand behind.
+        body = [line for line in item.text.splitlines() if line.strip()]
+        if body:
+            if lines:
+                lines.append("")  # one blank line is what separates two paragraphs
+            first = len(lines) + 1
+            lines.extend(body)
+        else:
+            # A blank line, which no paragraph owns. Recording the line the *next*
+            # post's body will start on instead would hand these links to that post's
+            # paragraph, and ``claims.pair_links`` would then back the quoted author's
+            # sentences with a source only the quoter posted (product rule 1). A
+            # Bluesky ``recordWithMedia#view`` is exactly that shape: a quote and a
+            # link card, with the quoter writing nothing of their own.
+            lines.append("")
+            first = len(lines)
+        # Per post, not per document: the quoter's link to the post it quotes is a
+        # link to another author's words, and only a post's link to *itself* is the
+        # one that would come back as its own evidence.
+        own = _address_key(item.url)
+        for link in item.links:
+            if own and _address_key(link) == own:
+                notes.append(SELF_LINK_DROPPED.format(url=link))
+                continue
+            links.append((link, first))
+    document = Document(
+        name=post.url,
+        kind="post",
+        paragraphs=tuple(paragraphs_from_lines(lines)),
+        references=tuple(
+            Reference(number=number, raw=url, locator=Locator(line=line))
+            for number, (url, line) in enumerate(links, start=1)
+        ),
+        pages=1,
+    )
+    return document, tuple(notes)
+
+
+def with_link_references(document: Document) -> Document:
+    """The same document, with the addresses in its body as its bibliography.
+
+    For pasted text that prints no reference list: the sources of a paragraph a
+    reader pasted out of a post are the links inside it (spec section 6.2). One
+    reference per distinct address, numbered in order of first appearance, each
+    located where it was first written -- which is the paragraph whose sentences it
+    then backs.
+    """
+    found: dict[str, Locator] = {}
+    for paragraph in document.paragraphs:
+        for url, offset in resolve.find_urls(paragraph.text):
+            if url not in found:
+                found[url] = document.locate(paragraph.index, offset)
+    if not found:
+        return document
+    return replace(
+        document,
+        references=tuple(
+            Reference(number=number, raw=url, locator=locator)
+            for number, (url, locator) in enumerate(found.items(), start=1)
+        ),
+        # Said in the kind, and only here: the caller asked for the addresses to *be*
+        # the bibliography, which is the one thing that makes ``claims.pair_links``
+        # right about this text. A document that merely happens to print an address
+        # is not this, and must never be paired that way (product rule 1).
+        kind="linked",
+    )
 
 
 def _read(path: Path) -> str:

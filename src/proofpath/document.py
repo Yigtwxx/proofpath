@@ -81,8 +81,17 @@ class PageError:
     detail: str
 
 
-Kind = Literal["pdf", "docx", "markdown", "text", "post"]
+# How a document arrived, and -- for the last two -- how it cites. ``post`` is one
+# read from its platform and ``linked`` is text a reader pasted out of one: in both,
+# the addresses inside the paragraphs *are* the bibliography (spec section 6.2), and
+# ``claims.extract`` pairs only these two that way. Every other kind cites by marker,
+# and pairing one of those by position would put a verdict on a source no sentence
+# cited (product rule 1). Said in the kind rather than guessed from the shape of the
+# document, because the guess is what got that wrong.
+Kind = Literal["pdf", "docx", "markdown", "text", "post", "linked"]
 KIND_VALUES: tuple[str, ...] = get_args(Kind)
+#: The kinds whose references are the links in their own body.
+LINK_CITED: frozenset[str] = frozenset({"post", "linked"})
 
 
 @dataclass(frozen=True)

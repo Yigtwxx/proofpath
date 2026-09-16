@@ -331,6 +331,17 @@ For any unreadable post, the user pastes the text and `proofpath` verifies the
 
 **Done when:** measured on AVeriTeC, and no platform integration requires a paid API.
 
+**Status (2026-09-16): released as v0.4.0.** Tasks 10.1–10.4 (`.superpowers/sdd/phase10/`,
+briefs in `2026-09-12-phases-9-10-plan.md`): the `providers/` package with the academic and
+web families refactored behind it byte-identically (golden report pinned before the change
+and unchanged after); Bluesky and Hacker News with `check --url` and pasted-text links;
+Reddit (user's own OAuth app, fixtures only — nobody here has an app), Mastodon (live read)
+and X (paste only); the coverage block printing a line per reason; and the AVeriTeC harness.
+No platform integration requires a paid API. **The measurement is below baseline:** 0.270
+3-way against 0.708 on 100 dev claims (`docs/eval/2026-09-16-averitec.md`). It is reported
+in the README's own Measured table, in the spec §14 row and in the changelog, unsoftened,
+because the alternative is a tool that looks better than it is.
+
 ---
 
 ## What is deliberately not planned yet

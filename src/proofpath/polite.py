@@ -37,13 +37,34 @@ MIN_INTERVAL: dict[str, float] = {
     "export.arxiv.org": 3.0,
     "openlibrary.org": 1.0,
     "www.ebi.ac.uk": 0.5,
+    # The read-only social APIs of spec section 6.2. Bluesky and Hacker News publish
+    # no rate limit for unauthenticated reads, so they get the interval a polite
+    # client would keep anyway; a run reads one post, not a feed. Reddit does publish
+    # one -- 60 requests a minute for an OAuth client -- and both of its hosts are
+    # written down at that rate rather than left to the default that happens to match.
+    # Mastodon is not here: the host is the instance, and there is no list of those.
+    "public.api.bsky.app": 0.5,
+    "hacker-news.firebaseio.com": 0.5,
+    "www.reddit.com": 1.0,
+    "oauth.reddit.com": 1.0,
 }
 MAX_RETRY_AFTER = 60.0
 RETRYABLE = (429, 500, 502, 503, 504)
 
 
 class ProviderError(RuntimeError):
-    pass
+    """A request that never produced an answer, and the status that ended it.
+
+    ``status`` is ``None`` when nothing came back at all (a transport error). It is
+    carried because 4xx and 5xx are different facts about a source -- gone, versus a
+    provider that was down and said nothing about it (product rule 2) -- and the
+    message alone cannot be read back reliably by the caller that has to tell them
+    apart.
+    """
+
+    def __init__(self, message: str, status: int | None = None) -> None:
+        super().__init__(message)
+        self.status = status
 
 
 class HostThrottle:
@@ -163,27 +184,72 @@ class PoliteClient:
         params = dict(params or {})
         if mailto and self._email:
             params["mailto"] = self._email
+        return self._send("GET", url, params=params, headers=headers)
+
+    def post(
+        self,
+        url: str,
+        *,
+        data: dict[str, str] | None = None,
+        headers: dict[str, str] | None = None,
+        auth: tuple[str, str] | None = None,
+    ) -> httpx.Response:
+        """A form POST, throttled and retried like :meth:`get`.
+
+        Only one caller needs it: the OAuth token exchange a user's own Reddit app
+        makes (spec section 6.2). ``auth`` is HTTP basic and ``data`` is the form
+        body, so neither ever reaches the URL — a credential does not belong in a
+        query string, which is the part of a request that gets logged.
+        """
+        return self._send("POST", url, data=data, headers=headers, auth=auth)
+
+    def _send(
+        self,
+        method: str,
+        url: str,
+        *,
+        params: dict[str, Any] | None = None,
+        data: dict[str, str] | None = None,
+        headers: dict[str, str] | None = None,
+        auth: tuple[str, str] | None = None,
+    ) -> httpx.Response:
+        """The one request loop: throttle, then retry 429/5xx with backoff.
+
+        ``ProviderError`` carries the status and nothing else. It is raised into
+        callers that put it in a report, so the body -- which is where a provider
+        echoes an account, a key or a token back at you -- is never read into it.
+        """
         last = ""
+        status: int | None = None
         for attempt in range(self._retries + 1):
             self.throttle(url)
             delay: float | None = 0.5 * 2.0**attempt
             try:
-                response = self._client.get(url, params=params, headers=headers)
+                response = self._client.request(
+                    method,
+                    url,
+                    params=params,
+                    data=data,
+                    headers=headers,
+                    auth=auth or httpx.USE_CLIENT_DEFAULT,
+                )
             except httpx.HTTPError as exc:
                 last = type(exc).__name__
+                status = None
             else:
                 if response.status_code == 404 or response.status_code < 400:
                     return response
                 last = f"HTTP {response.status_code}"
+                status = response.status_code
                 if response.status_code not in RETRYABLE:
                     break
                 retry_after = response.headers.get("Retry-After")
                 delay = backoff_delay(attempt, response.status_code, retry_after)
                 if delay is None:
                     # A daily budget is gone (OpenAlex answers with hours).
-                    raise ProviderError(f"{last}, retry after {retry_after}s")
+                    raise ProviderError(f"{last}, retry after {retry_after}s", status)
             if attempt < self._retries:
                 # None only when backoff_delay's cap check already raised, above.
                 assert delay is not None
                 time.sleep(delay)
-        raise ProviderError(last)
+        raise ProviderError(last, status)

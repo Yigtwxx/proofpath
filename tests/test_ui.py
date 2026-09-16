@@ -10,7 +10,13 @@ import pytest
 from rich.text import Text
 
 from proofpath import ui
+from proofpath.fetch import Outcome
 from proofpath.report import STATE_WORDS, Diagnostic, Footer
+from proofpath.secrets import (
+    CREDENTIALS_MISSING,
+    REDDIT_CLIENT_ID_ENV,
+    REDDIT_CLIENT_SECRET_ENV,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -389,6 +395,43 @@ def test_coverage_says_nothing_extra_when_it_holds() -> None:
     instance, out, _ = _build()
     ui.coverage(instance, 80, 10, 10, weak=False)
     assert "hint" not in out.getvalue()
+
+
+def test_coverage_prints_every_reason_under_the_unverified_line() -> None:
+    """Product rule 6 on the terminal: three percentages with no reason beside them
+    leave a half-blocked run looking like a thin one."""
+    instance, out, _ = _build()
+    ui.coverage(
+        instance,
+        12,
+        0,
+        88,
+        weak=True,
+        reasons=((Outcome.BLOCKED.value, 3), (CREDENTIALS_MISSING, 1)),
+    )
+    assert out.getvalue().splitlines()[:5] == [
+        "fulltext   12%",
+        "abstract   0%",
+        "unverified 88%",
+        "  blocked: 3",
+        "  credentials missing: 1",
+    ]
+
+
+def test_coverage_names_the_two_variables_a_missing_reddit_app_needs() -> None:
+    instance, out, _ = _build()
+    ui.coverage(instance, 0, 0, 100, weak=True, reasons=((CREDENTIALS_MISSING, 1),))
+    printed = out.getvalue()
+    assert REDDIT_CLIENT_ID_ENV in printed
+    assert REDDIT_CLIENT_SECRET_ENV in printed
+    # The weak-coverage hint is not dropped to make room for it.
+    assert ui.WEAK_COVERAGE in printed
+
+
+def test_coverage_stays_quiet_about_the_reddit_app_when_nothing_needed_one() -> None:
+    instance, out, _ = _build()
+    ui.coverage(instance, 0, 0, 100, weak=True, reasons=((Outcome.BLOCKED.value, 4),))
+    assert REDDIT_CLIENT_ID_ENV not in out.getvalue()
 
 
 # --- stage rows and the footer ---------------------------------------------------------

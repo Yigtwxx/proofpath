@@ -39,6 +39,7 @@ from proofpath.judge import JudgeCost, JudgeOpinion
 from proofpath.models import Label, Tier, Verdict
 from proofpath.oa import ABSTRACT_ONLY
 from proofpath.resolve import ResolveResult, Retraction, State
+from proofpath.secrets import CREDENTIALS_MISSING, CREDENTIALS_NOTE
 
 # Unverified share at or above which a run's conclusions are called weak (rule 6).
 # Public: the renderers colour the coverage footer against it.
@@ -362,6 +363,18 @@ NO_OPINION = "\u2014"
 # The section 15 coverage block, label column and all.
 COVERAGE_LABELS = ("verified against full text", "abstract only", "unverified")
 COVERAGE_WIDTH = 29
+# Each reason sits under the unverified line it explains, at this indent, on both
+# surfaces. Three percentages with no reason beside them let a run whose sources were
+# half blocked read like a thin one (product rule 6), so a run with anything
+# unverified names what it was: ``  blocked: 3`` / ``  credentials missing: 1``.
+REASON_INDENT = "  "
+# The remainder, when the recorded reasons come to *less* than the unverified count. A
+# source nobody wrote a state for is still a source that went unread, and leaving it
+# out of the block would make the tally look complete while it is short. It keeps the
+# ``UNVERIFIED (...)`` shape so :func:`reason_label` needs no special case, and no
+# provider ever produces it -- ``verify`` gives every unread source a state. The other
+# direction is not corrected; :func:`coverage_reasons` says why.
+NO_REASON_RECORDED = "UNVERIFIED (no reason recorded)"
 # The section 7.1 aggregate: every source the browser consent gate stopped is already
 # named one by one, but a reader scanning the footer has to be told how many there
 # were without counting them (product rule 6). One wording for both surfaces.
@@ -558,6 +571,11 @@ class Footer:
     # judge ran. Beside ``api_calls``, because calls alone do not say what a free
     # tier's per-minute token budget was spent on.
     judge_tokens: tuple[int, int] | None = None
+    # Why the unverified share is unverified, worst first, from
+    # ``coverage_reasons``. Empty on a run with nothing unverified. The states travel
+    # whole and are shortened where they are printed, so a caller can still tell one
+    # from another -- the terminal needs to know which one is a missing credential.
+    reasons: tuple[tuple[str, int], ...] = ()
 
 
 def render_diagnostics(report: Report) -> list[Diagnostic]:
@@ -606,6 +624,7 @@ def render_footer(report: Report, *, written: str | None = None) -> Footer:
         unchecked_markers=_unchecked(report),
         browser_skipped=report.coverage.browser_skipped,
         judge_tokens=_judge_tokens(report),
+        reasons=coverage_reasons(report.coverage),
     )
 
 
@@ -881,14 +900,77 @@ def _unchecked(report: Report) -> int:
     return max(0, report.markers)
 
 
+def reason_label(state: str) -> str:
+    """A state as the coverage block prints it: the words inside its family's parens.
+
+    ``UNVERIFIED (blocked)`` is ``blocked`` here, beside labels the block already
+    writes that way (``abstract only``). The full state stays on the source's own row
+    in the sources table and in the SARIF log, so nothing is lost by shortening it in
+    the one place where the family is already named by the line above. A state from
+    outside the two families is printed exactly as its producer wrote it, because
+    guessing at a short form would be rewording what happened (product rule 2).
+    """
+    for family in (UNVERIFIED_PREFIX, "LOW CONFIDENCE"):
+        opening = f"{family} ("
+        if state.startswith(opening) and state.endswith(")"):
+            return state[len(opening) : -1]
+    return state
+
+
+def coverage_reasons(coverage: Coverage) -> tuple[tuple[str, int], ...]:
+    """Why the unverified share is unverified: ``(state, count)``, worst first.
+
+    Empty when nothing went unverified — there is no gap to explain, and a heading
+    over nothing is noise. Otherwise every reason is listed, ordered by how many
+    sources it cost and then by name, so two runs of the same shape read the same.
+
+    A state that means the source *was* read — ``LOW CONFIDENCE (abstract only)`` —
+    is left out: the block's own second line already counts it, and repeating it
+    under the unverified share would count one source twice. What the recorded
+    reasons do not account for is listed as :data:`NO_REASON_RECORDED` rather than
+    quietly dropped, so the reasons never come to *less* than the number above them.
+
+    Only that direction is guarded. A producer that recorded more reasons than it
+    counted unverified sources would print lines totalling more than the percentage,
+    and they are printed anyway: every reason here is a state some source was actually
+    given, and dropping one to make the arithmetic close would delete a recorded fact
+    to flatter a tally (product rule 2). ``verify()`` writes one state per unread
+    source, so the over-count is a bug in the producer, and a block that visibly does
+    not add up is how a reader finds it.
+
+    The labels are ordered case-insensitively. A bare state prints in capitals
+    (``GHOST REFERENCE``) and a shortened one in lower case (``blocked``), so an ASCII
+    sort would file every bare state ahead of every shortened one at equal counts —
+    an order no reader of the block could predict.
+    """
+    if coverage.unverified <= 0:
+        return ()
+    listed = {
+        state: count
+        for state, count in coverage.reasons.items()
+        if count > 0 and not state.startswith("LOW CONFIDENCE")
+    }
+    ordered = sorted(listed.items(), key=lambda item: (-item[1], reason_label(item[0]).casefold()))
+    unaccounted = coverage.unverified - sum(listed.values())
+    if unaccounted > 0:
+        ordered.append((NO_REASON_RECORDED, unaccounted))
+    return tuple(ordered)
+
+
 def _markdown_coverage(report: Report) -> list[str]:
     coverage = report.coverage
+    reasons = coverage_reasons(coverage)
     lines = ["## Coverage", "", "```"]
     lines.extend(
         f"{label:<{COVERAGE_WIDTH}}{share}%"
         for label, share in zip(COVERAGE_LABELS, coverage.pct(), strict=True)
     )
+    lines.extend(f"{REASON_INDENT}{reason_label(state)}: {count}" for state, count in reasons)
     lines.extend(["```", ""])
+    if any(state == CREDENTIALS_MISSING for state, _ in reasons):
+        # The one state whose fix is a line of configuration: the block names the
+        # two variables, so a reader never has to go looking for what was missing.
+        lines.extend([CREDENTIALS_NOTE, ""])
     if coverage.browser_skipped:
         lines.extend(
             [f"Skipped {coverage.browser_skipped} source(s) {BROWSER_SKIPPED_REASON}.", ""]

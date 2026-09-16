@@ -1,0 +1,12 @@
+{
+  "id": "109384756",
+  "created_at": "2026-09-01T10:00:00.000Z",
+  "url": "https://mastodon.social/@someone/109384756",
+  "content": "<p>Our 2025 moderation report is out.</p><p>The regulator published <a href=\"https://example.test/regulator-tally\" rel=\"nofollow\">its own tally</a> &amp; we agree.</p>",
+  "account": { "acct": "someone", "username": "someone", "display_name": "Someone" },
+  "card": {
+    "url": "https://example.test/moderation-report-2025",
+    "title": "Moderation report 2025",
+    "type": "link"
+  }
+}

@@ -6,6 +6,7 @@ import pytest
 
 from proofpath.document import (
     KIND_VALUES,
+    LINK_CITED,
     CitationMarker,
     Claim,
     Document,
@@ -148,8 +149,12 @@ def test_page_error_records_the_page_it_failed_on() -> None:
     assert (error.page, error.detail) == (3, "no extractable text layer")
 
 
-def test_kind_values_are_the_five_supported_inputs() -> None:
-    assert KIND_VALUES == ("pdf", "docx", "markdown", "text", "post")
+def test_kind_values_are_the_supported_inputs_and_the_two_that_cite_by_linking() -> None:
+    assert KIND_VALUES == ("pdf", "docx", "markdown", "text", "post", "linked")
+    # ``claims.extract`` pairs a document against the links in its own body for
+    # exactly these two and nothing else (spec section 6.2, product rule 1).
+    assert set(LINK_CITED) == {"post", "linked"}
+    assert set(KIND_VALUES) >= LINK_CITED
 
 
 def test_every_value_type_is_hashable() -> None:
