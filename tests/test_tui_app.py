@@ -348,7 +348,7 @@ async def test_escape_leaves_awaiting_mode() -> None:
         prompt = app.query_one(Prompt)
         assert app.awaiting is None
         assert prompt.placeholder != commands.NEEDS_ARGUMENT["check"]
-        assert prompt.styles.background.a == pytest.approx(1.0)
+        assert prompt.styles.background.a == pytest.approx(0.0)  # the terminal's own, untinted
 
 
 async def test_the_awaited_argument_starts_the_run() -> None:
@@ -865,7 +865,7 @@ async def test_a_fresh_command_leaves_awaiting_mode() -> None:
         prompt = app.query_one(Prompt)
         assert app.awaiting is None
         assert prompt.placeholder != commands.NEEDS_ARGUMENT["check"]
-        assert prompt.styles.background.a == pytest.approx(1.0)
+        assert prompt.styles.background.a == pytest.approx(0.0)  # the terminal's own, untinted
     assert schedulers[0].submitted == []
 
 

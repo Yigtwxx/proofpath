@@ -210,6 +210,10 @@ class ProofpathApp(App[None]):
         theme: Theme = PLAIN,
     ) -> None:
         super().__init__()
+        # The terminal's own colours, not Textual's grey: ``ansi-dark`` paints every
+        # surface in ``ansi_default`` and lets palette names through untranslated, so
+        # the app sits on the terminal's background like any other program would.
+        self.theme = "ansi-dark"
         self._config = config
         self._out = out
         #: The look, fixed for the session. ``PLAIN`` unless told otherwise: ``run()``
