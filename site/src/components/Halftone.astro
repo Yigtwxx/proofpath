@@ -3,6 +3,7 @@
    tone, so the field behind decides the second colour; the `dense` variant is
    cross-faded in on hover, which reads as the print darkening under the hand. */
 import { images, type GeneratedImage, type ImageId, type Tone } from '../data/images.generated';
+import { withBase } from '../lib/base';
 
 interface Props {
     id: ImageId;
@@ -29,14 +30,15 @@ const dense = image.variants[`${tone}-dense`];
 if (!set)
     throw new Error(`image "${id}" has no "${tone}" variant; add the tone to images.manifest.json`);
 const srcset = Object.entries(set)
-    .map(([w, src]) => `${src} ${w}w`)
+    .map(([w, src]) => `${withBase(src)} ${w}w`)
     .join(', ');
 const denseSrcset = dense
     ? Object.entries(dense)
-          .map(([w, src]) => `${src} ${w}w`)
+          .map(([w, src]) => `${withBase(src)} ${w}w`)
           .join(', ')
     : null;
-const fallback = set[720] ?? Object.values(set)[0];
+const fallback = withBase(set[720] ?? Object.values(set)[0] ?? '');
+const denseFallback = dense ? withBase(dense[720] ?? Object.values(dense)[0] ?? '') : '';
 const width = 720;
 const height = Math.round(720 / image.aspect);
 ---
@@ -63,7 +65,7 @@ const height = Math.round(720 / image.aspect);
     {hover && denseSrcset ? (
         <img
             class="halftone__img halftone__img--dense"
-            src={dense![720] ?? Object.values(dense!)[0]}
+            src={denseFallback}
             srcset={denseSrcset}
             sizes={sizes}
             width={width}

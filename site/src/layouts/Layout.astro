@@ -1,6 +1,7 @@
 ---
 import '../styles/global.css';
 import PencilDefs from '../components/sketch/PencilDefs.astro';
+import { withBase } from '../lib/base';
 // Preload the fonts the first paint needs, so the swap does not move the hero.
 import frauncesUrl from '@fontsource-variable/fraunces/files/fraunces-latin-full-normal.woff2?url';
 import interUrl from '@fontsource-variable/inter/files/inter-latin-wght-normal.woff2?url';
@@ -15,7 +16,7 @@ interface Props {
 }
 const { title, description, noindex = false } = Astro.props;
 const canonical = new URL(Astro.url.pathname, Astro.site);
-const ogImage = new URL('/og.png', Astro.site);
+const ogImage = new URL(withBase('og.png'), Astro.site);
 ---
 
 <!doctype html>
@@ -33,9 +34,9 @@ const ogImage = new URL('/og.png', Astro.site);
         {preload.map((href) => (
             <link rel="preload" as="font" type="font/woff2" href={href} crossorigin />
         ))}
-        <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
-        <link rel="icon" href="/favicon-32.png" sizes="32x32" type="image/png" />
-        <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+        <link rel="icon" href={withBase('favicon.svg')} type="image/svg+xml" />
+        <link rel="icon" href={withBase('favicon-32.png')} sizes="32x32" type="image/png" />
+        <link rel="apple-touch-icon" href={withBase('apple-touch-icon.png')} />
         <meta name="theme-color" content="#f6f1e7" />
         <meta property="og:type" content="website" />
         <meta property="og:title" content={title} />

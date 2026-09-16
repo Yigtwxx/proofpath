@@ -10,7 +10,10 @@
    same PNG sit on either field.
 
    Also emits `src/data/images.generated.ts` so the footer credits and every
-   <picture> are derived from the manifest rather than typed by hand. */
+   <picture> are derived from the manifest rather than typed by hand. Paths in
+   it are relative to the site root; components prefix them with
+   `import.meta.env.BASE_URL`, so the site can live under a sub-path such as
+   `/proofpath` on a hub without touching the data. */
 
 import { createHash } from 'node:crypto';
 import { mkdir, readFile, writeFile, access } from 'node:fs/promises';
@@ -168,7 +171,7 @@ async function main() {
                     const name = `${entry.id}-${width}-${tone}${suffix}.png`;
                     await writePng(dither(lum, tone, density), path.join(outDir, name));
                     variants[`${tone}${suffix}`] ??= {};
-                    variants[`${tone}${suffix}`][width] = `/images/${name}`;
+                    variants[`${tone}${suffix}`][width] = `images/${name}`;
                 }
             }
             variants.aspect = lum.width / lum.height;
