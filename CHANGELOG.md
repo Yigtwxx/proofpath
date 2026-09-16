@@ -6,6 +6,14 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- **A website**, under `site/`: a static Astro page with a replay of a real `/check`
+  run, the three questions, the six rules, and the CLI surface. The engravings are
+  public-domain plates (Met Open Access, Wikimedia Commons) halftoned at build time by
+  `site/scripts/dither.mjs` from `site/images.manifest.json`; the outputs are committed,
+  so the build never fetches. Design notes in
+  `docs/superpowers/specs/2026-09-16-landing-page-design.md`.
+
 ## [0.4.1] - 2026-09-16
 
 The TUI gets a shell's reflexes, and sits on the terminal's own background.

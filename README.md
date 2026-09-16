@@ -328,6 +328,24 @@ split, and no number is quoted without the run that produced it.
 - [Design specification](docs/superpowers/specs/2026-09-10-proofpath-design.md) — what it does and the measurements behind each decision
 - [Open items](docs/superpowers/OPEN-ITEMS.md) — what is unresolved, and what has not been verified yet · [Changelog](CHANGELOG.md)
 
+## The website
+
+The landing page lives in [`site/`](site/) — a static [Astro](https://astro.build) site
+with no framework runtime. It replays a real `/check` run, walks the three questions and
+the six rules, and credits every engraving it uses (Doré's plates for *The Raven* and
+Bracquemond's *Le Corbeau*, all public domain).
+
+```bash
+cd site
+npm install
+npm run dev          # http://localhost:4321
+npm run build        # dist/
+npm run images       # regenerate the halftones from images.manifest.json (committed)
+```
+
+Design decisions and the image pipeline are described in
+[`docs/superpowers/specs/2026-09-16-landing-page-design.md`](docs/superpowers/specs/2026-09-16-landing-page-design.md).
+
 ## License
 
 MIT
