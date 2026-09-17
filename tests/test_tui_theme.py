@@ -268,12 +268,12 @@ def test_single_column_glyphs_are_one_character():
             assert len(getattr(t.glyphs, field.name)) == 1, (t.name, field.name)
 
 
-# --- accents and the pet ---------------------------------------------------------------
+# --- accents and the banner ------------------------------------------------------------
 
 
 def test_plain_accents_are_ui_accents() -> None:
     assert PLAIN.accents == ui.ACCENTS
-    assert PLAIN.pet == {"dark": ui.PET_COLOUR, "light": ui.PET_COLOUR}
+    assert PLAIN.banner == {"dark": ui.PET_COLOUR, "light": ui.PET_COLOUR}
     assert PLAIN.badge is False
 
 
@@ -300,13 +300,13 @@ def test_rich_accents_are_five_distinct_hex_hues_never_red_yellow_green():
         assert not (75 < hue <= 165), (accent, hue)
 
 
-def test_rich_pet_is_two_crimsons_and_neither_is_an_accent() -> None:
-    assert set(RICH.pet) == {"dark", "light"}
-    for tone in RICH.pet.values():
+def test_rich_banner_is_two_crimsons_and_neither_is_an_accent() -> None:
+    assert set(RICH.banner) == {"dark", "light"}
+    for tone in RICH.banner.values():
         hue = _hue(tone)
         assert hue < 20 or hue > 335, tone
         assert tone not in RICH.accents
-    assert RICH.pet["dark"] != RICH.pet["light"]
+    assert RICH.banner["dark"] != RICH.banner["light"]
 
 
 def test_no_theme_has_a_stamp_any_more() -> None:

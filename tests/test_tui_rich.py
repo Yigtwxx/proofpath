@@ -15,12 +15,11 @@ import pytest
 from rich.cells import cell_len
 from textual.content import Content
 
-from proofpath import ui, verify
+from proofpath import __version__, ui, verify
 from proofpath.document import Claim, Locator, Reference
 from proofpath.events import Emitted, Note, Progress, StageEnd, StageStart
-from proofpath.tui import pet
+from proofpath.tui import banner, wordmark
 from proofpath.tui.app import (
-    HINT,
     Banner,
     CoverageFooter,
     FindingLine,
@@ -555,60 +554,59 @@ async def test_a_forced_rich_theme_without_colour_still_draws_its_frames() -> No
         assert block.border_subtitle == "coverage 62/21/17%"
 
 
-# --- the pet -------------------------------------------------------------------------
+# --- the wordmark ----------------------------------------------------------------------
 
 
-async def test_the_rich_raven_is_eight_lines_in_braille_with_the_text_beside_it() -> None:
+async def test_the_rich_banner_is_the_wordmark_with_the_text_under_it() -> None:
     app, _ = rich_app()
     async with app.run_test(size=SIZE) as pilot:
         await pilot.pause()
-        raven = app.query_one(Banner)
-        drawn = raven.drawn
+        mark = app.query_one(Banner)
+        drawn = mark.drawn
         assert drawn is not None
-        assert raven.region.height == 8
+        assert mark.region.height == 8
     assert len(drawn.lines) == 8
-    assert drawn.lines[pet.HINT_ROW].endswith("/help  /config  /quit")
-    assert drawn.lines[pet.GROUND_ROW].endswith(pet.GROUND)
+    assert drawn.lines[:6] == wordmark.WORDMARK
+    assert drawn.lines[wordmark.VERSION_ROW].startswith(f"proofpath v{__version__}")
+    assert drawn.lines[wordmark.HINT_ROW].endswith("/help  /config  /quit")
     for line in drawn.lines:
         assert cell_len(line) == len(line) <= 100, line
-    art = "".join(line[: pet.TEXT_COLUMN] for line in drawn.lines)
-    assert all(c == " " or 0x2800 <= ord(c) <= 0x28FF for c in art)
+    allowed = set(wordmark.BLOCK + wordmark.SHADOW + " ")
+    assert all(set(line) <= allowed for line in drawn.lines[:6])
 
 
-async def test_the_rich_raven_is_painted_in_the_theme_tones() -> None:
+async def test_the_rich_wordmark_is_painted_in_the_theme_tones() -> None:
     app, _ = rich_app()
     async with app.run_test(size=SIZE):
         text = app.query_one(Banner).render()
     styles = {str(span.style) for span in text.spans}
-    assert RICH.pet["dark"] in styles and RICH.pet["light"] in styles
+    assert RICH.banner["dark"] in styles and RICH.banner["light"] in styles
     # The text lines are not coloured.
     plain_rows = text.plain.split("\n")
-    for row in (pet.VERSION_ROW, pet.HINT_ROW):
-        text_start = sum(len(line) + 1 for line in plain_rows[:row]) + pet.TEXT_COLUMN
+    for row in (wordmark.VERSION_ROW, wordmark.HINT_ROW):
+        text_start = sum(len(line) + 1 for line in plain_rows[:row]) + wordmark.TEXT_COLUMN
         assert not any(span.start <= text_start < span.end for span in text.spans), row
 
 
-async def test_the_raven_carries_no_styles_without_colour() -> None:
+async def test_the_wordmark_carries_no_styles_without_colour() -> None:
     app, _ = rich_app(out=ui.build(force_terminal=True, no_color=True))
     async with app.run_test(size=SIZE):
         text = app.query_one(Banner).render()
     assert text.spans == []
 
 
-async def test_the_hint_drops_its_command_list_where_it_would_overflow() -> None:
+async def test_the_wordmark_gives_way_to_the_plain_banner_below_the_floor() -> None:
     app, _ = rich_app()
-    async with app.run_test(size=(76, 24)) as pilot:
+    async with app.run_test(size=(69, 24)) as pilot:
         drawn = app.query_one(Banner).drawn
         assert drawn is not None
-        assert drawn.lines[pet.HINT_ROW] == (
-            drawn.lines[pet.HINT_ROW][: pet.TEXT_COLUMN] + HINT.split("  ")[0]
-        )
-        await pilot.resize_terminal(77, 24)
+        assert drawn.lines[:6] == wordmark.WORDMARK
+        assert drawn.lines[wordmark.HINT_ROW].endswith("/help  /config  /quit")
+        await pilot.resize_terminal(68, 24)
         await pilot.pause()
         drawn = app.query_one(Banner).drawn
         assert drawn is not None
-        assert drawn.lines[pet.HINT_ROW].endswith("/help  /config  /quit")
-        assert len(drawn.lines[pet.HINT_ROW]) <= 77
+        assert drawn.lines[0] == banner.ART[0]
 
 
 # --- widths ----------------------------------------------------------------------------

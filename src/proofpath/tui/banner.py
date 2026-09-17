@@ -35,7 +35,8 @@ GROUND = "_"
 #: The index of the feet-on-the-ground line, the one :func:`render` extends.
 GROUND_LINE = len(ART) - 1
 #: The index of the hint line. The widget's drop rule reads the drawn hint back by
-#: ``pet.HINT_ROW`` whatever was drawn, so the two must agree (``test_tui_pet.py``).
+#: ``wordmark.HINT_ROW`` above the wordmark's floor and by this below it, where this
+#: banner is what ``wordmark.render`` drew (``test_tui_wordmark.py``).
 HINT_LINE = 4
 #: Columns the drawn banner leaves free on the right. Two, not one: the context and
 #: the command list end at column 78 of an 80-column terminal, level with each other.

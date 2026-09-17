@@ -125,7 +125,7 @@ def key_help(arrows: str, shift_arrows: str, sep: str) -> tuple[str, str]:
 #: Which verbs hold the bar is the parser's decision, not this module's; it is
 #: re-exported here because the app is where the mode is entered and left.
 AWAITING_VERBS = commands.AWAITING_VERBS
-#: The run states the raven is told about (raven design section 2).
+#: The run states the banner is told about (raven design section 2).
 BUSY_STATES = frozenset({"running", "verifying"})
 
 
@@ -527,15 +527,15 @@ class ProofpathApp(App[None]):
         self._scroll_log()
 
     def _watch_eyes(self, run: Run) -> None:
-        """The raven is told about the runs; today it does not react (raven design §2)."""
+        """The banner is told about the runs; today it does not react (raven design §2)."""
         runs = self._scheduler.runs if self._scheduler is not None else ()
-        raven = self.query_one(Banner)
-        raven.set_busy(any(other.state in BUSY_STATES for other in runs))
+        mark = self.query_one(Banner)
+        mark.set_busy(any(other.state in BUSY_STATES for other in runs))
         if run.state == "done" and run.report is not None:
-            raven.flash("findings" if run.report.findings else "clean")
+            mark.flash("findings" if run.report.findings else "clean")
         elif run.state == "failed":
             # A run that fell over is not a clean run; it never gets the clean mood.
-            raven.flash("findings")
+            mark.flash("findings")
 
     def _scroll_log(self) -> None:
         self.query_one(RunLog).scroll_end(animate=False)

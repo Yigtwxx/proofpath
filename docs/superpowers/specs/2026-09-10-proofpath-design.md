@@ -608,6 +608,8 @@ progress, is cancellable mid-run, and writes a report on completion.
 › _
 ```
 
+In `rich` the banner is the `ProofPath` wordmark of
+`2026-09-18-wordmark-banner-design.md`; the block above is the `plain` banner.
 **The ferret (decided 2026-09-11).** The banner at the top is the tool's pet, in the
 manner of Claude Code's welcome header: shown once at launch, pinned above the log,
 never repeated. A ferret because English *ferrets out* the facts, and because its
