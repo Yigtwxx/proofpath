@@ -547,6 +547,11 @@ bare invocation is a first-class entry point rather than a help screen.
 > the golden block below still holds for `plain`. See the v2 design's §2–§4 for the
 > `rich` layout and §5 for the module split.
 
+> **Amended 2026-09-16 by `2026-09-16-raven-pet-design.md`.** The pet is a raven,
+> not a ferret; there is no `[PROOF]` stamp and no animation. The four banner lines
+> of the block below are replaced by the six `plain` lines of that design's §5; the
+> run block under them is unchanged.
+
 The TUI is a streaming log with a prompt at the bottom, in the manner of Claude Code
 and OpenClaw. Chosen over a split-pane browser because it handles several documents
 in one session naturally, surfaces the permission prompt (§7.1) inline in the flow
@@ -556,10 +561,12 @@ Built with `textual`. Accepts a file path, a URL, or raw pasted text. Streams
 progress, is cancellable mid-run, and writes a report on completion.
 
 ```
-   ,_,
-  (o.o)~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~[PROOF]
-   " "    proofpath v0.1.0                            academic . offline . mps
-          paste a file path, a URL, or a claim.            /help  /config  /quit
+       __
+      (o >
+    _/ /
+   /  /       proofpath v0.1.0                        academic . offline . mps
+  /__/        paste a file path, a URL, or a claim.      /help  /config  /quit
+ ____||_______________________________________________________________________
 
 › ~/Desktop/paper.pdf
 

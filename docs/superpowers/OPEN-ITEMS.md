@@ -106,7 +106,7 @@ Not problems, just not now. Recorded so they are not rediscovered as new ideas.
 | Landing site: one Astro site, four pages (`evidencelab.dev/`, `/proofpath`, `/reasonhound`, `/spiyweb`) | after v0.1 ships something runnable |
 | GitHub org `evidencelab` (free at time of checking) | when the landing site is built |
 | `evidencelab.dev` domain (free at time of checking) | same |
-| Pet family and names: one ASCII animal per project in the same drawing style with the same single red stamp (proofpath ferret · reasonhound hound · spiyweb spider); names only if the landing page presents them as characters, chosen for all three at once | when the landing site is built |
+| Pet family and names: one pixel animal per project in the same drawing style (proofpath dropped its red stamp on 2026-09-16; a shared mark is open again) (proofpath raven · reasonhound hound · spiyweb spider); names only if the landing page presents them as characters, chosen for all three at once | when the landing site is built |
 | `spiyweb` as an alternative retrieval backend for `proofpath` | after Phase 6; the real tie between the three projects |
 | GROBID parser as an opt-in `--parser` | if Phase 5 citation pairing accuracy proves inadequate |
 | Turkish sources | after v0.4 |
@@ -186,7 +186,7 @@ Findings from inspecting the installed base environment, and the decisions they 
 | 8.14 | Several runs per TUI session | **Each `/check` is its own numbered, distinctly coloured block, listed at once. Scheduling by stage: parse/resolve/fetch concurrent (≤ 3 runs), verify a single FIFO slot; states queued / running / waiting for verify / verifying / done / cancelled; `/cancel #n`.** Spec §13.1; Phase 8 |
 | 8.15 | Mouse in the TUI | **Enabled (Textual native, no new dependency); nothing mouse-only, nothing keyboard-only.** Click targets: run header, stage line, finding (toggle detail), permission prompt buttons, `#n`/URL hyperlinks (OSC 8), copy-passage. Spec §13.1; Phase 8 |
 | 8.18 | Colour system | **ANSI-16 only; meaning layer (green ok / yellow caution / red finding / dim NEI, key column bold) + rotating run accents (cyan, magenta, blue, bright cyan, bright magenta). Red/yellow/green never used as accents.** Spec §13.3; `ui.py` owns the tables |
-| 8.19 | Pet | **A ferret** ("ferrets out the facts"; body `~` = the proof path ending in a red `[PROOF]` stamp — the banner's only colour). Pure ASCII, re-flows with width, eyes animate by run state in the TUI only. Owl rejected (Syft, Odoo Owl, Owl language), lynx rejected (`lynx` terminal browser). Spec §13.1; Phase 8 |
+| 8.19 | Pet | **A raven** (2026-09-16; was a ferret 2026-09-11 → v0.4.1). Two-tone pixel art, Braille in `rich`, ASCII in `plain`, no stamp, no animation. Spec `2026-09-16-raven-pet-design.md`. |
 
 ### New open items (Phase 4, from review)
 
