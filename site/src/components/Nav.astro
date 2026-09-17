@@ -1,5 +1,8 @@
 ---
-/* Sticky, quiet. Sits on whichever field is behind it and inherits its ink. */
+/* Sticky, quiet, on the crimson field. At the top of the page the wordmark sits
+   left and the links right; once the hero has scrolled away the links fade out and
+   the wordmark slides to the centre, a running head. `scripts/nav.ts` sets
+   `data-scrolled`; everything else is CSS. */
 import { repo } from '../data/commands';
 
 const links = [
@@ -10,7 +13,7 @@ const links = [
 ];
 ---
 
-<header class="nav">
+<header class="nav" data-nav-bar>
     <div class="page nav__row">
         <a class="nav__brand" href="#top" aria-label="proofpath, back to top">
             <span class="nav__name">proofpath</span>
@@ -48,21 +51,31 @@ const links = [
 
 <style>
     .nav {
+        --field: var(--crimson);
+        --nav-move: 520ms;
         position: sticky;
         top: 0;
         z-index: 20;
+        color: var(--paper);
         backdrop-filter: blur(6px);
-        background: color-mix(in srgb, var(--field, var(--paper)) 82%, transparent);
+        background: color-mix(in srgb, var(--field) 82%, transparent);
         border-bottom: 1px solid color-mix(in srgb, currentColor 18%, transparent);
     }
     .nav__row {
+        position: relative;
         display: flex;
         align-items: center;
-        justify-content: space-between;
+        justify-content: flex-end;
         gap: var(--space-4);
         min-height: 3.5rem;
     }
+    /* The wordmark is placed, not flowed, so its move to the centre can ease:
+       `left` and the transform carry it, nothing reflows. */
     .nav__brand {
+        position: absolute;
+        top: 50%;
+        left: var(--gutter);
+        transform: translate(0, -50%);
         display: inline-flex;
         align-items: center;
         gap: 0.5rem;
@@ -73,6 +86,13 @@ const links = [
         font-variation-settings:
             'opsz' 24,
             'WONK' 1;
+        transition:
+            left var(--nav-move) var(--ease-pen),
+            transform var(--nav-move) var(--ease-pen);
+    }
+    .nav[data-scrolled] .nav__brand {
+        left: 50%;
+        transform: translate(-50%, -50%);
     }
     .nav__brand:hover {
         text-decoration: none;
@@ -82,6 +102,17 @@ const links = [
         display: flex;
         gap: clamp(0.75rem, 2.5vw, 1.75rem);
         font-size: var(--step--1);
+        transition:
+            opacity 320ms var(--ease-pen),
+            visibility 0s linear 0s;
+    }
+    /* Faded, then out of the tab order once the fade has run. */
+    .nav[data-scrolled] .nav__links {
+        opacity: 0;
+        visibility: hidden;
+        transition:
+            opacity 320ms var(--ease-pen),
+            visibility 0s linear 320ms;
     }
     .nav__links a {
         position: relative;
@@ -137,3 +168,8 @@ const links = [
         }
     }
 </style>
+
+<script>
+    import { initNav } from '../scripts/nav';
+    initNav();
+</script>
