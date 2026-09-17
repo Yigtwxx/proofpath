@@ -6,6 +6,28 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- **GitHub Releases.** The release workflow now creates the GitHub Release for each
+  tag, with the version's CHANGELOG section as its notes (`scripts/release_notes.py`)
+  and the wheel and sdist attached; the eight earlier tags were released the same way
+  by hand on 2026-09-17.
+
+### Changed
+- **Permission hints.** The TUI's consent question names the `/allow` answers instead
+  of the terminal's keys; a run that skipped sources because the browser was not
+  permitted says which setting turns it on (`/config set …` in the TUI,
+  `proofpath config set …` elsewhere), and a run the network setting stopped says so
+  in its once-per-run `network: not permitted` note; a page given where a post was
+  expected says to paste the claim as text; `/allow` with nothing waiting says where
+  the question appears.
+- README screenshots are real runs with the raven (`docs/eval/tui-raven-{rich,plain}.svg`,
+  method in `docs/eval/2026-09-17-tui-raven.md`).
+
+### Fixed
+- **`loading models …` no longer outlives the loading in the TUI.** The note is
+  transient and is taken back when the `Verifying` stage ends; a finished run no longer
+  looks like it is still loading.
+
 ## [0.4.2] - 2026-09-17
 
 A raven in the terminal, and a website to go with it.

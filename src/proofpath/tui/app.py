@@ -755,7 +755,10 @@ class ProofpathApp(App[None]):
         path as one (the same reason ``/cancel`` does not hold it).
         """
         if not self.pending:
-            self._note("nothing to allow")
+            self._note(
+                "nothing to allow — the question appears under the stage a site blocks; "
+                "answer it there, or with /allow " + "|".join(commands.ALLOW_ANSWERS)
+            )
             return
         owner = next(reversed(self.pending))  # the newest question is the one on screen
         answer = arg.strip().lower()

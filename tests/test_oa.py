@@ -619,14 +619,20 @@ def test_network_deny_makes_no_provider_request(client: httpx.Client) -> None:
 
     located = access.locate(DOI)
     assert located.locations == [] and located.abstracts == {}
-    assert located.notes == ["network: not permitted (permissions.network = deny)"]
+    assert located.notes == [
+        "network: not permitted (permissions.network = deny)"
+        " — permissions.network allow turns it on"
+    ]
 
     evidence = access.fetch(DOI)
     assert evidence.kind == "none"
     assert evidence.state == fx.Outcome.NETWORK_DENIED.value
     assert evidence.text == "" and evidence.url == "" and evidence.source == ""
     assert evidence.attempts == []
-    assert evidence.notes == ["network: not permitted (permissions.network = deny)"]
+    assert evidence.notes == [
+        "network: not permitted (permissions.network = deny)"
+        " — permissions.network allow turns it on"
+    ]
     assert respx.calls.call_count == 0
 
 
@@ -638,6 +644,7 @@ def test_network_ask_without_a_tty_makes_no_provider_request(client: httpx.Clien
     assert evidence.state == fx.Outcome.NETWORK_DENIED.value
     assert evidence.notes == [
         "network: not permitted (permission is set to ask but there is no interactive terminal)"
+        " — permissions.network allow turns it on"
     ]
     assert respx.calls.call_count == 0
 

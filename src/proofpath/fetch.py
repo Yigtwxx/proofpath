@@ -33,6 +33,7 @@ from scrapling.parser import Selector
 from proofpath.cache import Cache
 from proofpath.config import Config, is_interactive, resolve_permission
 from proofpath.polite import RETRYABLE, PoliteClient, backoff_delay, user_agent
+from proofpath.settings_hints import NETWORK_SETTING
 
 ACCEPT = "text/html,application/xhtml+xml,application/pdf;q=0.9,*/*;q=0.8"
 WAYBACK_AVAILABLE = "https://archive.org/wayback/available"
@@ -329,7 +330,10 @@ def network_permission(config: Config, *, interactive: bool) -> tuple[bool, str]
             if config.permissions.network == "deny"
             else decision.reason
         )
-        return False, f"network: not permitted ({reason})"
+        # The fact first, then the setting that turns the network on (permission
+        # hints): this note is emitted once per denied run and printed as the
+        # outcome's note, so the hint travels with it to every surface.
+        return False, f"network: not permitted ({reason}) — {NETWORK_SETTING} turns it on"
     if decision.outcome == "prompt":
         return True, "network permission is 'ask'; allowed for this run"
     return True, ""

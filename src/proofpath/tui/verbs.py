@@ -180,7 +180,15 @@ def _gate_lines(out: ui.Ui, gate: ConsentGate) -> list[Text]:
         number = Text(f"{gate.skipped} source(s)")
         if out.color:
             number.stylize(ui.BROWSER_SKIPPED_STYLE)
-        lines.append(_kv(out, "skipped", Text.assemble(number, f" {BROWSER_SKIPPED_REASON}")))
+        lines.append(
+            _kv(
+                out,
+                "skipped",
+                Text.assemble(
+                    number, f" {BROWSER_SKIPPED_REASON} — /config set {ui.BROWSER_SETTING}"
+                ),
+            )
+        )
     lines.extend(_kv(out, "install", line) for line in gate.install_log)
     return lines
 

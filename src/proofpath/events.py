@@ -54,6 +54,9 @@ class Note:
     """Something the run needs to say that is not a finding: a permission, a log line."""
 
     text: str
+    #: A line that describes something in progress and is taken back when it is over
+    #: (the TUI removes it; the CLI logs it).
+    transient: bool = False
 
 
 @dataclass(frozen=True)

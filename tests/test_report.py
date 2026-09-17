@@ -1219,7 +1219,10 @@ def test_footer_carries_the_browser_skipped_count() -> None:
 
 def test_markdown_coverage_names_the_sources_the_browser_gate_stopped() -> None:
     text = render_markdown(skipped_at_the_gate(3), written_at=WHEN)
-    assert f"Skipped 3 source(s) {BROWSER_SKIPPED_REASON}." in text
+    assert (
+        f"Skipped 3 source(s) {BROWSER_SKIPPED_REASON}"
+        " — proofpath config set permissions.install_browser ask."
+    ) in text
 
 
 def test_markdown_says_nothing_when_the_browser_stopped_nothing() -> None:

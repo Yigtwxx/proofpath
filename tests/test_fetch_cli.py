@@ -164,7 +164,10 @@ def test_url_blocked_without_tty_reports_skipped_and_exits_1() -> None:
     assert "note       step 2 curl_cffi: HTTP 403 (blocked)" in result.stdout
     assert "note       step 3 browser: not permitted" in result.stdout
     assert f"browser    {NO_TTY_REASON}" in result.stdout
-    assert "skipped    1 source(s) because the browser was not permitted" in result.stdout
+    assert (
+        "skipped    1 source(s) because the browser was not permitted"
+        " — proofpath config set permissions.install_browser ask"
+    ) in result.stdout
     # Product rule 4: a non-interactive run never sees the consent prompt.
     assert "Allow?" not in result.output
 
@@ -245,7 +248,10 @@ def test_quiet_hides_notes_keeps_state_and_skipped() -> None:
     assert "note       " not in result.stdout
     assert "outcome    UNVERIFIED (blocked, browser not permitted)" in result.stdout
     assert f"browser    {NO_TTY_REASON}" in result.stdout
-    assert "skipped    1 source(s) because the browser was not permitted" in result.stdout
+    assert (
+        "skipped    1 source(s) because the browser was not permitted"
+        " — proofpath config set permissions.install_browser ask"
+    ) in result.stdout
 
 
 # --- DOI / arXiv targets -------------------------------------------------------------
@@ -284,7 +290,10 @@ def test_doi_abstract_only_exits_1() -> None:
     assert "attempt    europepmc" in result.stdout and "UNVERIFIED (unreachable)" in result.stdout
     assert f"browser    {NO_TTY_REASON}" in result.stdout
     # Two locations were walls (s2_pdf, arxiv), but they belong to one source.
-    assert "skipped    1 source(s) because the browser was not permitted" in result.stdout
+    assert (
+        "skipped    1 source(s) because the browser was not permitted"
+        " — proofpath config set permissions.install_browser ask"
+    ) in result.stdout
     assert "Allow?" not in result.output
 
 
@@ -314,7 +323,10 @@ def test_quiet_hides_attempt_lines_for_doi() -> None:
     assert "evidence   abstract — LOW CONFIDENCE (abstract only)" in result.stdout
     assert "source     abstract:s2" in result.stdout
     assert f"browser    {NO_TTY_REASON}" in result.stdout
-    assert "skipped    1 source(s) because the browser was not permitted" in result.stdout
+    assert (
+        "skipped    1 source(s) because the browser was not permitted"
+        " — proofpath config set permissions.install_browser ask"
+    ) in result.stdout
 
 
 @respx.mock

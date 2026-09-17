@@ -384,6 +384,11 @@ class RunBlock(Vertical):
         #: panel's bottom border says the same thing and a run must say it once.
         self._coverage: CoverageLine | None = None
         self._lines: dict[str, StageLine] = {}
+        #: Note lines that describe something still in progress (``loading models …``).
+        #: Taken back by the next event that proves it is over -- a stage end, a
+        #: finding, a lasting note -- or by the run settling. Never by ``Progress``:
+        #: a bar can tick while a model is still being downloaded.
+        self._transient: list[NoteLine] = []
         self._pending: list[tuple[Widget, Widget]] = []
         self._ready = False
         self._ruled = False
@@ -465,6 +470,7 @@ class RunBlock(Vertical):
             if active is not None:
                 active.set_progress(event)
         elif isinstance(event, StageEnd):
+            self._settle_transient()
             # A stage that ended without ever starting still gets its line: an event
             # stream with a gap in it must not lose what the stage said it found.
             ended = self._lines.get(event.name)
@@ -476,8 +482,14 @@ class RunBlock(Vertical):
                 self._add(self._stages, ended)
             ended.finish(event)
         elif isinstance(event, Note):
-            self._add(self._stages, NoteLine(event.text, self._theme))
+            note = NoteLine(event.text, self._theme)
+            if event.transient:
+                self._transient.append(note)
+            else:
+                self._settle_transient()
+            self._add(self._stages, note)
         elif isinstance(event, Emitted):
+            self._settle_transient()
             if not self._ruled:
                 self._ruled = True
                 self._add(self._findings, self._rule)
@@ -544,6 +556,8 @@ class RunBlock(Vertical):
 
     def settle(self) -> None:
         """The run reached a terminal state: keep its own coverage line in place."""
+        # Whatever was still "in progress" is over with the run, however it ended.
+        self._settle_transient()
         self.refresh_state()
         if self.panelled and self.run.state == "failed" and self.run.error:
             # The PLAIN header prints the error in its tail; the panel has no header
@@ -576,3 +590,13 @@ class RunBlock(Vertical):
             parent.mount(child)
         else:
             self._pending.append((parent, child))
+
+    def _settle_transient(self) -> None:
+        """Take back the transient note lines: what they described is over."""
+        for line in self._transient:
+            if line.is_attached:
+                line.remove()
+            else:
+                # Queued before the block was mounted: never shown, so never mounted.
+                self._pending = [(p, c) for p, c in self._pending if c is not line]
+        self._transient.clear()
