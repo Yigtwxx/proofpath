@@ -1,4 +1,5 @@
-/* The v0.4 surface: a post read without an account, and the links inside it.
+/* The v0.4 surface: a post read without an account, the links inside it, and
+   since v0.4.4 any other page as the document itself.
    Platforms and their answers follow README "Posts and the links inside them"
    and providers/social.py; the states are spec §15's, not paraphrases. */
 export interface Platform {
@@ -18,6 +19,10 @@ export const postCommands: readonly { cmd: string; comment: string }[] = [
         comment: "a story's URL, and the links in a comment",
     },
     { cmd: 'proofpath check -', comment: 'paste the text of a post that cannot be read' },
+    {
+        cmd: 'proofpath check --url https://en.wikipedia.org/wiki/AlphaFold',
+        comment: 'any other address is a page, read as the document itself',
+    },
 ];
 
 export const platforms: readonly Platform[] = [
