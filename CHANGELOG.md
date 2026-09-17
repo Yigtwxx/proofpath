@@ -6,6 +6,12 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+- **TUI: the `rich` banner is a wordmark.** `ProofPath` in block letters, crimson on
+  deep crimson, with the version and hint lines under it; the Braille raven is gone.
+  The ASCII raven of the `plain` theme and the website's raven stay
+  (`docs/superpowers/specs/2026-09-18-wordmark-banner-design.md`).
+
 ### Fixed
 - **TUI: a multi-line paste is no longer cut to its first line.** Textual's input
   keeps the first line of a bracketed paste; the bar now holds the whole text behind

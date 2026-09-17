@@ -21,21 +21,21 @@ proofpath
 ```
 
 ```
-       ⣴⣿⠿⣷⣀
-      ⢀⣿⣿⣿⡿⠿⣿⠂
-     ⢠⣿⣿⣿⣿⡇
-    ⢠⣿⣿⣿⣿⣿⡇       proofpath v0.4.4                                      academic · online · coreml
-   ⢠⣿⣿⣿⣿⣿⡟        paste a file path, a URL, or a claim.                      /help  /config  /quit
-  ⣠⣿⣿⣿⣿⡿⠋
-⣠⣾⣿⣿⠿⣿⠉⡏⡇
-⠛⠙⠃  ⠛⠒⠓⠓⠒⠒⠒⠒⠒⠂⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒
+██████╗                        █████╗██████╗               ██╗
+██╔══██╗                      ██╔═══╝██╔══██╗         ██╗  ██║
+██████╔╝██╗██╗ █████╗  █████╗ █████╗ ██████╔╝ █████╗ █████╗██████╗
+██╔═══╝ ████╔╝██╔══██╗██╔══██╗██╔══╝ ██╔═══╝ ██╔══██╗╚██╔═╝██╔═██╗
+██║     ██╔═╝ ╚█████╔╝╚█████╔╝██║    ██║     ███████║ ██║  ██║ ██║
+╚═╝     ╚═╝    ╚════╝  ╚════╝ ╚═╝    ╚═╝     ╚═╝  ╚═╝ ╚═╝  ╚═╝ ╚═╝
+proofpath v0.4.4                                                        academic · online · coreml
+paste a file path, a URL, or a claim.                                        /help  /config  /quit
 ```
 
-The bird is a raven — the same one as on the website — drawn in Braille cells in the
-`rich` theme and in ASCII in `plain`.
+The `rich` theme opens with the wordmark in the two crimsons; the `plain` theme opens
+with the raven — the same bird as on the website — in ASCII.
 
 Bare `proofpath` opens the terminal UI ([a recorded session in both themes](docs/eval/2026-09-15-tui-v2-live.md),
-with SVG screenshots of a real run in [`rich`](docs/eval/tui-raven-rich.svg) and
+with SVG screenshots of a real run on v0.4.1, before the wordmark, in [`rich`](docs/eval/tui-raven-rich.svg) and
 [`plain`](docs/eval/tui-raven-plain.svg)). Each run is one panel in its own
 accent: the command on the top border and the run's state at its right, a fixed-column
 stage table underneath (`✓` finished, `⏺` still running or finished with something

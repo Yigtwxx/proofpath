@@ -11,7 +11,7 @@ Detection reads an injected environment, never ``os.environ`` directly, so every
 branch of the table is a unit test. ``PROOFPATH_THEME=rich|plain`` overrides it,
 for screenshots and bug reports.
 
-Pure: no Textual import, so ``pet.py`` and the tests can use it without an app.
+Pure: no Textual import, so ``wordmark.py`` and the tests can use it without an app.
 """
 
 from __future__ import annotations
@@ -83,9 +83,9 @@ class Theme:
     tones: Mapping[str, str]
     #: The five run accents, rotating. Never red, yellow or green: those mean things.
     accents: tuple[str, ...]
-    #: The raven's two tones, keyed ``dark`` and ``light`` (``banner.Tone``), as Rich
+    #: The banner's two tones, keyed ``dark`` and ``light`` (``banner.Tone``), as Rich
     #: styles. The banner's only colours.
-    pet: Mapping[str, str]
+    banner: Mapping[str, str]
     #: State words as badges (coloured background) or as coloured words.
     badge: bool
     unicode: bool
@@ -130,8 +130,9 @@ class Theme:
 
 
 _RICH_RED = "#ef4444"
-#: The raven: the landing page's ``--crimson-deep`` and ``--crimson``.
-_RICH_PET: Mapping[str, str] = {"dark": "#8f0f2b", "light": "#c4173a"}
+#: The wordmark and the plain raven: the landing page's ``--crimson-deep`` and
+#: ``--crimson``.
+_RICH_BANNER: Mapping[str, str] = {"dark": "#8f0f2b", "light": "#c4173a"}
 _RICH_COLOURS: Mapping[str, str] = {
     "green": "#22c55e",
     "yellow": "#f59e0b",
@@ -178,7 +179,7 @@ RICH = Theme(
     ),
     tones=_RICH_TONES,
     accents=_RICH_ACCENTS,
-    pet=_RICH_PET,
+    banner=_RICH_BANNER,
     badge=True,
     unicode=True,
     colours=_RICH_COLOURS,
@@ -209,7 +210,7 @@ PLAIN = Theme(
     # The ANSI names map to themselves: PLAIN is exactly what ``ui.py`` prints today.
     tones={name: name for name in MEANING_TONES.values()},
     accents=ui.ACCENTS,
-    pet={"dark": ui.PET_COLOUR, "light": ui.PET_COLOUR},
+    banner={"dark": ui.PET_COLOUR, "light": ui.PET_COLOUR},
     badge=False,
     unicode=False,
     colours={name: name for name in MEANING_TONES.values()},
