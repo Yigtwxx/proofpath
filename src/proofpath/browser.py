@@ -52,10 +52,24 @@ BROWSERS_DIR = "ms-playwright"
 # drivers, "chromium_headless_shell-<revision>"): the glob matches either.
 CHROMIUM_GLOB = "chromium*"
 
+#: The consent prompt's last line on a terminal: the keys ``ask_terminal`` reads.
+TERMINAL_ANSWERS = (
+    "    Allow?  [y] yes, once   [a] always (save to config)   [n] no   [never] never ask again"
+)
+#: The same line in the TUI, where the keys do nothing: the buttons, or the
+#: ``/allow`` answers they are worth (spec section 13.1).
+TUI_ANSWERS = (
+    "    Allow?  click a button, or type  /allow once   /allow always   /allow no   /allow never"
+)
 
-def prompt_text(host: str, status: int | None) -> str:
+
+def prompt_text(host: str, status: int | None, *, answers: str = TERMINAL_ANSWERS) -> str:
     """The spec section 7.1 consent block, rendered for one blocked host: three
-    parts (what happened, what it costs, the choices) separated by blank lines."""
+    parts (what happened, what it costs, the choices) separated by blank lines.
+
+    ``answers`` is the last line: the terminal's keys by default, or the TUI's
+    ``/allow`` line -- the first two parts are the same question on both surfaces.
+    """
     status_desc = f"HTTP {status}" if status is not None else "no HTTP status"
     # A 200 with nothing readable in it is the quiet half of the bot wall: the host
     # did answer, so calling that "blocked" contradicts the status printed beside it
@@ -72,8 +86,7 @@ def prompt_text(host: str, status: int | None) -> str:
         f"      chromium browser                 {BROWSER_SIZE}",
         "      installed into this tool's own environment only",
         "",
-        "    Allow?  [y] yes, once   [a] always (save to config)   [n] no   "
-        "[never] never ask again",
+        answers,
     ]
     return "\n".join(lines)
 

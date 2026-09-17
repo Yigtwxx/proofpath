@@ -383,6 +383,20 @@ def test_prompt_text_matches_spec() -> None:
     assert "no HTTP status" in bw.prompt_text("nature.com", None)
 
 
+def test_prompt_text_tui_form_names_the_four_allow_answers() -> None:
+    """The TUI draws the same block, but its last line names the ``/allow`` answers
+    the buttons are worth: the terminal's keys do nothing there."""
+    from proofpath.tui import commands
+
+    terminal = bw.prompt_text("nature.com", 403).splitlines()
+    tui = bw.prompt_text("nature.com", 403, answers=bw.TUI_ANSWERS).splitlines()
+    assert tui[:-1] == terminal[:-1]
+    assert tui[-1] == bw.TUI_ANSWERS
+    for answer in commands.ALLOW_ANSWERS:
+        assert f"/allow {answer}" in tui[-1]
+    assert "[y]" not in tui[-1]
+
+
 def test_prompt_text_does_not_call_a_200_a_block() -> None:
     """The empty-body bot wall answers 200 and hands over nothing readable.
 

@@ -632,7 +632,10 @@ def test_network_deny_makes_no_request(client: httpx.Client) -> None:
     assert result.outcome is fx.Outcome.NETWORK_DENIED
     assert result.step == 0
     assert respx.calls.call_count == 0
-    assert result.notes == ["network: not permitted (permissions.network = deny)"]
+    assert result.notes == [
+        "network: not permitted (permissions.network = deny)"
+        " — permissions.network allow turns it on"
+    ]
 
 
 @respx.mock
@@ -647,6 +650,7 @@ def test_network_ask_without_a_tty_is_denied_and_reported(client: httpx.Client) 
     assert respx.calls.call_count == 0
     assert result.notes == [
         "network: not permitted (permission is set to ask but there is no interactive terminal)"
+        " — permissions.network allow turns it on"
     ]
 
 

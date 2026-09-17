@@ -20,6 +20,10 @@ import orjson
 from rich.console import Console
 from rich.text import Text
 
+# ``BROWSER_SETTING`` and ``NETWORK_SETTING`` are the two settings a "not permitted"
+# line points at, re-exported so every surface reads them off this module. They live
+# in ``settings_hints`` (a leaf: ``fetch`` needs one and cannot import this layer);
+# the explicit ``as`` form is for mypy's strict no-implicit-reexport.
 from proofpath.report import (
     BROWSER_SKIPPED_REASON,
     REASON_INDENT,
@@ -30,6 +34,8 @@ from proofpath.report import (
     reason_label,
 )
 from proofpath.secrets import CREDENTIALS_MISSING, CREDENTIALS_NOTE
+from proofpath.settings_hints import BROWSER_SETTING as BROWSER_SETTING
+from proofpath.settings_hints import NETWORK_SETTING as NETWORK_SETTING
 
 KEY_WIDTH = 10
 
@@ -300,7 +306,13 @@ def skipped(ui: Ui, count: int) -> None:
     number = Text(f"{count} source(s)")
     if ui.color:
         number.stylize(BROWSER_SKIPPED_STYLE)
-    kv(ui, "skipped", Text.assemble(number, f" {BROWSER_SKIPPED_REASON}"))
+    kv(
+        ui,
+        "skipped",
+        Text.assemble(
+            number, f" {BROWSER_SKIPPED_REASON} — proofpath config set {BROWSER_SETTING}"
+        ),
+    )
 
 
 def stage_row(ui: Ui, name: str, by: str, summary: str, elapsed: float) -> None:

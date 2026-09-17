@@ -484,7 +484,12 @@ def _print_gate(out: ui.Ui, gate: ConsentGate) -> None:
     if gate.consulted:
         ui.kv(out, "browser", gate.decision.reason)
     if gate.skipped:
-        ui.kv(out, "skipped", f"{gate.skipped} source(s) because the browser was not permitted")
+        ui.kv(
+            out,
+            "skipped",
+            f"{gate.skipped} source(s) because the browser was not permitted"
+            f" — proofpath config set {ui.BROWSER_SETTING}",
+        )
     for line in gate.install_log:
         ui.kv(out, "install", line)
 

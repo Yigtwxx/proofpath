@@ -634,14 +634,20 @@ def _skipped_footer(count: int) -> Footer:
 def test_footer_prints_the_browser_skipped_line() -> None:
     instance, out, _ = _build()
     ui.footer(instance, _skipped_footer(3))
-    assert f"skipped    3 source(s) {ui.BROWSER_SKIPPED_REASON}" in out.getvalue().splitlines()
+    assert (
+        f"skipped    3 source(s) {ui.BROWSER_SKIPPED_REASON}"
+        f" — proofpath config set {ui.BROWSER_SETTING}"
+    ) in out.getvalue().splitlines()
 
 
 def test_the_skipped_line_survives_quiet() -> None:
     """Rule 6: -q drops progress, never a statement about what was not read."""
     instance, out, _ = _build(quiet=True)
     ui.footer(instance, _skipped_footer(1))
-    assert f"skipped    1 source(s) {ui.BROWSER_SKIPPED_REASON}" in out.getvalue().splitlines()
+    assert (
+        f"skipped    1 source(s) {ui.BROWSER_SKIPPED_REASON}"
+        f" — proofpath config set {ui.BROWSER_SETTING}"
+    ) in out.getvalue().splitlines()
 
 
 def test_no_skipped_line_when_the_browser_stopped_nothing() -> None:

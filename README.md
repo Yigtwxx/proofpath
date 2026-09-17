@@ -35,7 +35,8 @@ The bird is a raven — the same one as on the website — drawn in Braille cell
 `rich` theme and in ASCII in `plain`.
 
 Bare `proofpath` opens the terminal UI ([a recorded session in both themes](docs/eval/2026-09-15-tui-v2-live.md),
-with [SVG screenshots](docs/eval/tui-v2-rich.svg)). Each run is one panel in its own
+with SVG screenshots of a real run in [`rich`](docs/eval/tui-raven-rich.svg) and
+[`plain`](docs/eval/tui-raven-plain.svg)). Each run is one panel in its own
 accent: the command on the top border and the run's state at its right, a fixed-column
 stage table underneath (`✓` finished, `⏺` still running or finished with something
 unverified, a real progress bar on the active stage, the provider that produced each
@@ -50,7 +51,8 @@ stopped with `/cancel #n` — a stopped run keeps what it had decided. Click (or
 `enter` on) a finding to read the whole quoted passage; `⧉` copies it; a finding's
 reference is a link to its source. When a publisher blocks the plain fetch, the
 permission question is asked **inline, under the stage that hit the wall**, with
-`[allow once] [always] [no] [never]`.
+`[allow once] [always] [no] [never]` — or, from the bar, `/allow once`, `/allow always`,
+`/allow no`, `/allow never`.
 
 **Windows / `NO_COLOR`.** The look above is the `rich` theme, chosen when the terminal
 gives evidence of truecolor (`COLORTERM`, Windows Terminal, iTerm2, kitty, WezTerm,
@@ -110,7 +112,8 @@ unverified 14%
 When a quarter or more of the sources could not be read, a further line says so:
 `coverage is weak: unread sources may hold more, so this is a lower bound`. When the
 browser step was not permitted, a line counts the sources it cost:
-`skipped N source(s) because the browser was not permitted`.
+`skipped N source(s) because the browser was not permitted — proofpath config set
+permissions.install_browser ask`.
 
 **No verdict without its passage.** `SUPPORTED` and `REFUTED` cannot exist without
 the quoted sentence they rest on — the cache schema itself refuses to store one.
@@ -239,6 +242,9 @@ proofpath check --url https://bsky.app/profile/bsky.app/post/3movpwtbjgs2d
 proofpath check --url https://news.ycombinator.com/item?id=8863
 proofpath check -                 # paste the text of a post that cannot be read
 ```
+
+A page is not a post: paste the claim as text with the address inside it, and the page
+is fetched as that claim's source.
 
 Every sentence of the post is checked against the pages its links point to, and the post's
 own words are never allowed to stand as their own evidence.

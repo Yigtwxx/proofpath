@@ -156,7 +156,10 @@ def _hints(item: Footer) -> list[str]:
     elif item.weak:
         hints.append(ui.WEAK_COVERAGE)
     if item.browser_skipped:
-        hints.append(f"{item.browser_skipped} source(s) {BROWSER_SKIPPED_REASON}")
+        hints.append(
+            f"{item.browser_skipped} source(s) {BROWSER_SKIPPED_REASON}"
+            f" — /config set {ui.BROWSER_SETTING}"
+        )
     if item.note:
         hints.append(item.note)
     return hints

@@ -17,7 +17,7 @@ from textual.content import Content
 
 from proofpath import ui, verify
 from proofpath.document import Claim, Locator, Reference
-from proofpath.events import Emitted, Progress, StageEnd, StageStart
+from proofpath.events import Emitted, Note, Progress, StageEnd, StageStart
 from proofpath.tui import pet
 from proofpath.tui.app import (
     HINT,
@@ -31,6 +31,7 @@ from proofpath.tui.app import (
 )
 from proofpath.tui.theme import PLAIN, RICH
 from proofpath.tui.widgets import PANEL_FLOOR, CoverageLine
+from proofpath.tui.widgets.run_block import NoteLine
 from tests.test_tui_app import (
     FakeScheduler,
     a_finding,
@@ -188,6 +189,82 @@ async def test_the_bar_goes_when_the_stage_ends_and_the_summary_takes_its_cell()
     assert "▰" not in text and "▱" not in text
     assert text.startswith("✓ Verifying     118 claims: 40 supported")
     assert text.endswith("coreml   21.4s")
+
+
+def _note_texts(app: ProofpathApp) -> list[str]:
+    return [line.render().plain for line in app.query(NoteLine)]
+
+
+async def test_a_transient_note_leaves_when_its_stage_ends() -> None:
+    """``loading models …`` is over when the stage is: a finished run must not say it."""
+    app, schedulers = rich_app()
+    async with app.run_test(size=SIZE) as pilot:
+        run = await a_run(pilot, schedulers)
+        scheduler = schedulers[0]
+        scheduler.push(run, StageStart("Verifying", "coreml"))
+        scheduler.push(run, Note("kept"))
+        scheduler.push(run, Note(verify.LOADING_MODELS, transient=True))
+        await pilot.pause()
+        texts = _note_texts(app)
+        assert any("loading models" in t for t in texts)
+        assert any("kept" in t for t in texts)
+        scheduler.push(run, StageEnd("Verifying", "coreml", "1 claim", 0.1))
+        await pilot.pause()
+        texts = _note_texts(app)
+    assert not any("loading models" in t for t in texts)
+    assert any("kept" in t for t in texts)
+
+
+async def test_a_lasting_note_takes_a_transient_one_back() -> None:
+    """A note that is not about progress means the progress it followed is over."""
+    app, schedulers = rich_app()
+    async with app.run_test(size=SIZE) as pilot:
+        run = await a_run(pilot, schedulers)
+        scheduler = schedulers[0]
+        scheduler.push(run, StageStart("Verifying", "coreml"))
+        scheduler.push(run, Note(verify.LOADING_MODELS, transient=True))
+        await pilot.pause()
+        assert any("loading models" in t for t in _note_texts(app))
+        scheduler.push(run, Note("kept"))
+        await pilot.pause()
+        texts = _note_texts(app)
+    assert not any("loading models" in t for t in texts)
+    assert any("kept" in t for t in texts)
+
+
+async def test_a_transient_note_survives_progress_but_not_a_finding() -> None:
+    """Progress can tick while a model is still downloading; a finding means it is in."""
+    app, schedulers = rich_app()
+    async with app.run_test(size=SIZE) as pilot:
+        run = await a_run(pilot, schedulers)
+        scheduler = schedulers[0]
+        scheduler.push(run, StageStart("Verifying", "coreml"))
+        scheduler.push(run, Note(verify.LOADING_MODELS, transient=True))
+        scheduler.push(run, Progress("Verifying", 1, 118, ""))
+        await pilot.pause()
+        assert any("loading models" in t for t in _note_texts(app))
+        scheduler.push(run, Emitted(a_verdict_finding()))
+        await pilot.pause()
+        texts = _note_texts(app)
+    assert not any("loading models" in t for t in texts)
+
+
+async def test_a_transient_note_is_taken_back_when_the_run_settles() -> None:
+    """A run that fails while loading must not keep saying it is loading."""
+    app, schedulers = rich_app()
+    async with app.run_test(size=SIZE) as pilot:
+        run = await a_run(pilot, schedulers)
+        scheduler = schedulers[0]
+        scheduler.push(run, StageStart("Verifying", "coreml"))
+        scheduler.push(run, Note(verify.LOADING_MODELS, transient=True))
+        await pilot.pause()
+        assert any("loading models" in t for t in _note_texts(app))
+        run.error = "RuntimeError: no model"
+        scheduler.move(run, "failed")
+        await pilot.pause()
+        texts = _note_texts(app)
+    assert not any("loading models" in t for t in texts)
+    assert any("no model" in t for t in texts)
 
 
 # --- findings and badges -----------------------------------------------------------

@@ -667,7 +667,8 @@ def test_check_url_on_a_page_that_is_not_a_post_says_what_would_work() -> None:
 
     assert result.exit_code == 2
     assert "is a page, not a post" in result.output
-    assert "proofpath check -" in result.output
+    assert "give the claim as text with the address inside it" in result.output
+    assert "paste it in the TUI, or proofpath check - on the command line" in result.output
 
 
 # --- fix round 1: the network permission, blocked posts, unread quotes ------------

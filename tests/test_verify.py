@@ -576,7 +576,10 @@ def test_a_short_page_is_an_abstract_not_full_text() -> None:
 
 def test_network_denied_calls_nothing_and_says_so_on_every_source() -> None:
     text, doc = drafted("A claim [1]. Another [2].", [REAL, GHOSTLY])
-    note = "network: not permitted (permissions.network = deny)"
+    note = (
+        "network: not permitted (permissions.network = deny)"
+        " — permissions.network allow turns it on"
+    )
     fetcher = StubFetcher(network_allowed=False, network_note=note)
     chain = StubOpenAccess({DOI: fulltext_evidence()})
     stub = StubResolver({"Vaswani": resolved()})
@@ -608,6 +611,11 @@ def test_network_denied_calls_nothing_and_says_so_on_every_source() -> None:
     # references, and nothing was looked at (product rule 2).
     assert ready.stages[2].summary == NOT_ATTEMPTED
     assert ready.stages[3].summary == NOT_ATTEMPTED
+    # Short, because it sits in the elided summary column; the setting that turns the
+    # stage on rides on the once-per-run denied note instead (permission hints).
+    assert NOT_ATTEMPTED == "not attempted (network not permitted)"
+    assert Note(note) in events
+    assert note.endswith(" — permissions.network allow turns it on")
     assert [stage.name for stage in ready.stages] == [
         PARSING,
         CLAIMS,
@@ -1029,7 +1037,9 @@ def test_the_verifying_stage_emits_its_own_events() -> None:
 
     names = [e.name for e in events if isinstance(e, (StageStart, StageEnd))]
     assert names[-2:] == [VERIFYING, VERIFYING]
-    assert Note(LOADING_MODELS) in events
+    # Transient: the TUI takes it back once the models are in, so a finished run
+    # never still reads "loading models …" under its Verifying stage.
+    assert Note(LOADING_MODELS, transient=True) in events
     progress = [
         (e.done, e.total) for e in events if isinstance(e, Progress) and e.name == VERIFYING
     ]

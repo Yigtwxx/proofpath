@@ -14,7 +14,7 @@ from textual.containers import Horizontal, Vertical
 from textual.widgets import Button, Input, Static
 
 from proofpath import ui
-from proofpath.browser import Answer, prompt_text
+from proofpath.browser import TUI_ANSWERS, Answer, prompt_text
 from proofpath.tui.history import History
 from proofpath.tui.theme import Theme
 from proofpath.tui.widgets._shared import textual_colour
@@ -54,8 +54,9 @@ class PermissionPrompt(Vertical):
         #: The run this question belongs to, or the negative id of a ``/fetch`` block.
         self.owner = owner
         #: The section 7.1 block, verbatim: the terminal and the TUI ask the same
-        #: question, in the same words, about the same download.
-        self.question = prompt_text(host, status)
+        #: question, in the same words, about the same download. Only the last line
+        #: differs: it names the buttons and the ``/allow`` answers, not the keys.
+        self.question = prompt_text(host, status, answers=TUI_ANSWERS)
         self._out = out
         self._theme = theme
         #: The answer once it was given, so a scrolled-back log still says what was

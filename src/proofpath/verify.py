@@ -138,6 +138,9 @@ CACHE_BY = "cache"
 # What a stage says when the network permission stopped it before it began. A
 # count would be a claim about the references ("0 ghost" says they were checked
 # and none was a ghost); a stage that ran on nothing has nothing to count.
+# Short on purpose: it sits in a stage row's fixed, elided summary column. The
+# setting that turns the network on rides on the once-per-run denied note instead
+# (``Fetcher.network_note``, emitted below before the resolving stage).
 NOT_ATTEMPTED = "not attempted (network not permitted)"
 
 # What a stage is attributed to when nobody answered for it -- the fetching stage's
@@ -191,8 +194,8 @@ POST_READER = "post"
 # makes no claim of its own, so there is nothing in it to verify; the claim is the
 # user's, and spec section 13 already has a way to give it.
 NOT_A_POST = (
-    "{url} is a page, not a post: give the claim as text instead "
-    "(proofpath check - with the claim, and the address inside it)"
+    "{url} is a page, not a post: give the claim as text with the address inside it "
+    "(paste it in the TUI, or proofpath check - on the command line)"
 )
 # A target that is one http(s) address and nothing else. Anchored, because an
 # address *inside* a pasted paragraph is a source that paragraph cites, not the
@@ -1012,7 +1015,7 @@ def decide_all(
         if jobs:
             # A run told to stop before it started must not pay for two ONNX sessions.
             check()
-            emit(Note(LOADING_MODELS))
+            emit(Note(LOADING_MODELS, transient=True))
             # Built through the engine, not called as factories: the engine keeps
             # them, so nothing here outlives ``Engine.close()`` holding a session.
             embedder = engine.get_embedder()

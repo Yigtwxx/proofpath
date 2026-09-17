@@ -1043,6 +1043,9 @@ async def test_the_prompt_is_drawn_in_the_block_of_the_run_that_hit_the_wall() -
         assert HOST in text
         assert "HTTP 403" in text
         assert browser.WHEELS_SIZE in text and browser.BROWSER_SIZE in text
+        # The last line names what the bar takes, not the keys the terminal reads.
+        assert text.endswith(browser.TUI_ANSWERS)
+        assert "[y] yes" not in text
 
         await click(pilot, "#allow-once")
         assert await answered(pilot, answer) == "once"
@@ -1068,8 +1071,38 @@ async def test_allow_with_nothing_pending_says_so() -> None:
     app, _ = build_app()
     async with app.run_test(size=SIZE) as pilot:
         await submit(pilot, "/allow once")
-        text = "\n".join(line.render().plain for line in app.query(NoteLine))
-    assert "nothing to allow" in text
+        notes = [line.render().plain for line in app.query(NoteLine)]
+    note = next(line for line in notes if line.lstrip().startswith("nothing to allow — "))
+    # The note says where the question appears and what answers it (spec 13.1).
+    assert "/allow " + "|".join(commands.ALLOW_ANSWERS) in note
+    assert "/allow once|always|no|never" in note
+
+
+def test_the_footer_hint_for_skipped_sources_names_the_setting() -> None:
+    """The docked caveat line says which setting lets the browser run next time."""
+    from proofpath.report import BROWSER_SKIPPED_REASON, render_footer
+    from proofpath.tui.widgets.footer import _hints
+
+    plain = a_report()
+    item = render_footer(replace(plain, coverage=replace(plain.coverage, browser_skipped=2)))
+    hint = next(line for line in _hints(item) if line.startswith("2 source(s)"))
+    assert hint == f"2 source(s) {BROWSER_SKIPPED_REASON} — /config set {ui.BROWSER_SETTING}"
+    assert ui.BROWSER_SETTING == "permissions.install_browser ask"
+
+
+def test_the_fetch_block_skipped_line_names_the_setting() -> None:
+    """The ``/fetch`` block's line says which setting lets the browser run next time."""
+    from proofpath.report import BROWSER_SKIPPED_REASON
+    from proofpath.tui.verbs import _gate_lines
+
+    gate = ConsentGate("deny", interactive=False)
+    gate.consulted = True
+    gate.skipped = 1
+    lines = [line.plain for line in _gate_lines(ui.build(force_terminal=True), gate)]
+    skipped = next(line for line in lines if line.startswith("skipped"))
+    assert skipped == (
+        f"skipped    1 source(s) {BROWSER_SKIPPED_REASON} — /config set {ui.BROWSER_SETTING}"
+    )
 
 
 async def test_a_bare_allow_lists_the_four_answers_without_holding_the_bar() -> None:

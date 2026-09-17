@@ -40,6 +40,8 @@ from proofpath.models import Label, Tier, Verdict
 from proofpath.oa import ABSTRACT_ONLY
 from proofpath.resolve import ResolveResult, Retraction, State
 from proofpath.secrets import CREDENTIALS_MISSING, CREDENTIALS_NOTE
+from proofpath.settings_hints import BROWSER_SETTING as BROWSER_SETTING
+from proofpath.settings_hints import NETWORK_SETTING as NETWORK_SETTING
 
 # Unverified share at or above which a run's conclusions are called weak (rule 6).
 # Public: the renderers colour the coverage footer against it.
@@ -379,6 +381,9 @@ NO_REASON_RECORDED = "UNVERIFIED (no reason recorded)"
 # named one by one, but a reader scanning the footer has to be told how many there
 # were without counting them (product rule 6). One wording for both surfaces.
 BROWSER_SKIPPED_REASON = "because the browser was not permitted"
+# The two settings a "not permitted" line points at live in ``settings_hints`` (a
+# leaf, because ``fetch`` needs one of them and imports nothing above itself) and are
+# re-exported here so ``ui`` and the engine keep reading them off this module.
 
 # A judge's disagreement travels as an ordinary ``Finding.detail`` line, so nothing
 # downstream has to know the judge exists to print it -- but it names its own key
@@ -973,7 +978,11 @@ def _markdown_coverage(report: Report) -> list[str]:
         lines.extend([CREDENTIALS_NOTE, ""])
     if coverage.browser_skipped:
         lines.extend(
-            [f"Skipped {coverage.browser_skipped} source(s) {BROWSER_SKIPPED_REASON}.", ""]
+            [
+                f"Skipped {coverage.browser_skipped} source(s) {BROWSER_SKIPPED_REASON}"
+                f" — proofpath config set {BROWSER_SETTING}.",
+                "",
+            ]
         )
     unchecked = _unchecked(report)
     if unchecked:

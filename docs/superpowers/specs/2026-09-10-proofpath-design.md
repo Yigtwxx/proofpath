@@ -224,6 +224,8 @@ When step 3 is first needed and the setting is `ask`, the run pauses and prompts
     Allow?  [y] yes, once   [a] always (save to config)   [n] no   [never] never ask again
 ```
 
+> *2026-09-17:* on the TUI the last line reads `Allow?  click a button, or type  /allow once   /allow always   /allow no   /allow never`; the keys are the terminal's.
+
 Rules:
 
 | Situation | Behaviour |
@@ -656,6 +658,9 @@ Design rules:
 - The footer always shows coverage. It is not optional and does not scroll away.
 - Permission prompts appear inline at the point of failure with a slash command to
   answer, never as a modal that blocks the log.
+
+  > *2026-09-17:* `/allow` with no question waiting answers `nothing to allow — the question appears under the stage a site blocks; answer it there, or with /allow once|always|no|never`.
+
 - **Slash commands have an awaiting mode (decided 2026-09-11).** A verb typed without
   its argument — `/check`, `/resolve`, `/fetch` — does not error: the input bar takes
   the verb's accent tint and a placeholder (`paste a file path or URL`), and waits.
