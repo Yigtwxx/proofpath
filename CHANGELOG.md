@@ -6,6 +6,10 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-09-17
+
+A raven in the terminal, and a website to go with it.
+
 ### Added
 - **A website**, under `site/`: a static Astro page with a replay of a real `/check`
   run, the three questions, the six rules, and the CLI surface. The engravings are
