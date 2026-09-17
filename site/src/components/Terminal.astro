@@ -217,7 +217,7 @@ const grid = {
         color: var(--tui-ok);
     }
     .tui__out :global([data-tone='warn']) {
-        color: #111;
+        color: var(--ink);
         background: var(--tui-warn);
     }
     .tui__out :global([data-tone='bad']) {
@@ -225,7 +225,7 @@ const grid = {
     }
     .tui__out :global(.tui__line > [data-tone='bad'] + span + [data-tone='bad']),
     .tui__out :global(.tui__line > span + span + [data-tone='bad']) {
-        color: #fff;
+        color: var(--paper);
         background: var(--tui-bad);
     }
     .tui__out :global([data-tone='dim']) {
@@ -235,10 +235,10 @@ const grid = {
         color: var(--tui-accent);
     }
     .tui__out :global([data-tone='you']) {
-        color: var(--tui-accent);
+        color: var(--rose-soft);
     }
     .tui__out :global([data-tone='source']) {
-        color: #a78bfa;
+        color: var(--rose);
     }
 </style>
 

@@ -22,14 +22,17 @@
     --slate: #5a6878; /* 5.07:1 on --paper */
     --slate-soft: #b7c1ce;
 
-    /* terminal demo only: these mean things inside proofpath */
+    /* terminal demo: the TUI's states, printed in the notebook's own inks. The real
+       TUI paints ok green, low confidence amber and bad red; here the pen does all
+       three, so a filled crimson badge is bad, a rose one is doubtful, and ok is
+       quiet. The dots and the pen stay what they are on the page. */
     --tui-bg: #1b1815;
     --tui-fg: #e9e2d6;
-    --tui-ok: #22c55e;
-    --tui-warn: #f59e0b;
-    --tui-bad: #ef4444;
+    --tui-ok: var(--rose-soft);
+    --tui-warn: var(--rose);
+    --tui-bad: var(--crimson);
     --tui-dim: #8a847c;
-    --tui-accent: #22d3ee;
+    --tui-accent: var(--rose);
 
     /* type */
     --font-display: 'Fraunces Variable', 'Iowan Old Style', Georgia, serif;
