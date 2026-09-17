@@ -8,6 +8,10 @@ import interUrl from '@fontsource-variable/inter/files/inter-latin-wght-normal.w
 import monoUrl from '@fontsource/ibm-plex-mono/files/ibm-plex-mono-latin-400-normal.woff2?url';
 import handUrl from '@fontsource-variable/caveat/files/caveat-latin-wght-normal.woff2?url';
 const preload = [frauncesUrl, interUrl, monoUrl, handUrl];
+// Browsers cache favicons apart from the page, so a hard reload does not refetch
+// them; bump this when the icon files change.
+const iconVersion = 2;
+const icon = (name: string): string => `${withBase(name)}?v=${iconVersion}`;
 
 interface Props {
     title: string;
@@ -34,9 +38,9 @@ const ogImage = new URL(withBase('og.png'), Astro.site);
         {preload.map((href) => (
             <link rel="preload" as="font" type="font/woff2" href={href} crossorigin />
         ))}
-        <link rel="icon" href={withBase('favicon.svg')} type="image/svg+xml" />
-        <link rel="icon" href={withBase('favicon-32.png')} sizes="32x32" type="image/png" />
-        <link rel="apple-touch-icon" href={withBase('apple-touch-icon.png')} />
+        <link rel="icon" href={icon('favicon.svg')} type="image/svg+xml" />
+        <link rel="icon" href={icon('favicon-32.png')} sizes="32x32" type="image/png" />
+        <link rel="apple-touch-icon" href={icon('apple-touch-icon.png')} />
         <meta name="theme-color" content="#f6f1e7" />
         <meta property="og:type" content="website" />
         <meta property="og:title" content={title} />
