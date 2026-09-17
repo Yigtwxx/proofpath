@@ -202,6 +202,14 @@ import CoverageBar from './CoverageBar.astro';
         gap: var(--space-6);
         min-width: 0;
     }
+    @media (min-width: 64rem) {
+        /* The ledger is taller than the plate and the box; keep them in view. */
+        .measured__side {
+            position: sticky;
+            top: 5rem;
+            align-self: start;
+        }
+    }
     .measured__figure-plate {
         margin: 0;
         max-width: 22rem;

@@ -41,6 +41,16 @@ export const measures: readonly Measure[] = [
         doc: '2026-09-12-scifact-dev.md',
     },
     {
+        id: 'nei',
+        figure: '135 / 340',
+        reading: 'pairs above the decision threshold',
+        against: 'the other 60 % are reported as NEI, not guessed',
+        what: 'Most verdicts are NEI',
+        set: 'SciFact dev · NEI is "not enough information"',
+        doc: '2026-09-12-tiers.md',
+        note: 'tiers read off the same sweep: decide 0.45 · medium 0.458 · high 0.999 (21 in-sample verdicts) — in practice two tiers: near-certain, and asserted at all',
+    },
+    {
         id: 'pairing',
         figure: '0.99',
         reading: 'numeric · 0.940 author-year',
