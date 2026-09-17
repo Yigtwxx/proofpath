@@ -2,7 +2,9 @@
    `public/favicon.svg`: every white pixel not connected to the bird itself
    (halftone specks left over from the crop) is painted crimson, then the SVG,
    the two PNG sizes and a three-size `favicon.ico` are written from that one
-   image. The bird's pixels are not touched. */
+   image. The bird's pixels are not touched. The square gets rounded, transparent
+   corners: Safari draws a light hairline around a fully opaque favicon, which
+   read as a white rim on the tab. */
 
 import { readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
@@ -62,8 +64,16 @@ for (let i = 0; i < W * H; i++) {
     }
 }
 
-const base = sharp(data, { raw: { width: W, height: H, channels: C } });
-const png256 = await base.clone().png({ palette: true }).toBuffer();
+const RADIUS = Math.round(W * 0.22);
+const mask = Buffer.from(
+    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} ${H}"><rect width="${W}" height="${H}" rx="${RADIUS}" fill="#fff"/></svg>`,
+);
+const square = sharp(data, { raw: { width: W, height: H, channels: C } });
+const png256 = await square
+    .clone()
+    .composite([{ input: mask, blend: 'dest-in' }])
+    .png({ palette: true })
+    .toBuffer();
 const png = (px) =>
     sharp(png256).resize(px, px, { kernel: 'lanczos3' }).png({ palette: true }).toBuffer();
 
@@ -72,7 +82,11 @@ await writeFile(
     `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 ${W} ${H}"><image width="${W}" height="${H}" xlink:href="data:image/png;base64,${png256.toString('base64')}"/></svg>\n`,
 );
 await writeFile(out('favicon-32.png'), await png(32));
-await writeFile(out('apple-touch-icon.png'), await png(180));
+// iOS rounds the touch icon itself and paints transparency black: keep it square.
+await writeFile(
+    out('apple-touch-icon.png'),
+    await square.clone().resize(180, 180, { kernel: 'lanczos3' }).png({ palette: true }).toBuffer(),
+);
 
 // .ico as a directory of PNG-encoded entries, which every modern browser reads.
 const entries = await Promise.all([16, 32, 48].map(async (px) => [px, await png(px)]));

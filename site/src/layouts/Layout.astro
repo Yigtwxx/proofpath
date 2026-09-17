@@ -10,7 +10,7 @@ import handUrl from '@fontsource-variable/caveat/files/caveat-latin-wght-normal.
 const preload = [frauncesUrl, interUrl, monoUrl, handUrl];
 // Browsers cache favicons apart from the page, so a hard reload does not refetch
 // them; bump this when the icon files change.
-const iconVersion = 2;
+const iconVersion = 3;
 const icon = (name: string): string => `${withBase(name)}?v=${iconVersion}`;
 
 interface Props {
