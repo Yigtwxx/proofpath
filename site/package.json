@@ -13,6 +13,7 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "images": "node scripts/dither.mjs",
+    "favicon": "node scripts/favicon.mjs",
     "astro": "astro"
   },
   "dependencies": {
