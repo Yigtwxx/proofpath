@@ -177,6 +177,47 @@
       },
       "tones": ["paper", "crimson"],
       "gamma": 1.2
+    },
+    {
+      "id": "seraphim",
+      "alt": "A crowd of winged figures gathered close around a man slumped in his chair, a skeleton at his feet. Wood engraving.",
+      "title": "The Raven (the seraphim gather)",
+      "author": "Gustave Doré",
+      "year": 1884,
+      "licence": "CC0 1.0",
+      "licence_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+      "page_url": "https://commons.wikimedia.org/wiki/File:The_Raven_MET_DP317114.jpg",
+      "source": "The Metropolitan Museum of Art, Open Access",
+      "source_url": "https://upload.wikimedia.org/wikipedia/commons/7/78/The_Raven_MET_DP317114.jpg",
+      "crop": {
+        "x": 0.14,
+        "y": 0.11,
+        "w": 0.63,
+        "h": 0.68
+      },
+      "tones": ["paper"],
+      "gamma": 1.5,
+      "contrast": 1.6
+    },
+    {
+      "id": "sea",
+      "alt": "A small bird high over an open sea, above a sphinx and a child on a cliff. Wood-engraved vignette.",
+      "title": "The Raven (vignette: a bird over the sea)",
+      "author": "Gustave Doré",
+      "year": 1884,
+      "licence": "CC0 1.0",
+      "licence_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+      "page_url": "https://commons.wikimedia.org/wiki/File:The_Raven_MET_DP318411.jpg",
+      "source": "The Metropolitan Museum of Art, Open Access",
+      "source_url": "https://upload.wikimedia.org/wikipedia/commons/8/80/The_Raven_MET_DP318411.jpg",
+      "crop": {
+        "x": 0.2,
+        "y": 0.29,
+        "w": 0.54,
+        "h": 0.42
+      },
+      "tones": ["crimson"],
+      "gamma": 0.9
     }
   ]
 }

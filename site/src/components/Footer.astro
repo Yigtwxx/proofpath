@@ -42,8 +42,8 @@ const unique = credits.filter((c) => (seen.has(c.page_url) ? false : (seen.add(c
                 </li>
             </ul>
         </div>
-        <div class="footer__col footer__credits">
-            <p class="footer__credits-title">Engravings on this page</p>
+        <details class="footer__col footer__credits">
+            <summary class="footer__credits-title">Engravings on this page</summary>
             <ul>
                 {unique.map((c) => (
                     <li>
@@ -66,7 +66,7 @@ const unique = credits.filter((c) => (seen.has(c.page_url) ? false : (seen.add(c
                 ravens are Huginn and Muninn, who fly out each morning and come back with what they
                 saw.
             </p>
-        </div>
+        </details>
     </div>
 </footer>
 
@@ -137,10 +137,36 @@ const unique = credits.filter((c) => (seen.has(c.page_url) ? false : (seen.add(c
     .footer__credits {
         font-size: var(--step--1);
     }
+    /* Folded by default so the two columns sit at one height; the title is the
+       handle, with the pen's own caret beside it. */
     .footer__credits-title {
         font-family: var(--font-display);
         font-size: var(--step-1);
+        cursor: pointer;
+        list-style: none;
+        display: flex;
+        align-items: baseline;
+        gap: var(--space-3);
+    }
+    .footer__credits-title::-webkit-details-marker {
+        display: none;
+    }
+    .footer__credits-title::after {
+        content: '+';
+        font-family: var(--font-mono);
+        font-size: var(--step--1);
+        color: var(--rose-soft);
+        transition: transform 160ms ease;
+    }
+    .footer__credits[open] .footer__credits-title {
         margin-bottom: var(--space-3);
+    }
+    .footer__credits[open] .footer__credits-title::after {
+        transform: rotate(45deg);
+    }
+    .footer__credits-title:focus-visible {
+        outline: 2px solid var(--rose-soft);
+        outline-offset: 4px;
     }
     .footer__credits ul {
         list-style: none;

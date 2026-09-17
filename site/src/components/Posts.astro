@@ -1,0 +1,175 @@
+---
+/* The v0.4 surface on paper: a post is a claim standing on its links. The three
+   commands, then a platform per pencil row with the state a run reports when
+   the platform cannot be read — the seraphim plate beside them, the room full
+   of voices and none of them the source. */
+import { platforms, postCommands } from '../data/posts';
+import Halftone from './Halftone.astro';
+import SketchBox from './sketch/SketchBox.astro';
+import SketchBadge from './sketch/SketchBadge.astro';
+import SketchArrow from './sketch/SketchArrow.astro';
+---
+
+<div class="posts">
+    <div class="posts__main">
+        <p class="posts__lede">
+            A social post asserts something and links to where it came from. What proofpath checks
+            is whether <em class="key">the links inside it</em> back what it says: every sentence of
+            the post against the pages it points to, and the post's own words are{' '}
+            <em class="key">never allowed to stand as their own evidence</em>. A page is not a post
+            — paste the claim with the address inside it, and the page is fetched as that claim's
+            source.
+        </p>
+        <SketchBox padding="md" draw class="posts__commands">
+            <div class="posts__pre" role="figure" aria-label="Command examples for posts">
+                {postCommands.map((c) => (
+                    <div class="posts__line">
+                        <span class="posts__prompt" aria-hidden="true">
+                            $&nbsp;
+                        </span>
+                        <span class="posts__cmd">{c.cmd}</span>
+                        <span class="posts__comment">{`  # ${c.comment}`}</span>
+                    </div>
+                ))}
+            </div>
+        </SketchBox>
+        <table class="posts__table">
+            <caption class="visually-hidden">Platforms and how each is read</caption>
+            <tbody>
+                {platforms.map((p) => (
+                    <tr>
+                        <th scope="row">
+                            <span class="posts__name">{p.name}</span>
+                            {p.state ? (
+                                <span class="posts__state">
+                                    <SketchBadge label={p.state.label} tone={p.state.tone} draw />
+                                </span>
+                            ) : null}
+                        </th>
+                        <td>{p.how}</td>
+                    </tr>
+                ))}
+            </tbody>
+        </table>
+    </div>
+    <figure class="posts__figure">
+        <Halftone id="seraphim" tone="paper" sizes="(min-width: 64rem) 34vw, 92vw" />
+        <figcaption class="caption posts__caption">
+            Gustave Doré, <cite>The Raven</cite>, 1884. The room fills with voices. None of them is
+            the source.
+        </figcaption>
+        <div class="posts__note">
+            <SketchArrow direction="curve-left" size={56} />
+            <p class="marginalia">
+                A platform that will not answer is its own state. No request made is not a request
+                that failed.
+            </p>
+        </div>
+    </figure>
+</div>
+
+<style>
+    .posts {
+        display: grid;
+        gap: var(--space-7);
+    }
+    @media (min-width: 64rem) {
+        .posts {
+            grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
+            gap: var(--space-8);
+            align-items: start;
+        }
+    }
+    .posts__main {
+        display: grid;
+        gap: var(--space-6);
+        min-width: 0;
+    }
+    .posts__lede {
+        font-size: var(--step-0);
+        margin: 0;
+    }
+    .posts__pre {
+        font-family: var(--font-mono);
+        font-size: var(--step--1);
+        line-height: 1.6;
+        overflow-x: auto;
+    }
+    .posts__line {
+        display: grid;
+        grid-template-columns: auto 1fr;
+        white-space: normal;
+        overflow-wrap: anywhere;
+        padding-block: 0.15em;
+    }
+    .posts__prompt,
+    .posts__comment {
+        color: var(--ink-mute);
+    }
+    .posts__comment {
+        grid-column: 2;
+        display: block;
+    }
+    .posts__table {
+        border-collapse: collapse;
+        font-size: var(--step-0);
+        width: 100%;
+    }
+    .posts__table th,
+    .posts__table td {
+        text-align: left;
+        padding: var(--space-3) var(--space-3) var(--space-3) 0;
+        border-bottom: 1px solid var(--paper-line);
+        vertical-align: top;
+    }
+    .posts__table th {
+        font-family: var(--font-display);
+        font-weight: 500;
+        font-size: var(--step-1);
+        color: var(--crimson);
+        padding-right: var(--space-5);
+        width: 13rem;
+        font-variation-settings: 'opsz' 48;
+    }
+    .posts__table td {
+        color: var(--ink-soft);
+    }
+    .posts__name {
+        display: block;
+    }
+    .posts__state {
+        display: block;
+        margin-top: var(--space-2);
+        font-size: var(--step--1);
+        font-weight: 400;
+    }
+    @media (max-width: 47.99rem) {
+        .posts__table th,
+        .posts__table td {
+            display: block;
+            border: 0;
+            padding-block: var(--space-1);
+        }
+        .posts__table tr {
+            display: block;
+            padding-block: var(--space-3);
+            border-bottom: 1px solid var(--paper-line);
+        }
+    }
+    .posts__note {
+        margin-top: var(--space-6);
+        display: flex;
+        gap: var(--space-3);
+        align-items: flex-start;
+    }
+    .posts__note .marginalia {
+        margin: 0;
+    }
+    .posts__figure {
+        margin: 0;
+    }
+    .posts__caption {
+        color: var(--ink-mute);
+        margin-top: var(--space-3);
+    }
+</style>

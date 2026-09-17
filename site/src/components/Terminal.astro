@@ -1,7 +1,22 @@
 ---
 /* The scripted run: a dark panel in the TUI's own colours, on the paper page.
    The full transcript is in the markup for screen readers and for no-JS. */
-import { frames, raven } from '../data/demo';
+import {
+    RAVEN_CELL_HEIGHT,
+    RAVEN_CELL_WIDTH,
+    RAVEN_COLUMNS,
+    RAVEN_DARK,
+    RAVEN_GROUND_PIXEL_ROW,
+    RAVEN_GROUND_ROW,
+    RAVEN_HINT_ROW,
+    RAVEN_LIGHT,
+    RAVEN_ROWS,
+    RAVEN_TEXT_COLUMN,
+    RAVEN_VERSION_ROW,
+    banner,
+    frames,
+    raven,
+} from '../data/demo';
 
 // Final state for the static transcript: last frame per id, in first-seen order.
 const finalLines = (() => {
@@ -11,6 +26,40 @@ const finalLines = (() => {
     });
     return Array.from(map.values());
 })();
+
+// The bird as dots: one path per tone, one circle per pixel, on a viewBox of
+// fifteen cells by eight rows. The SVG is stretched onto that many text cells, so
+// a pixel is 0.3em by 0.375em, as it would be in the terminal.
+const DOT_RADIUS = 0.34;
+const viewWidth = RAVEN_COLUMNS * RAVEN_CELL_WIDTH;
+const viewHeight = RAVEN_ROWS * RAVEN_CELL_HEIGHT;
+const dots = (tone: string): string => {
+    const r = DOT_RADIUS;
+    const parts: string[] = [];
+    raven.forEach((row, y) => {
+        Array.from(row).forEach((pixel, x) => {
+            if (pixel !== tone) return;
+            const cx = x + 0.5;
+            const cy = y + 0.5;
+            parts.push(`M${cx - r} ${cy}a${r} ${r} 0 1 0 ${2 * r} 0a${r} ${r} 0 1 0 ${-2 * r} 0`);
+        });
+    });
+    return parts.join('');
+};
+const darkPath = dots(RAVEN_DARK);
+const lightPath = dots(RAVEN_LIGHT);
+// Grid placement for the stylesheet: rows and columns are one-based.
+const grid = {
+    ravenCols: RAVEN_COLUMNS,
+    gapCols: RAVEN_TEXT_COLUMN - RAVEN_COLUMNS,
+    rows: RAVEN_ROWS,
+    versionRow: RAVEN_VERSION_ROW + 1,
+    hintRow: RAVEN_HINT_ROW + 1,
+    groundRow: RAVEN_GROUND_ROW + 1,
+    groundPixelRow: RAVEN_GROUND_PIXEL_ROW,
+    cellWidth: RAVEN_CELL_WIDTH,
+    cellHeight: RAVEN_CELL_HEIGHT,
+};
 ---
 
 <div class="tui" data-tui>
@@ -25,12 +74,31 @@ const finalLines = (() => {
             replay
         </button>
     </div>
-    <pre class="tui__banner" aria-hidden="true">{raven.join('\n')}</pre>
+    <div class="tui__banner" aria-hidden="true">
+        <svg
+            class="tui__raven"
+            viewBox={`0 0 ${viewWidth} ${viewHeight}`}
+            preserveAspectRatio="none"
+            focusable="false"
+        >
+            <path d={darkPath} data-pet="dark"></path>
+            <path d={lightPath} data-pet="light"></path>
+        </svg>
+        <div class="tui__banner-line tui__banner-line--version">
+            <span>{banner.version}</span>
+            <span class="tui__right">{banner.context}</span>
+        </div>
+        <div class="tui__banner-line tui__banner-line--hint">
+            <span>{banner.hint}</span>
+            <span class="tui__right">{banner.commands}</span>
+        </div>
+        <div class="tui__ground"></div>
+    </div>
     <div class="tui__out" data-tui-out aria-hidden="true"></div>
     <pre class="visually-hidden">{finalLines.map((f) => f.spans.map((s) => s.text).join('')).join('\n')}</pre>
 </div>
 
-<style>
+<style define:vars={grid}>
     .tui {
         max-width: 100%;
         min-width: 0;
@@ -80,11 +148,65 @@ const finalLines = (() => {
         border-color: var(--tui-fg);
     }
     .tui__banner {
+        --tui-line: 1.5em;
+        display: grid;
+        grid-template-columns: calc(var(--ravenCols) * 1ch) calc(var(--gapCols) * 1ch) minmax(
+                0,
+                1fr
+            );
+        grid-template-rows: repeat(var(--rows), var(--tui-line));
         padding: 1em 1.2em 0;
-        color: color-mix(in srgb, var(--tui-fg) 70%, transparent);
+        white-space: pre;
+        line-height: var(--tui-line);
     }
-    .tui__banner::after {
-        content: '';
+    .tui__raven {
+        grid-column: 1;
+        grid-row: 1 / span var(--rows);
+        width: 100%;
+        height: 100%;
+        display: block;
+        overflow: visible;
+    }
+    /* The bird's two tones are the TUI's `rich` pet colours, which are the site's
+       crimsons; the ground is the light one. */
+    .tui__raven [data-pet='dark'] {
+        fill: var(--crimson-deep);
+    }
+    .tui__raven [data-pet='light'] {
+        fill: var(--crimson);
+    }
+    .tui__banner-line {
+        grid-column: 3;
+        display: flex;
+        min-width: 0;
+    }
+    /* When the panel is narrow the left text gives way, as a terminal would clip
+       it, and the right-aligned part keeps its place. */
+    .tui__banner-line > :first-child {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+    .tui__banner-line--version {
+        grid-row: var(--versionRow);
+    }
+    .tui__banner-line--hint {
+        grid-row: var(--hintRow);
+    }
+    .tui__right {
+        flex: none;
+        margin-left: auto;
+        padding-left: 1em;
+        text-align: right;
+    }
+    /* One dot per pixel column, on the ground's pixel row, to the panel's edge. */
+    .tui__ground {
+        grid-column: 2 / 4;
+        grid-row: var(--groundRow);
+        height: calc(var(--tui-line) / var(--cellHeight));
+        margin-top: calc(var(--tui-line) * var(--groundPixelRow) / var(--cellHeight));
+        background: radial-gradient(circle, var(--crimson) 0 34%, transparent 40%) 0 0 /
+            calc(1ch / var(--cellWidth)) calc(var(--tui-line) / var(--cellHeight)) repeat-x;
     }
     .tui__out {
         padding: 0.6em 1.2em 0;
@@ -95,7 +217,7 @@ const finalLines = (() => {
         color: var(--tui-ok);
     }
     .tui__out :global([data-tone='warn']) {
-        color: #111;
+        color: var(--ink);
         background: var(--tui-warn);
     }
     .tui__out :global([data-tone='bad']) {
@@ -103,7 +225,7 @@ const finalLines = (() => {
     }
     .tui__out :global(.tui__line > [data-tone='bad'] + span + [data-tone='bad']),
     .tui__out :global(.tui__line > span + span + [data-tone='bad']) {
-        color: #fff;
+        color: var(--paper);
         background: var(--tui-bad);
     }
     .tui__out :global([data-tone='dim']) {
@@ -113,10 +235,10 @@ const finalLines = (() => {
         color: var(--tui-accent);
     }
     .tui__out :global([data-tone='you']) {
-        color: var(--tui-accent);
+        color: var(--rose-soft);
     }
     .tui__out :global([data-tone='source']) {
-        color: #a78bfa;
+        color: var(--rose);
     }
 </style>
 

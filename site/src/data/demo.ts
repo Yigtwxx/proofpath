@@ -3,6 +3,8 @@
    A frame either appends a line or, when it names an `id` that already exists,
    replaces that line — that is how a stage flips from running to done. The
    banner above the output is static. */
+import { version } from './commands';
+
 export type Tone = 'ok' | 'warn' | 'bad' | 'dim' | 'accent' | 'plain' | 'you' | 'source';
 
 export interface Span {
@@ -21,17 +23,68 @@ export interface Frame {
 }
 
 /**
- * The `plain` raven, static: `proofpath.tui.banner.render(80, …)`'s output, which is
- * the `ART` lines with the ground extended to 78 columns.
+ * The `rich` raven: `proofpath.tui.pet.BITMAP` verbatim — 29 x 30 pixels, `#` dark,
+ * `+` light, `.` empty. The TUI draws it in Braille cells (two by four pixels each);
+ * the page draws the same pixels as dots in an SVG, because Braille glyphs come out
+ * uneven in whatever fallback font a browser has. Row 29 is the feet; the ground
+ * continues to the right.
  */
+export const RAVEN_DARK = '#';
+export const RAVEN_LIGHT = '+';
 export const raven: readonly string[] = [
-    '       __',
-    '      (o >',
-    '    _/ /',
-    '   /  /',
-    '  /__/',
-    ' ____||_______________________________________________________________________',
+    '................#####........',
+    '...............#######.......',
+    '..............########.......',
+    '..............####..###+.....',
+    '..............#########+++...',
+    '..............########+++++..',
+    '..............+#######++++...',
+    '.............++++####...++...',
+    '............+++++####........',
+    '............++++++###........',
+    '...........+++++++###........',
+    '...........+++++++###........',
+    '..........++++++++###........',
+    '..........++++++++###........',
+    '.........+++++++++###........',
+    '.........++++++++####........',
+    '........+++++++++###.........',
+    '........++++++++####.........',
+    '.......+++++++++###..........',
+    '.......++++++++####..........',
+    '......++++++++####...........',
+    '......+++++++####............',
+    '.....++++++#####.............',
+    '....++++++#####..............',
+    '...+++++#####+###............',
+    '..++++######..+.#............',
+    '.########+++..#.#............',
+    '########..++..#.#............',
+    '#####.....++..#.#............',
+    '##.##.....+++##+##+++++++++++',
 ];
+
+/** A Braille cell is two pixels wide and four tall; the bird is fifteen cells. */
+export const RAVEN_CELL_WIDTH = 2;
+export const RAVEN_CELL_HEIGHT = 4;
+export const RAVEN_COLUMNS = 15;
+export const RAVEN_ROWS = 8;
+/** Where the version and hint lines start, clear of the bird (`pet.TEXT_COLUMN`). */
+export const RAVEN_TEXT_COLUMN = 18;
+/** The rows the version line, the hint line and the ground sit on. */
+export const RAVEN_VERSION_ROW = 3;
+export const RAVEN_HINT_ROW = 4;
+export const RAVEN_GROUND_ROW = 7;
+/** The ground is `pet.GROUND` (dots 2 and 5): the second pixel row of its cell. */
+export const RAVEN_GROUND_PIXEL_ROW = 1;
+
+/** The two text lines beside the bird, as the TUI shows them at start. */
+export const banner = {
+    version: `proofpath v${version}`,
+    context: 'academic . online . coreml',
+    hint: 'paste a file path, a URL, or a claim.',
+    commands: '/help  /config  /quit',
+} as const;
 
 const stage = (
     glyph: string,
