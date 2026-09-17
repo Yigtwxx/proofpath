@@ -58,7 +58,8 @@ from proofpath.tui.app import (
     run_context,
 )
 from proofpath.tui.runs import Run, State
-from proofpath.tui.theme import PLAIN
+from proofpath.tui.theme import PLAIN, RICH
+from proofpath.tui.widgets.prompt import HELD_SUMMARY
 from proofpath.verify import Engine
 
 SIZE = (80, 24)
@@ -971,6 +972,164 @@ async def test_history_survives_a_restart(tmp_path: Path) -> None:
     async with again.run_test(size=SIZE) as pilot:
         await pilot.press("up")
         assert again.query_one(Prompt).value == "/help"
+
+
+# --- a multi-line paste (spec 2026-09-17-multiline-paste) ---------------------------
+
+POST = (
+    "The vaccine trial enrolled 40,000 people.\n\n"
+    "Source: https://example.org/trial\nSee also doi:10.1000/xyz123"
+)
+
+
+async def paste(pilot: Any, text: str) -> None:
+    """Paste ``text`` into the bar the way a bracketed paste arrives: one event."""
+    prompt = pilot.app.query_one(Prompt)
+    prompt.focus()
+    prompt.post_message(tevents.Paste(text))
+    await pilot.pause()
+
+
+async def test_a_multiline_paste_is_held_and_summarised() -> None:
+    app, schedulers = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        await paste(pilot, POST)
+        prompt = app.query_one(Prompt)
+        assert prompt.held == POST
+        # Three non-blank lines of four; the blank one is not counted.
+        assert prompt.value == HELD_SUMMARY.format(sep=",", lines=3, chars=len(POST))
+    assert schedulers[0].submitted == []
+
+
+async def test_the_summary_uses_the_rich_separator() -> None:
+    app, _ = build_app(theme=RICH)
+    async with app.run_test(size=SIZE) as pilot:
+        await paste(pilot, POST)
+        assert app.query_one(Prompt).value == HELD_SUMMARY.format(sep="·", lines=3, chars=len(POST))
+
+
+async def test_enter_checks_the_held_paste_whole() -> None:
+    app, schedulers = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        await paste(pilot, POST)
+        await pilot.press("enter")
+        await pilot.pause()
+        prompt = app.query_one(Prompt)
+        assert prompt.held is None
+        assert prompt.value == ""
+    # The target keeps its line breaks; the label is one line.
+    assert schedulers[0].submitted == [(POST, "/check pasted text")]
+
+
+async def test_a_cr_separated_paste_is_labelled_pasted_text_too() -> None:
+    """A bracketed paste's line breaks can arrive as ``\\r``; ``_check``'s label must
+    agree with ``_on_paste``'s ``splitlines()``, not just ``"\\n" in target``."""
+    text = POST.replace("\n", "\r")
+    app, schedulers = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        await paste(pilot, text)
+        await pilot.press("enter")
+        await pilot.pause()
+    assert schedulers[0].submitted == [(text, "/check pasted text")]
+
+
+async def test_a_held_paste_is_the_awaited_argument() -> None:
+    app, schedulers = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "/check")
+        await paste(pilot, POST)
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app.awaiting is None
+    assert schedulers[0].submitted == [(POST, "/check pasted text")]
+
+
+async def test_a_typed_character_drops_the_held_paste() -> None:
+    app, _ = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        await paste(pilot, POST)
+        await pilot.press("x")
+        prompt = app.query_one(Prompt)
+        assert prompt.held is None
+        assert prompt.value == "x"
+
+
+async def test_backspace_drops_the_held_paste_and_empties_the_bar() -> None:
+    app, _ = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        await paste(pilot, POST)
+        await pilot.press("backspace")
+        await pilot.pause()
+        prompt = app.query_one(Prompt)
+        assert prompt.held is None
+        assert prompt.value == ""
+
+
+async def test_escape_drops_the_held_paste() -> None:
+    app, _ = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        await paste(pilot, POST)
+        await pilot.press("escape")
+        await pilot.pause()
+        prompt = app.query_one(Prompt)
+        assert prompt.held is None
+        assert prompt.value == ""
+
+
+async def test_a_history_step_drops_the_held_paste() -> None:
+    app, _ = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "/help")
+        await paste(pilot, POST)
+        await pilot.press("up")
+        prompt = app.query_one(Prompt)
+        assert prompt.held is None
+        assert prompt.value == "/help"
+
+
+async def test_a_one_line_paste_lands_in_the_bar_as_text() -> None:
+    app, _ = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        prompt = app.query_one(Prompt)
+        await paste(pilot, "~/Desktop/paper.pdf")
+        assert prompt.held is None
+        assert prompt.value == "~/Desktop/paper.pdf"
+        prompt.value = ""
+        await paste(pilot, "~/Desktop/paper.pdf\n")  # a trailing newline is still one line
+        assert prompt.held is None
+        assert prompt.value == "~/Desktop/paper.pdf"
+
+
+async def test_a_blank_paste_holds_nothing() -> None:
+    app, _ = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        await paste(pilot, "\n\n  \n")
+        prompt = app.query_one(Prompt)
+        assert prompt.held is None
+        assert prompt.value == ""
+
+
+async def test_a_held_paste_stays_out_of_the_history_file(tmp_path: Path) -> None:
+    app, _ = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "/help")
+        await paste(pilot, POST)
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.press("up")
+        assert app.query_one(Prompt).value == "/help"
+    assert (tmp_path / "state" / "history").read_text(encoding="utf-8") == "/help\n"
+
+
+async def test_a_mirrored_verb_labels_a_held_paste_on_one_line() -> None:
+    app, _ = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "/resolve")
+        await paste(pilot, "Smith J.\nA title.\nJournal 2020")
+        await pilot.press("enter")
+        await pilot.pause()
+        block = app.query_one(CommandBlock)
+        assert block.command == "/resolve Smith J. A title. Journal 2020"
 
 
 async def test_cancel_never_captures_a_path_as_its_argument() -> None:

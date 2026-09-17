@@ -45,9 +45,11 @@ as a badge, the tier — with the finding's notes and the claim (`you`) and the 
 (`source`) it was checked against under it. The bottom border carries the run's
 coverage; the docked footer draws it as a bar and never scrolls away.
 
-Paste a path and it runs; every one-shot verb is a slash command (`/check`, `/resolve`,
-`/fetch`, `/config`, `/cache`), runs can be started while others are in flight and
-stopped with `/cancel #n` — a stopped run keeps what it had decided. Click (or press
+Paste a path, a URL or a claim and it runs — a post of several lines pastes whole: the
+bar holds it behind a one-line summary, `Enter` checks it, `Esc` drops it. Every
+one-shot verb is a slash command (`/check`, `/resolve`, `/fetch`, `/config`, `/cache`),
+runs can be started while others are in flight and stopped with `/cancel #n` — a
+stopped run keeps what it had decided. Click (or press
 `enter` on) a finding to read the whole quoted passage; `⧉` copies it; a finding's
 reference is a link to its source. When a publisher blocks the plain fetch, the
 permission question is asked **inline, under the stage that hit the wall**, with

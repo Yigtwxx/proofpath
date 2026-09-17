@@ -7,6 +7,7 @@ from collections.abc import Callable
 from typing import ClassVar
 
 from rich.text import Text
+from textual import events
 from textual.app import ComposeResult
 from textual.binding import Binding, BindingType
 from textual.color import Color
@@ -31,6 +32,9 @@ ANSWER_LABELS: dict[Answer, str] = {
 }
 #: Prefix of a permission button's id, so one handler reads every one of them.
 ANSWER_ID = "allow-"
+#: What the bar shows while it holds a paste of several lines: the paste itself would
+#: not fit, and Textual's ``Input`` would keep its first line and drop the rest.
+HELD_SUMMARY = "pasted {sep} {lines} lines {sep} {chars} chars {sep} enter to check, esc to drop"
 
 
 class PermissionPrompt(Vertical):
@@ -113,6 +117,11 @@ class Prompt(Input):
     at once, several are cycled through on each further ``tab``, wrapping, and any
     edit ends the cycle. The app hands in ``complete`` because only it knows which
     runs are still live; the bar never decides what a line may become.
+
+    A paste of two or more lines is *held*: the bar shows :data:`HELD_SUMMARY` and
+    keeps the text whole in :attr:`held` until ``enter`` takes it or an edit drops
+    it. A one-line paste is text in the bar like any other. The app hands in ``sep``
+    because the bar has no theme of its own.
     """
 
     BINDINGS: ClassVar[list[BindingType]] = [
@@ -128,6 +137,7 @@ class Prompt(Input):
         id: str | None = None,  # noqa: A002 - Textual's own keyword, kept for callers
         history: History | None = None,
         complete: Callable[[str], list[str]] | None = None,
+        sep: str = "·",
     ) -> None:
         # ``Input`` selects all its text on focus by default; a key handed over from a
         # log line (``Line.on_key``) must insert at the cursor, not replace a draft,
@@ -148,13 +158,20 @@ class Prompt(Input):
         #: edit of the second. Each ``Changed`` is matched against the line whose turn
         #: it is; the queue is what tells the walk's own replacements from a keystroke.
         self._pending: deque[str] = deque()
+        self._sep = sep
+        #: A multi-line paste, whole, while the bar shows its summary. ``take`` is the
+        #: only way it leaves; ``_show`` forgets it, because whatever replaces the
+        #: summary — a history step, a completion, an empty bar — is not the paste.
+        self.held: str | None = None
 
     def action_history_previous(self) -> None:
+        self.drop()  # a held paste is not a draft; the walk must not bring it back
         line = self.history.previous(self.value)
         if line is not None:
             self._show(line)
 
     def action_history_next(self) -> None:
+        self.drop()
         line = self.history.next()
         if line is not None:
             self._show(line)
@@ -192,10 +209,51 @@ class Prompt(Input):
     def _show(self, line: str) -> None:
         # A reactive posts no ``Changed`` for an equal assignment, so only a line that
         # actually replaces the bar's value has a ``Changed`` to wait for.
+        self.held = None
         if line != self.value:
             self._pending.append(line)
             self.value = line
         self.cursor_position = len(line)
+
+    # Neither override below calls ``super()``: Textual walks the MRO and calls
+    # ``Input``'s own handler next, as the event's *default action*, unless the
+    # event's ``prevent_default`` was called first. Calling it here as well would
+    # run it twice — a one-line paste inserted twice, a held paste with the first
+    # line typed over its summary and a second ``Changed`` that reads as an edit.
+
+    def _on_paste(self, event: events.Paste) -> None:
+        # ``Input`` keeps the first line of a paste and drops the rest, silently. A
+        # post is several lines, so one of two or more is held whole behind a summary
+        # instead. Trailing whitespace is cut first: a path pasted with its newline is
+        # still one line and still lands in the bar as text, through ``Input``.
+        text = event.text.rstrip()
+        lines = text.splitlines()
+        if len(lines) < 2:
+            return
+        counted = sum(1 for line in lines if line.strip())
+        self._show(HELD_SUMMARY.format(sep=self._sep, lines=counted, chars=len(text)))
+        self.held = text  # after ``_show``, which forgets any hold
+        event.prevent_default()
+        event.stop()
+
+    async def _on_key(self, event: events.Key) -> None:
+        # A printable key into the summary would edit the summary, which is nothing:
+        # the paste is dropped first, so the key ``Input`` then types lands in an
+        # empty bar. ``async`` here awaits nothing of its own -- it matches
+        # ``Input._on_key``, which is itself ``async``, so the dispatcher that walks
+        # the MRO (see the note above ``_on_paste``) calls the same shape on both.
+        if self.held is not None and event.is_printable:
+            self.drop()
+
+    def take(self) -> str | None:
+        """The held paste, whole, and the bar no longer holds it; ``None`` when none."""
+        held, self.held = self.held, None
+        return held
+
+    def drop(self) -> None:
+        """Forget the held paste and empty the bar. Nothing when nothing is held."""
+        if self.held is not None:
+            self._show("")
 
     def on_input_changed(self, event: Input.Changed) -> None:
         # Typing, deleting or pasting ends the walk and the cycle; the bar's own
@@ -206,6 +264,8 @@ class Prompt(Input):
         self._pending.clear()
         self.history.reset()
         self._candidates = []
+        # An edit of the summary is an edit of nothing: the paste goes with it.
+        self.drop()
 
     def tint(self, accent: str) -> None:
         base = textual_colour(accent)

@@ -679,6 +679,15 @@ Design rules:
   › /check ~/Desktop/paper.pdf               ← stays tinted in the log
     ⏺ Parse …
   ```
+- **A multi-line paste is held whole (decided 2026-09-17).** Textual's `Input` keeps
+  the first line of a bracketed paste; the bar overrides that. A paste of two or more
+  lines is kept verbatim behind a one-line summary — `pasted · 3 lines · 118 chars ·
+  enter to check, esc to drop` — and `Enter` checks the whole text, line breaks
+  included, as an implicit `/check` (or as the argument of a waiting `/check`). Any
+  edit, `Esc`, or a history step drops it and empties the bar; it is never added to
+  the history file, whose entries are one line each. The run is labelled
+  `/check pasted text`. A one-line paste is text in the bar, as before.
+  Spec: `2026-09-17-multiline-paste-design.md`.
 - **Several runs per session (decided 2026-09-11).** Every submitted `/check` becomes
   its own block in the log at once, numbered and coloured from a rotating palette
   (`#1`, `#2`, `#3` … each with a distinct accent; the block header, its command line
