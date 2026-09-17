@@ -6,13 +6,15 @@ interface Props {
     title: string;
     field?: 'paper' | 'crimson';
     margin?: string;
+    /** A hairline on top, for a section that follows one on the same ground. */
+    ruled?: boolean;
     class?: string;
 }
-const { id, title, field = 'paper', margin, class: className } = Astro.props;
+const { id, title, field = 'paper', margin, ruled = false, class: className } = Astro.props;
 ---
 
 <section
-    class:list={['section', `section--${field}`, className]}
+    class:list={['section', `section--${field}`, { 'section--ruled': ruled }, className]}
     id={id}
     aria-labelledby={`${id}-title`}
 >
@@ -35,6 +37,9 @@ const { id, title, field = 'paper', margin, class: className } = Astro.props;
         --field: var(--paper);
         background: var(--paper);
         color: var(--ink);
+    }
+    .section--ruled {
+        border-top: 1px solid var(--paper-line);
     }
     .section--crimson {
         --field: var(--crimson);

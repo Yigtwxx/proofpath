@@ -13,6 +13,7 @@ import Posts from '../components/Posts.astro';
 import Measured from '../components/Measured.astro';
 import Judge from '../components/Judge.astro';
 import Cache from '../components/Cache.astro';
+import Limits from '../components/Limits.astro';
 import SketchArrow from '../components/sketch/SketchArrow.astro';
 import { levels } from '../data/levels';
 
@@ -103,7 +104,16 @@ const description =
         </Section>
 
         <Section
+            id="limits"
+            title="Where it stops, today."
+            margin="A tool that measures its own coverage also has to say what it does not read yet."
+        >
+            <Limits />
+        </Section>
+
+        <Section
             id="install"
+            ruled
             title="The same engine behind a pipe."
             margin="A report, a JSON document, a SARIF log — and an exit code you can gate on."
         >

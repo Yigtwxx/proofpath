@@ -1,0 +1,117 @@
+---
+/* The README's known limitations as a ledger on paper: what the tool does
+   not read yet, each with the run that found it where one exists. */
+import { limits } from '../data/limits';
+import { evalUrl } from '../data/measured';
+import { mark } from '../lib/mark';
+import SketchRule from './sketch/SketchRule.astro';
+import SketchArrow from './sketch/SketchArrow.astro';
+---
+
+<div class="limits">
+    <ol class="limits__list">
+        {limits.map((l, i) => (
+            <li class="limit">
+                <span class="limit__n" aria-hidden="true">
+                    {i + 1}
+                </span>
+                <h3 class="limit__title">{l.title}</h3>
+                <p class="limit__body" set:html={mark(l.body)} />
+                {l.doc ? (
+                    <a class="limit__link" href={evalUrl(l.doc)} rel="noopener">
+                        the run
+                    </a>
+                ) : null}
+                <div class="limit__rule">
+                    <SketchRule tone="ink" />
+                </div>
+            </li>
+        ))}
+    </ol>
+    <aside class="limits__aside">
+        <SketchArrow direction="curve-left" size={56} />
+        <p class="marginalia">
+            Each of these is in the README with the run that found it. A fixed one leaves this list;
+            none is hidden while it stands.
+        </p>
+    </aside>
+</div>
+
+<style>
+    .limits {
+        display: grid;
+        gap: var(--space-6);
+    }
+    @media (min-width: 64rem) {
+        .limits {
+            grid-template-columns: minmax(0, 1fr) var(--margin-col);
+            gap: var(--space-8);
+            align-items: start;
+        }
+    }
+    .limits__list {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+        display: grid;
+        gap: var(--space-5) var(--space-7);
+    }
+    @media (min-width: 48rem) {
+        .limits__list {
+            grid-template-columns: 1fr 1fr;
+        }
+    }
+    .limit {
+        position: relative;
+        display: grid;
+        align-content: start;
+        gap: var(--space-2);
+        padding-bottom: var(--space-5);
+        min-width: 0;
+    }
+    .limit__n {
+        font-family: var(--font-hand);
+        font-size: var(--step-2);
+        line-height: 1;
+        color: var(--crimson);
+    }
+    .limit__title {
+        font-size: var(--step-1);
+        line-height: 1.25;
+        margin: 0;
+        max-width: 26ch;
+    }
+    .limit__body {
+        margin: 0;
+        font-size: var(--step-0);
+        color: var(--ink-soft);
+    }
+    .limit__link {
+        font-family: var(--font-hand);
+        font-size: var(--step-1);
+        color: var(--crimson);
+        justify-self: start;
+    }
+    .limit__link:hover {
+        color: var(--ink);
+    }
+    .limit__link::before {
+        content: '→ ';
+    }
+    .limit__rule {
+        position: absolute;
+        inset-inline: 0;
+        bottom: 0;
+    }
+    .limits__aside {
+        display: flex;
+        gap: var(--space-3);
+        align-items: flex-start;
+    }
+    .limits__aside > :global(svg) {
+        flex: none;
+    }
+    .limits__aside .marginalia {
+        margin: 0;
+    }
+</style>
