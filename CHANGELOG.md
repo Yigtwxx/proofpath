@@ -6,6 +6,10 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.3] - 2026-09-17
+
+The TUI says what to type when it stops you, and every tag gets a GitHub Release.
+
 ### Added
 - **GitHub Releases.** The release workflow now creates the GitHub Release for each
   tag, with the version's CHANGELOG section as its notes (`scripts/release_notes.py`)
