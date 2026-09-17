@@ -12,6 +12,14 @@ All notable changes to this project are documented here. The format follows
   The ASCII raven of the `plain` theme and the website's raven stay
   (`docs/superpowers/specs/2026-09-18-wordmark-banner-design.md`).
 
+### Fixed
+- **TUI: a multi-line paste is no longer cut to its first line.** Textual's input
+  keeps the first line of a bracketed paste; the bar now holds the whole text behind
+  a one-line summary (`pasted · 3 lines · 118 chars · enter to check, esc to drop`),
+  `Enter` checks it whole and `Esc` drops it. The run is labelled `/check pasted
+  text` and the paste stays out of the command history
+  (`docs/superpowers/specs/2026-09-17-multiline-paste-design.md`).
+
 ## [0.4.4] - 2026-09-17
 
 Paste any link: a page is read as the document itself.

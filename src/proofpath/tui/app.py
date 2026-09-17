@@ -440,6 +440,7 @@ class ProofpathApp(App[None]):
                     id="prompt",
                     history=self._history,
                     complete=self._completions,
+                    sep=self._theme.glyphs.sep,
                 )
         yield RunLog(id="log")
 
@@ -584,9 +585,14 @@ class ProofpathApp(App[None]):
     # --- the command line -------------------------------------------------------------
 
     async def on_input_submitted(self, event: Input.Submitted) -> None:
-        line = event.value
+        prompt = self.query_one(Prompt)
+        held = prompt.take()
+        # A held paste is the line; the summary in the bar is not. It stays out of
+        # the history, whose file is one line per entry.
+        line = event.value if held is None else held
         event.input.value = ""
-        self._history.add(line)
+        if held is None:
+            self._history.add(line)
         await self._run_line(line)
 
     async def _run_line(self, line: str) -> None:
@@ -639,7 +645,12 @@ class ProofpathApp(App[None]):
         nothing it opens outlives it.
         """
         self._reload_config()  # the verb decides by it too (contact address, network)
-        line = f"/{command.verb} {command.arg}".strip()
+        # The block's echoed line is one line; a held paste is the only argument that
+        # is not, so only a multi-line argument has its line breaks (and the runs of
+        # whitespace that come with them) collapsed. A one-line argument's own
+        # spacing -- ``/resolve a   b`` -- is not this block's business.
+        arg = " ".join(command.arg.split()) if len(command.arg.splitlines()) > 1 else command.arg
+        line = f"/{command.verb} {arg}".strip()
         block = CommandBlock(line, self._out, self._theme)
         self._owner -= 1
         owner = self._owner
@@ -776,7 +787,13 @@ class ProofpathApp(App[None]):
         # The run is about to be decided by the config, so the config is re-read first:
         # this is what makes a "never ask again" answered two runs ago stick.
         self._reload_config()
-        self._scheduler.submit(target, command=f"/check {target}")
+        # The label is one line: a pasted post is named the way the report names it.
+        # ``splitlines()``, not ``"\n" in target``: a bracketed paste can send ``\r``
+        # as its line break too, and this must agree with ``Prompt._on_paste``'s own
+        # test for "multi-line" -- otherwise a ``\r``-separated paste is held and
+        # checked as one, but its run label stays the raw multi-line text.
+        label = "pasted text" if len(target.splitlines()) > 1 else target
+        self._scheduler.submit(target, command=f"/check {label}")
 
     def _cancel(self, arg: str) -> None:
         if self._scheduler is None:  # pragma: no cover - mount always runs first
@@ -849,6 +866,7 @@ class ProofpathApp(App[None]):
 
     def action_leave_awaiting(self) -> None:
         self._leave_awaiting()
+        self.query_one(Prompt).drop()
         # The app's priority ``escape`` shadows the screen's own ``_key_escape``,
         # which is where Textual drops a mouse selection; without this a selection
         # could only be cleared with the mouse.
