@@ -3,8 +3,10 @@
    leaving with nothing is the picture for rule two. */
 import { rules } from '../data/rules';
 import { specCoverage, weakCoverageLine } from '../data/coverage';
+import { states } from '../data/states';
 import Halftone from './Halftone.astro';
 import SketchBox from './sketch/SketchBox.astro';
+import SketchArrow from './sketch/SketchArrow.astro';
 import CoverageBar from './CoverageBar.astro';
 import { mark } from '../lib/mark';
 ---
@@ -47,6 +49,25 @@ import { mark } from '../lib/mark';
             </SketchBox>
         ))}
     </ol>
+</div>
+<div class="rules__states">
+    <div class="rules__states-head">
+        <SketchArrow direction="curve-left" size={56} tone="paper" />
+        <p class="marginalia">
+            rule two, spelled out: every one of these is printed as itself, never folded into a
+            verdict
+        </p>
+    </div>
+    <dl class="rules__states-list">
+        {states.map((s) => (
+            <div class="rules__state">
+                <dt>
+                    <code>{s.name}</code>
+                </dt>
+                <dd>{s.cause}</dd>
+            </div>
+        ))}
+    </dl>
 </div>
 
 <style>
@@ -131,5 +152,61 @@ import { mark } from '../lib/mark';
         font-size: var(--step--1);
         color: var(--rose-soft);
         margin: var(--space-3) 0 0;
+    }
+    .rules__states {
+        margin-top: var(--space-7);
+        padding-top: var(--space-6);
+        border-top: 1px solid color-mix(in srgb, var(--paper) 30%, transparent);
+    }
+    .rules__states-head {
+        display: flex;
+        gap: var(--space-3);
+        align-items: flex-start;
+        margin-bottom: var(--space-5);
+    }
+    .rules__states-head .marginalia {
+        margin: 0;
+        max-width: 40ch;
+    }
+    .rules__states-list {
+        display: grid;
+        gap: var(--space-3);
+        margin: 0;
+    }
+    @media (min-width: 48rem) {
+        .rules__states-list {
+            grid-template-columns: 1fr 1fr;
+            gap: var(--space-3) var(--space-7);
+        }
+    }
+    .rules__state {
+        display: grid;
+        gap: var(--space-1);
+        padding-block: var(--space-2);
+        border-bottom: 1px solid color-mix(in srgb, var(--paper) 18%, transparent);
+    }
+    @media (min-width: 40rem) {
+        .rules__state {
+            grid-template-columns: minmax(0, 15rem) minmax(0, 1fr);
+            gap: var(--space-4);
+        }
+    }
+    .rules__state dt {
+        font-size: var(--step--1);
+        line-height: 1.5;
+    }
+    .rules__state dt code {
+        font-family: var(--font-mono);
+        font-size: 1em;
+        color: var(--paper);
+        background: none;
+        padding: 0;
+        overflow-wrap: anywhere;
+    }
+    .rules__state dd {
+        margin: 0;
+        font-size: var(--step--1);
+        line-height: 1.5;
+        color: var(--rose-soft);
     }
 </style>

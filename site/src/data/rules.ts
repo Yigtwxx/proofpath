@@ -21,7 +21,7 @@ export const rules: readonly Rule[] = [
     {
         id: 'absence',
         title: 'Absence of evidence is not evidence of absence.',
-        body: '*Unreachable*, *blocked*, *paywalled* and *ambiguous* are separate, reported states. None of them is quietly folded into a verdict.',
+        body: '*Unreachable*, *blocked*, *paywalled* and *ambiguous* are separate, reported states. None of them is quietly folded into a verdict. The full list is below.',
         raven: 'muninn',
         margin: 'A raven that comes back empty says "nothing found", not "nothing exists".',
     },
