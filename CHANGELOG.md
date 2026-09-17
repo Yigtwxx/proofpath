@@ -6,6 +6,10 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.5] - 2026-09-18
+
+The bar takes a whole post, and the rich theme opens with the wordmark.
+
 ### Changed
 - **TUI: the `rich` banner is a wordmark.** `ProofPath` in block letters, crimson on
   deep crimson, with the version and hint lines under it; the Braille raven is gone.

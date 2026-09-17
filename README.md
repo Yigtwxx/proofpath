@@ -27,7 +27,7 @@ proofpath
 ██╔═══╝ ████╔╝██╔══██╗██╔══██╗██╔══╝ ██╔═══╝ ██╔══██╗╚██╔═╝██╔═██╗
 ██║     ██╔═╝ ╚█████╔╝╚█████╔╝██║    ██║     ███████║ ██║  ██║ ██║
 ╚═╝     ╚═╝    ╚════╝  ╚════╝ ╚═╝    ╚═╝     ╚═╝  ╚═╝ ╚═╝  ╚═╝ ╚═╝
-proofpath v0.4.4                                                        academic · online · coreml
+proofpath v0.4.5                                                        academic · online · coreml
 paste a file path, a URL, or a claim.                                        /help  /config  /quit
 ```
 
@@ -68,7 +68,7 @@ either, for screenshots and bug reports.
        __
       (o >
     _/ /
-   /  /       proofpath v0.4.4                                          academic . online . coreml
+   /  /       proofpath v0.4.5                                          academic . online . coreml
   /__/        paste a file path, a URL, or a claim.                          /help  /config  /quit
  ____||___________________________________________________________________________________________
 ```
