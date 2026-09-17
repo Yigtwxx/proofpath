@@ -7,7 +7,7 @@ import SketchBox from './sketch/SketchBox.astro';
 import SketchArrow from './sketch/SketchArrow.astro';
 ---
 
-<div class="judge">
+<div class="judge" id="judge">
     <div class="judge__text">
         <h3 class="judge__title">A second opinion, if you ask for one.</h3>
         <p>
@@ -50,6 +50,7 @@ import SketchArrow from './sketch/SketchArrow.astro';
 <style>
     .judge {
         display: grid;
+        scroll-margin-top: 4.5rem;
         gap: var(--space-6);
         margin-top: var(--space-8);
         padding-top: var(--space-7);
@@ -97,6 +98,7 @@ import SketchArrow from './sketch/SketchArrow.astro';
     .judge__comment {
         grid-column: 2;
         display: block;
+        white-space: normal;
     }
     .judge__live {
         display: grid;
