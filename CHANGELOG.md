@@ -6,6 +6,10 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.4] - 2026-09-17
+
+Paste any link: a page is read as the document itself.
+
 ### Added
 - **A page as the target.** A bare address on any host that is not a social platform
   — pasted into the TUI bar or given to `check --url` — is read as the document
