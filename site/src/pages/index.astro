@@ -9,6 +9,9 @@ import Rules from '../components/Rules.astro';
 import Ci from '../components/Ci.astro';
 import Footer from '../components/Footer.astro';
 import InstallBox from '../components/InstallBox.astro';
+import Posts from '../components/Posts.astro';
+import Measured from '../components/Measured.astro';
+import Judge from '../components/Judge.astro';
 import SketchArrow from '../components/sketch/SketchArrow.astro';
 import { levels } from '../data/levels';
 
@@ -82,6 +85,23 @@ const description =
         </Section>
 
         <Section
+            id="posts"
+            title="A post is not a source."
+            margin="What it checks is whether the links inside the post back what it says. The post's own words never count as evidence for themselves."
+        >
+            <Posts />
+        </Section>
+
+        <Section
+            id="measured"
+            field="crimson"
+            title="Measured, not claimed."
+            margin="No number is quoted without the run that produced it. The row in the box is the one to read before pointing this at the news."
+        >
+            <Measured />
+        </Section>
+
+        <Section
             id="install"
             title="The same engine behind a pipe."
             margin="A report, a JSON document, a SARIF log — and an exit code you can gate on."
@@ -96,6 +116,7 @@ const description =
                 </p>
             </div>
             <Ci />
+            <Judge />
         </Section>
     </main>
     <Footer />

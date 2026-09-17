@@ -1,0 +1,237 @@
+---
+/* The ledger on the crimson field: every number the README quotes, with the
+   run that produced it. The figure is set large, the set it was measured on
+   beside it in the pen's hand; the AVeriTeC row is drawn in its own box because
+   it is the one that says where the tool is weak. The sea vignette is the
+   picture for it: one bird over the open web. */
+import { accessCoverage, accessDoc, averitecNote, evalUrl, measures } from '../data/measured';
+import Halftone from './Halftone.astro';
+import SketchBox from './sketch/SketchBox.astro';
+import SketchRule from './sketch/SketchRule.astro';
+import CoverageBar from './CoverageBar.astro';
+---
+
+<div class="measured">
+    <ol class="measured__list">
+        {measures
+            .filter((m) => !m.weak)
+            .map((m) => (
+                <li class="measured__row">
+                    <p class="measured__figure">
+                        <b>{m.figure}</b>
+                        <span class="measured__reading">{m.reading}</span>
+                    </p>
+                    <div class="measured__text">
+                        <p class="measured__what">{m.what}</p>
+                        <p class="measured__set">
+                            {m.set}
+                            {m.against ? <span class="measured__against">{m.against}</span> : null}
+                        </p>
+                        <a class="measured__link" href={evalUrl(m.doc)} rel="noopener">
+                            the run
+                        </a>
+                    </div>
+                    <div class="measured__rule">
+                        <SketchRule tone="paper" />
+                    </div>
+                </li>
+            ))}
+        <li class="measured__row measured__row--access">
+            <p class="measured__figure">
+                <b>{accessCoverage.full} %</b>
+                <span class="measured__reading">full text</span>
+            </p>
+            <div class="measured__text">
+                <p class="measured__what">Source access</p>
+                <p class="measured__set">
+                    50 DOIs
+                    <span class="measured__against">
+                        a real biomedical paper in the live runs reached 33 % full text
+                    </span>
+                </p>
+                <div class="measured__bar">
+                    <CoverageBar coverage={accessCoverage} tone="paper" />
+                </div>
+                <a class="measured__link" href={evalUrl(accessDoc)} rel="noopener">
+                    the run
+                </a>
+            </div>
+            <div class="measured__rule">
+                <SketchRule tone="paper" />
+            </div>
+        </li>
+    </ol>
+    <div class="measured__side">
+        <figure class="measured__figure-plate">
+            <Halftone id="sea" tone="crimson" sizes="(min-width: 64rem) 26vw, 70vw" />
+            <figcaption class="caption measured__caption">
+                Gustave Doré, <cite>The Raven</cite>, 1884. One bird over the open sea.
+            </figcaption>
+        </figure>
+        {measures
+            .filter((m) => m.weak)
+            .map((m) => (
+                <div class="measured__weak">
+                    <SketchBox tone="paper" padding="md" draw fill>
+                        <p class="measured__figure measured__figure--weak">
+                            <b>{m.figure}</b>
+                            <span class="measured__reading">{m.reading}</span>
+                        </p>
+                        <p class="measured__what">{m.what}</p>
+                        <p class="measured__set">
+                            {m.set}
+                            <span class="measured__against">{m.against}</span>
+                        </p>
+                        <p class="measured__weak-note">{averitecNote}</p>
+                        <p class="marginalia measured__weak-margin">
+                            Pointed at a news claim on the open web, it is a coverage report with a
+                            weak verdict attached. Read this row first.
+                        </p>
+                        <a class="measured__link" href={evalUrl(m.doc)} rel="noopener">
+                            the run
+                        </a>
+                    </SketchBox>
+                </div>
+            ))}
+    </div>
+</div>
+
+<style>
+    .measured {
+        display: grid;
+        gap: var(--space-7);
+    }
+    @media (min-width: 64rem) {
+        .measured {
+            grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
+            gap: var(--space-8);
+            align-items: start;
+        }
+    }
+    .measured__list {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+        display: grid;
+        gap: var(--space-5);
+        min-width: 0;
+    }
+    .measured__row {
+        position: relative;
+        display: grid;
+        gap: var(--space-2) var(--space-6);
+        padding-bottom: var(--space-5);
+    }
+    @media (min-width: 48rem) {
+        .measured__row {
+            grid-template-columns: minmax(0, 15rem) minmax(0, 1fr);
+            align-items: start;
+        }
+    }
+    .measured__rule {
+        position: absolute;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        grid-column: 1 / -1;
+    }
+    .measured__figure {
+        margin: 0;
+        font-family: var(--font-display);
+        line-height: 1;
+        color: var(--paper);
+        max-width: none;
+    }
+    .measured__figure b {
+        display: block;
+        font-weight: 340;
+        font-size: var(--step-5);
+        letter-spacing: -0.02em;
+        font-variation-settings:
+            'opsz' 144,
+            'SOFT' 60,
+            'WONK' 1;
+    }
+    .measured__reading {
+        display: block;
+        margin-top: var(--space-2);
+        font-family: var(--font-mono);
+        font-size: var(--step--1);
+        color: var(--rose-soft);
+    }
+    .measured__text {
+        display: grid;
+        gap: var(--space-1);
+        min-width: 0;
+    }
+    .measured__what {
+        margin: 0;
+        font-size: var(--step-1);
+        font-family: var(--font-display);
+        font-variation-settings: 'opsz' 48;
+    }
+    .measured__set {
+        margin: 0;
+        font-size: var(--step-0);
+        color: var(--rose-soft);
+    }
+    .measured__against {
+        display: block;
+        color: var(--paper);
+        opacity: 0.85;
+    }
+    .measured__link {
+        font-family: var(--font-hand);
+        font-size: var(--step-1);
+        color: var(--rose-soft);
+        justify-self: start;
+    }
+    .measured__link:hover {
+        color: var(--paper);
+    }
+    .measured__link::before {
+        content: '→ ';
+    }
+    .measured__bar {
+        max-width: 28rem;
+        margin-block: var(--space-2);
+    }
+    .measured__side {
+        display: grid;
+        gap: var(--space-6);
+        min-width: 0;
+    }
+    .measured__figure-plate {
+        margin: 0;
+        max-width: 22rem;
+        justify-self: center;
+    }
+    /* The vignette is a disc on the page; the crop is centred on it, so a
+       radial mask trims the paper around it and leaves the medallion. */
+    .measured__figure-plate :global(.halftone) {
+        mask-image: radial-gradient(circle at 50% 50%, black 46%, transparent 49%);
+    }
+    .measured__caption {
+        margin-top: var(--space-3);
+        text-align: center;
+    }
+    .measured__weak {
+        color: var(--paper);
+    }
+    .measured__weak :global(.sketch-box__body) {
+        display: grid;
+        gap: var(--space-2);
+    }
+    .measured__figure--weak b {
+        font-size: var(--step-6);
+    }
+    .measured__weak-note {
+        margin: 0;
+        font-size: var(--step--1);
+        color: var(--rose-soft);
+    }
+    .measured__weak-margin {
+        margin: var(--space-2) 0 0;
+        max-width: 32ch;
+    }
+</style>

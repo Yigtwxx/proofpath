@@ -1,0 +1,126 @@
+---
+/* The optional judge, after the pipe: two flags that add a model at the end
+   of a run and only there, and the one line it wrote in the live run — printed
+   beside the local verdict, never in its place. */
+import { judgeCommands, judgeLine } from '../data/commands';
+import SketchBox from './sketch/SketchBox.astro';
+import SketchArrow from './sketch/SketchArrow.astro';
+---
+
+<div class="judge">
+    <div class="judge__text">
+        <h3 class="judge__title">A second opinion, if you ask for one.</h3>
+        <p>
+            Everything above runs on your machine, and the default run makes{' '}
+            <em class="key">zero</em> LLM calls. Two flags add a model at the end, and only there:
+            <code>--judge</code> asks it about the low-confidence verdicts alone, and its answer is
+            printed <em class="key">beside</em> the local verdict, never in place of it.{' '}
+            <code>--summarize</code> is one call over the finished report, labelled model-written.
+            If the provider does not answer, the report says so; the SARIF log never carries either.
+        </p>
+        <SketchBox padding="md" draw class="judge__commands">
+            <div class="judge__pre" role="figure" aria-label="Judge commands">
+                {judgeCommands.map((c) => (
+                    <div class="judge__line">
+                        <span class="judge__prompt" aria-hidden="true">
+                            $&nbsp;
+                        </span>
+                        <span class="judge__cmd">{c.cmd}</span>
+                        <span class="judge__comment">{`  # ${c.comment}`}</span>
+                    </div>
+                ))}
+            </div>
+        </SketchBox>
+    </div>
+    <div class="judge__live">
+        <div class="judge__arrow">
+            <SketchArrow direction="curve-down" size={56} />
+            <p class="marginalia">
+                from the live run of 2026-09-15: the local verdict stands, the judge's line sits
+                under it
+            </p>
+        </div>
+        <SketchBox padding="sm" tone="crimson" fill class="judge__quote">
+            <pre class="judge__out"><span class="judge__local">{judgeLine.local}</span>
+<span class="judge__opinion">   {judgeLine.judge}</span></pre>
+        </SketchBox>
+    </div>
+</div>
+
+<style>
+    .judge {
+        display: grid;
+        gap: var(--space-6);
+        margin-top: var(--space-8);
+        padding-top: var(--space-7);
+        border-top: 1px solid var(--paper-line);
+    }
+    @media (min-width: 64rem) {
+        .judge {
+            grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
+            gap: var(--space-8);
+            align-items: start;
+        }
+    }
+    .judge__text {
+        display: grid;
+        gap: var(--space-4);
+        min-width: 0;
+    }
+    .judge__title {
+        font-size: var(--step-3);
+        max-width: 18ch;
+        margin: 0;
+    }
+    .judge__text p {
+        margin: 0;
+    }
+    .judge__text code {
+        white-space: nowrap;
+    }
+    .judge__pre {
+        font-family: var(--font-mono);
+        font-size: var(--step--1);
+        line-height: 1.6;
+        overflow-x: auto;
+    }
+    .judge__line {
+        display: grid;
+        grid-template-columns: auto 1fr;
+        white-space: nowrap;
+        padding-block: 0.15em;
+    }
+    .judge__prompt,
+    .judge__comment {
+        color: var(--ink-mute);
+    }
+    .judge__comment {
+        grid-column: 2;
+        display: block;
+    }
+    .judge__live {
+        display: grid;
+        gap: var(--space-4);
+        min-width: 0;
+    }
+    .judge__arrow {
+        display: flex;
+        gap: var(--space-3);
+        align-items: flex-start;
+    }
+    .judge__arrow .marginalia {
+        margin: 0;
+    }
+    .judge__out {
+        font-size: var(--step--1);
+        line-height: 1.55;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+    }
+    .judge__local {
+        color: var(--crimson);
+    }
+    .judge__opinion {
+        color: var(--ink-soft);
+    }
+</style>
