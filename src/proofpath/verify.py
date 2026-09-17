@@ -60,7 +60,7 @@ from proofpath.events import (
     StageEnd,
     StageStart,
 )
-from proofpath.fetch import Fetcher, Outcome
+from proofpath.fetch import Fetched, Fetcher, Outcome
 from proofpath.judge import Judge, JudgeCost, JudgeItem, JudgeOpinion
 from proofpath.models import Label, Passage, Verdict
 from proofpath.oa import OpenAccess
@@ -108,6 +108,7 @@ from proofpath.report import (
 )
 from proofpath.resolve import Resolver, ResolveResult, Retraction, State
 from proofpath.retrieval import Embedder, FastEmbedder, PassageIndex
+from proofpath.settings_hints import BROWSER_SETTING
 
 # Stage names, as the report and the TUI print them (spec section 13.2).
 PARSING = "Parsing"
@@ -190,12 +191,21 @@ NUMERIC_REASON = "numeric mismatch"
 EMBEDDING_MODEL = "BAAI/bge-small-en-v1.5"
 
 POST_READER = "post"
-# What ``check --url`` says when the address is a page rather than a post. A page
-# makes no claim of its own, so there is nothing in it to verify; the claim is the
-# user's, and spec section 13 already has a way to give it.
+# What the parsing stage says read a page: the fetch ladder, step by step.
+PAGE_PARSER = "fetch ladder"
+# What ``check --url`` says when the address is on a platform that is read but names
+# no one post there -- a profile, a subreddit, a front page. There is no post to
+# check and no set of links to check it against; the claim is the user's, and spec
+# section 13 already has a way to give it. An address on any other host is a page,
+# and a page is read as the document itself (``_page_document``).
 NOT_A_POST = (
     "{url} is a page, not a post: give the claim as text with the address inside it "
     "(paste it in the TUI, or proofpath check - on the command line)"
+)
+# What a page is told when it prints citation markers but no reference list the
+# bibliography finder recognises, and its links are used as its sources instead.
+MARKERS_SET_ASIDE = (
+    "{count} citation marker(s) found but no reference list; the page's links are its sources"
 )
 # A target that is one http(s) address and nothing else. Anchored, because an
 # address *inside* a pasted paragraph is a source that paragraph cites, not the
@@ -423,28 +433,32 @@ def target_document(
     *,
     name: str | None = None,
     client: PoliteClient | None = None,
+    fetcher: FetchesUrl | None = None,
     network_allowed: bool = True,
 ) -> Document:
     """Parse a file, or take a string that is not a path as the document itself.
 
     A ``Path`` is always a file. A ``str`` is a file when one exists at that path; a
     string that is nothing but an address is the post at that address (spec section
-    13's ``check --url``); anything else is pasted text, which is what makes
-    ``proofpath verify "..."`` work without a flag to say which it was given.
+    13's ``check --url``) when the host is a platform that is read, and otherwise
+    the page at that address, read up the fetch ladder; anything else is pasted
+    text, which is what makes ``proofpath verify "..."`` work without a flag to say
+    which it was given.
 
     ``client`` is the engine's polite client, so a run reads a post on the same
-    throttle as everything else it talks to. A caller with no engine gets one of its
-    own for the length of the read.
+    throttle as everything else it talks to; ``fetcher`` is the engine's ladder, so
+    a page is read with the run's own permissions, consent and cache. A caller with
+    no engine gets one of each of its own for the length of the read.
 
     ``network_allowed`` is the run's network permission, which the caller has already
-    resolved. Reading a post is a network call like any other, so a denied run must
-    reach this with ``False`` and get the refusal rather than two HTTPS requests
-    (spec section 7.1, product rule 4). Only a file and pasted text are readable
-    without it, and neither consults this.
+    resolved. Reading a post or a page is a network call like any other, so a denied
+    run must reach this with ``False`` and get the refusal rather than two HTTPS
+    requests (spec section 7.1, product rule 4). Only a file and pasted text are
+    readable without it, and neither consults this.
     """
-    address = _post_address(target)
+    address = _bare_address(target)
     if address is not None:
-        return _post_document(address, client, network_allowed=network_allowed)[0]
+        return _address_document(address, client, fetcher, network_allowed=network_allowed)[0]
     if isinstance(target, Path):
         return ingest.load(target)
     with suppress(OSError, ValueError):
@@ -459,6 +473,7 @@ def _target(
     *,
     name: str | None,
     client: PoliteClient | None,
+    fetcher: FetchesUrl | None,
     network_allowed: bool,
 ) -> tuple[Document, tuple[str, ...]]:
     """:func:`target_document`, plus what the reader could not put into the document.
@@ -469,21 +484,24 @@ def _target(
     what keeps a post that lost a paragraph from reading as a post that quoted
     nothing (product rule 2).
 
-    Only a post is read here. Everything else goes through :func:`target_document`
-    itself, because that is the seam a caller replaces to hand the pipeline a
-    document of its own, and a second way in would quietly stop honouring it.
+    Only a post or a page is read here. Everything else goes through
+    :func:`target_document` itself, because that is the seam a caller replaces to
+    hand the pipeline a document of its own, and a second way in would quietly stop
+    honouring it.
     """
-    address = _post_address(target)
+    address = _bare_address(target)
     if address is not None:
-        return _post_document(address, client, network_allowed=network_allowed)
+        return _address_document(address, client, fetcher, network_allowed=network_allowed)
     return (
-        target_document(target, name=name, client=client, network_allowed=network_allowed),
+        target_document(
+            target, name=name, client=client, fetcher=fetcher, network_allowed=network_allowed
+        ),
         (),
     )
 
 
-def _post_address(target: Path | str) -> str | None:
-    """The address of the post a target names, when a post is what it names.
+def _bare_address(target: Path | str) -> str | None:
+    """The target when it is one http(s) address and nothing else, else ``None``.
 
     The filesystem is asked first and a ``Path`` never asked at all, so a file that
     happens to be called ``https...`` is still read from disk.
@@ -495,13 +513,71 @@ def _post_address(target: Path | str) -> str | None:
         # can fail on its own (too long, embedded NUL) rather than answering.
         if Path(target).is_file():
             return None
-    return _bare_address(target)
-
-
-def _bare_address(target: str) -> str | None:
-    """The target when it is one http(s) address and nothing else, else ``None``."""
     stripped = target.strip()
     return stripped if _BARE_URL.fullmatch(stripped) else None
+
+
+def _address_document(
+    url: str,
+    client: PoliteClient | None,
+    fetcher: FetchesUrl | None,
+    *,
+    network_allowed: bool,
+) -> tuple[Document, tuple[str, ...]]:
+    """What one address names: a post on a platform that is read, else a page.
+
+    Both tests, because they answer different questions: ``is_social`` knows the
+    listed platforms, and ``is_read_here`` knows a Mastodon status by its shape on
+    an instance no list names. Either makes the address a platform's, and a
+    platform's profile or front page is refused as one rather than read as a page.
+    """
+    if is_social(url) or social.is_read_here(url):
+        return _post_document(url, client, network_allowed=network_allowed)
+    return _page_document(url, fetcher, network_allowed=network_allowed)
+
+
+def _page_document(
+    url: str, fetcher: FetchesUrl | None, *, network_allowed: bool = True
+) -> tuple[Document, tuple[str, ...]]:
+    """The page at ``url`` as the document, or the reason there is none to check.
+
+    The page is read up the same ladder its sources will be, so it meets the same
+    permissions, the same consent gate and the same politeness -- and a page the
+    ladder could not read is refused in the ladder's own words, one per honesty
+    state (product rule 2): blocked, blocked by robots.txt, blocked with the browser
+    not permitted, unreachable, provider unavailable. It is not a *source*
+    (``counts_as_source=False``): a refusal here ends the run rather than skipping
+    one of its references. The cache is climbed past because a cached copy is text
+    alone, and a page's links are its bibliography (``Fetcher.fetch``).
+    """
+    if not network_allowed:
+        raise ingest.IngestError(f"{url} could not be read: {Outcome.NETWORK_DENIED.value}")
+    if fetcher is None:
+        own_fetcher = Fetcher(config=Config(), interactive=False)
+        try:
+            fetched = own_fetcher.fetch(url, counts_as_source=False, use_cache=False)
+        finally:
+            own_fetcher.close()
+    else:
+        fetched = fetcher.fetch(url, counts_as_source=False, use_cache=False)
+    if not fetched.ok:
+        raise ingest.IngestError(_page_refusal(url, fetched))
+    page = ingest.from_page(fetched)
+    document = page.document
+    # ``_pasted``'s rule with one difference: a page that prints its own reference
+    # list cites by number, and any other page cites by linking. A marker alone does
+    # not decide it -- "[1]" in one paragraph of a long page would otherwise cost the
+    # page every link it carries, and a ``linked`` document reads a bracketed number
+    # as prose, not as a citation (``claims.extract``).
+    notes = page.notes
+    if not document.references:
+        document = ingest.with_carried_links(document, page.links)
+        if markers := claims_mod.find_markers(document):
+            # The override is said, not silent: a page whose list is under a heading
+            # the bibliography finder does not know ("Sources", "Notes") has just had
+            # its numbered citations set aside for its links (product rule 6).
+            notes = (*notes, MARKERS_SET_ASIDE.format(count=len(markers)))
+    return document, notes
 
 
 def _post_document(
@@ -547,6 +623,22 @@ def _post_document(
     # paragraph -- then what the ingest left out of the bibliography. Both are things
     # the post carried and the document does not, so both are reported (rule 2).
     return document, (*read.notes, *dropped)
+
+
+def _page_refusal(url: str, fetched: Fetched) -> str:
+    """The ladder's outcome, the step that decided it, and -- when the browser was
+    the missing step -- what to type (permission hints, 2026-09-17).
+
+    The step named is the last one that got an answer from the *page*, not the
+    archive: "step 4 wayback: no snapshot" is true of every wall and says nothing
+    about this one.
+    """
+    decisive = [note for note in fetched.notes if not note.startswith("step 4 wayback")]
+    detail = f": {decisive[-1]}" if decisive else ""
+    hint = ""
+    if fetched.outcome is Outcome.BLOCKED_NO_BROWSER:
+        hint = f" (to permit it: config set {BROWSER_SETTING})"
+    return f"{url} could not be read: {fetched.outcome.value}{detail}{hint}"
 
 
 def _pasted(text: str, name: str) -> Document:
@@ -613,11 +705,16 @@ def prepare(
     denied_note = engine.fetcher.network_note
 
     # --- 1. parsing ---------------------------------------------------------
-    began = opened(PARSING, _parser_for(target))
+    reader = _parser_for(target)
+    began = opened(PARSING, reader)
     document, parse_notes = _target(
-        target, name=name, client=engine.client, network_allowed=allowed
+        target, name=name, client=engine.client, fetcher=engine.fetcher, network_allowed=allowed
     )
-    parser = _PARSER_BY_KIND.get(document.kind, _TEXT_PARSER)
+    # What read the document, as the stage closes: the kind says for a file, and a
+    # page is read by the ladder whatever it turned out to hold -- a fetched PDF
+    # opens and closes as ``fetch ladder``, and pasted text with links in it,
+    # which shares the ``linked`` kind, still closes as text.
+    parser = reader if reader == PAGE_PARSER else _PARSER_BY_KIND.get(document.kind, _TEXT_PARSER)
     for error in document.errors:
         add(
             _finding(
@@ -633,15 +730,15 @@ def prepare(
         # is what keeps the loss visible instead of it reading as a post that quoted
         # nothing (product rule 2).
         add(_finding(Kind.PARSE_ERROR, Locator(line=1), note))
-    if document.kind == "post" and not document.references:
-        # A post that links to nothing has nothing behind it to check. Reporting it
-        # as a document with no findings would make "nothing was verified" look
-        # exactly like "everything checked out" (product rule 6).
+    if document.kind in ("post", "page") and not document.references:
+        # A post or a page that links to nothing has nothing behind it to check.
+        # Reporting it as a document with no findings would make "nothing was
+        # verified" look exactly like "everything checked out" (product rule 6).
         add(
             _finding(
                 Kind.PARSE_ERROR,
                 Locator(line=1),
-                "post carries no links; nothing to verify against",
+                f"{document.kind} carries no links; nothing to verify against",
             )
         )
     if not document.paragraphs and not document.references:
@@ -1714,8 +1811,11 @@ def _parser_for(target: Path | str) -> str:
     An address that names a post is read by the platform's API, not by a parser;
     everything else has only its suffix to go on.
     """
-    if isinstance(target, str) and social.is_post_url(target.strip()):
-        return POST_READER
+    address = _bare_address(target)
+    if address is not None:
+        if is_social(address) or social.is_read_here(address):
+            return POST_READER
+        return PAGE_PARSER
     with suppress(ValueError):
         return _PARSER_BY_SUFFIX.get(Path(target).suffix.lower(), _TEXT_PARSER)
     return _TEXT_PARSER

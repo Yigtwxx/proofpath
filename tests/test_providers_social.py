@@ -10,6 +10,7 @@ nothing to verify rather than passing silently (product rule 6).
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -662,13 +663,20 @@ def test_check_takes_exactly_one_of_a_target_and_a_url() -> None:
     assert "exactly one" in both.output
 
 
-def test_check_url_on_a_page_that_is_not_a_post_says_what_would_work() -> None:
-    result = runner.invoke(app, ["check", "--url", "https://example.test/report.html"])
+def test_check_url_on_a_page_off_every_platform_reads_it_as_the_document() -> None:
+    """An address on a host that is not a platform is not "a page, not a post": it
+    is the page, read up the ladder as the document itself (``verify``'s tests
+    cover the reading; this pins that the social refusal never reaches it)."""
+    url = "https://example.test/report.html"
+    body = b"<article><p>A claim with <a href='/src'>a source</a>.</p></article>"
+    fetcher = VerifyStubFetcher({url: replace(verify_fetched(url, ""), body=body)})
+    built = build_engine(resolver=VerifyStubResolver(), fetcher=fetcher)
 
-    assert result.exit_code == 2
-    assert "is a page, not a post" in result.output
-    assert "give the claim as text with the address inside it" in result.output
-    assert "paste it in the TUI, or proofpath check - on the command line" in result.output
+    ready = prepare(url, built)
+
+    assert ready.document.kind == "linked"
+    assert [r.raw for r in ready.document.references] == ["https://example.test/src"]
+    assert ready.stages[0].by == "fetch ladder"
 
 
 # --- fix round 1: the network permission, blocked posts, unread quotes ------------

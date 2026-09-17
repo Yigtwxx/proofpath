@@ -26,12 +26,14 @@ from dataclasses import dataclass, replace
 from itertools import pairwise
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
 
 import docx
 import pymupdf
 from docx.opc.exceptions import OpcError
 from docx.table import Table
+from lxml import etree
+from lxml import html as lxml_html
 
 from proofpath import resolve
 from proofpath.document import (
@@ -43,6 +45,7 @@ from proofpath.document import (
     Reference,
     Sentence,
 )
+from proofpath.fetch import BOILERPLATE_TAGS, CONTENT_ROOTS, Fetched
 from proofpath.retrieval import sentence_spans
 
 if TYPE_CHECKING:  # a post is read by a provider, which imports this module back
@@ -475,10 +478,10 @@ def from_text(text: str, *, name: str, kind: Kind, markdown: bool = False) -> Do
     return _assemble(paragraphs, name=name, kind=kind, pages=1)
 
 
-#: A link a post carries that is the post's own address, and which is therefore left
-#: out of the bibliography. The reader is told rather than left to notice: one of the
-#: post's own links is missing from the report, and this says which and why.
-SELF_LINK_DROPPED = "a link back to the post itself was dropped: {url}"
+#: A link a post or a page carries that is its own address, and which is therefore
+#: left out of the bibliography. The reader is told rather than left to notice: one
+#: of the document's own links is missing from the report, and this says which and why.
+SELF_LINK_DROPPED = "a link back to the document itself was dropped: {url}"
 
 
 def _address_key(url: str) -> str:
@@ -603,6 +606,293 @@ def with_link_references(document: Document) -> Document:
         # is not this, and must never be paired that way (product rule 1).
         kind="linked",
     )
+
+
+#: The elements a page is cut into paragraphs by. One paragraph per block, the way
+#: ``from_docx`` takes one per Word paragraph: a page prints no blank line between
+#: two of them, so merging on blank lines would flatten it into one claim.
+PAGE_BLOCK_TAGS = frozenset(
+    {
+        "p",
+        "li",
+        "h1",
+        "h2",
+        "h3",
+        "h4",
+        "h5",
+        "h6",
+        "blockquote",
+        "pre",
+        "dd",
+        "dt",
+        "td",
+        "th",
+        "figcaption",
+    }
+)
+#: Skipped whole, on top of what ``fetch.extract_text`` skips: a sidebar of related
+#: articles and a form are furniture, and the links in them are nobody's citation.
+PAGE_SKIP_TAGS = frozenset({*BOILERPLATE_TAGS, "aside", "form", "button", "svg", "template"})
+#: Cut between two paragraphs even inside a run of inline content.
+_LINE_BREAK = "br"
+#: What ``from_page`` refuses: a body the ladder reached but nothing here can read.
+UNSUPPORTED_PAGE = "{url} could not be read: unsupported content type {content_type}"
+
+
+@dataclass(frozen=True)
+class Page:
+    """A page read as the document, before the caller decides how it cites.
+
+    ``links`` is line -> the addresses the paragraph opening on that line carries,
+    as anchors or written out in full, kept apart from the document because whether
+    they *are* its bibliography is not the reader's call: a page that prints a
+    reference list cites by number, and only a page that prints none cites by
+    linking, the way a post does. ``verify`` makes that call with
+    :func:`with_carried_links`, exactly as it does for pasted text with
+    :func:`with_link_references`. ``notes`` is what the reader left out of the
+    document and says so about (product rule 2).
+    """
+
+    document: Document
+    links: dict[int, list[str]]
+    notes: tuple[str, ...]
+
+
+def from_page(fetched: Fetched) -> Page:
+    """A page the ladder read, as the document itself (kind ``page``).
+
+    A PDF at the address is read exactly as a PDF on disk, plain text as pasted
+    text, and HTML one paragraph per block. Anything else the ladder reached is
+    refused by type, not by content: there is nothing here that can read it.
+    """
+    # Named for the address that was asked for, which is the one the user typed and
+    # the one the cache files sources under. Relative links resolve against the
+    # address the page was *served* from -- a redirect moves the base -- except a
+    # Wayback copy (step 4): the raw ``id_`` snapshot keeps the page's own links
+    # unrewritten, so they resolve against the page, not the archive.
+    url = fetched.url
+    base = fetched.final_url or url
+    if fetched.step == 4:
+        base = url
+    # Both addresses are the page itself: a link to either is not a source.
+    own = _page_keys(url, base)
+    if fetched.kind == "pdf":
+        try:
+            # ``pymupdf.open`` ships unannotated (see ``from_pdf``).
+            opened = pymupdf.open(stream=fetched.body, filetype="pdf")  # type: ignore[no-untyped-call]
+        except (RuntimeError, ValueError) as error:
+            raise IngestError(f"cannot open {url}: {error}") from error
+        return Page(_pdf_document(opened, name=url, source=url), {}, ())
+    if fetched.kind == "text":
+        document = from_text(fetched.text, name=url, kind="page")
+        links: dict[int, list[str]] = {}
+        notes: list[str] = []
+        _printed_links(document, links, own, notes)
+        return Page(document, links, tuple(notes))
+    if fetched.kind != "html":
+        raise IngestError(UNSUPPORTED_PAGE.format(url=url, content_type=fetched.content_type))
+    paragraphs, links, notes = _html_paragraphs(fetched.body, base, own)
+    document = _assemble(paragraphs, name=url, kind="page", pages=1)
+    _printed_links(document, links, own, notes)
+    return Page(document, links, tuple(notes))
+
+
+def _page_key(url: str) -> str:
+    """What a page address names, for telling the page's own links from its sources.
+
+    :func:`_address_key` without the query: a Hacker News item lives in its query,
+    but a page's query is tracking (``?utm_source=``) or a view of the same page
+    (``?page=2``), and neither is another author's words.
+    """
+    return _address_key(url).split("?", 1)[0]
+
+
+def _page_keys(*urls: str) -> frozenset[str]:
+    return frozenset(key for url in urls if (key := _page_key(url)))
+
+
+def _printed_links(
+    document: Document, links: dict[int, list[str]], own: frozenset[str], notes: list[str]
+) -> None:
+    """Add the addresses a paragraph writes out in full to the links it carries.
+
+    A page that prints a link cites it whether or not it is also an anchor. The
+    page's own address, printed as a permalink or a "cite this" line, is not a
+    source for the same reason its anchors to itself are not (product rule 1).
+    """
+    for paragraph in document.paragraphs:
+        first, _ = paragraph.lines[0]
+        for url, _ in resolve.find_urls(paragraph.text):
+            if _page_key(url) in own:
+                notes.append(SELF_LINK_DROPPED.format(url=url))
+                continue
+            carried = links.setdefault(first, [])
+            if url not in carried:
+                carried.append(url)
+
+
+def with_carried_links(document: Document, links: dict[int, list[str]]) -> Document:
+    """The same document, with the links its paragraphs carry as its bibliography.
+
+    :func:`with_link_references` for a page: ``links`` is line -> the addresses the
+    paragraph opening on that line carries (a :class:`Page`'s, anchors and printed
+    addresses alike, the page's own already left out). One reference per distinct
+    address, in order of first appearance, placed at the paragraph that carries it
+    -- which is what ``claims.pair_links`` pairs on. The kind says the links are the
+    bibliography (``linked``), and a document with none keeps its own.
+    """
+    found: dict[str, Locator] = {}
+    for paragraph in document.paragraphs:
+        first, _ = paragraph.lines[0]
+        for url in links.get(first, []):
+            found.setdefault(url, paragraph.locator)
+    if not found:
+        return document
+    return replace(
+        document,
+        references=tuple(
+            Reference(number=number, raw=url, locator=locator)
+            for number, (url, locator) in enumerate(found.items(), start=1)
+        ),
+        kind="linked",
+    )
+
+
+def _html_paragraphs(
+    body: bytes, base: str, own: frozenset[str]
+) -> tuple[list[Paragraph], dict[int, list[str]], list[str]]:
+    """The page's blocks as paragraphs, the links each carries, and what was dropped.
+
+    The content root is chosen as :func:`~proofpath.fetch.extract_text` chooses it
+    (``CONTENT_ROOTS``), so a page's paragraphs and a source's text are cut from the
+    same element. Inside it, one paragraph per block (``PAGE_BLOCK_TAGS``) that
+    holds no other block; a block or a container that does hold one is entered, and
+    the words it carries *between* its blocks -- a ``div`` used as a paragraph, a
+    list item with a sub-list, text around a ``<br>`` -- become paragraphs of their
+    own rather than being lost. Paragraphs are numbered in order so a locator says
+    which; the links each carries, resolved against ``base``, are kept per *line*,
+    where :func:`with_carried_links` places them and ``claims.pair_links`` pairs.
+
+    Skipped elements (``PAGE_SKIP_TAGS``) contribute neither words nor links. A link
+    back to the page itself is dropped and named, as :func:`from_post` does for a
+    post: read as a source it would hand the page's own words back as the passage
+    that supports them (product rule 1).
+    """
+    paragraphs: list[Paragraph] = []
+    links: dict[int, list[str]] = {}
+    notes: list[str] = []
+    if not body.strip():
+        return paragraphs, links, notes
+    try:
+        # A whole document, so a fragment that is one ``div`` still has a ``body``.
+        tree = lxml_html.document_fromstring(body)
+    except (ValueError, etree.ParserError):
+        return paragraphs, links, notes
+    root = next((element for tag in CONTENT_ROOTS for element in tree.iter(tag)), None)
+    if root is None:
+        return paragraphs, links, notes
+    ordinal = 0
+    # The paragraph being gathered: text pieces and the anchors met along the way.
+    pieces: list[str] = []
+    anchors: list[str] = []
+    # The anchors *entered* rather than met: a card's ``<a>`` wrapping a heading
+    # and a paragraph. They wait for the first paragraph inside, where the run's
+    # own anchors do not: a wordless image link before a paragraph is not its
+    # citation, and must not become one (product rule 1).
+    wrapping: list[str] = []
+
+    def flush() -> None:
+        nonlocal ordinal
+        text = " ".join("".join(pieces).split())
+        found = [*wrapping, *anchors]
+        pieces.clear()
+        anchors.clear()
+        if not text:
+            return
+        wrapping.clear()
+        ordinal += 1
+        paragraphs.extend(paragraphs_from_lines([text], first_line=ordinal))
+        for url in found:
+            carried = links.setdefault(ordinal, [])
+            if url not in carried:
+                carried.append(url)
+
+    def link(element: lxml_html.HtmlElement) -> str | None:
+        """The address an anchor carries, when it is one of the page's sources."""
+        href: str = (element.get("href") or "").strip()
+        if not href or href.startswith("#"):
+            return None
+        url = urljoin(base, href)
+        if urlsplit(url).scheme not in ("http", "https"):
+            return None
+        if _page_key(url) in own:
+            notes.append(SELF_LINK_DROPPED.format(url=url))
+            return None
+        return url
+
+    def inline(element: lxml_html.HtmlElement) -> None:
+        """Gather an element that holds no block: its words and anchors, in order."""
+        if element.tag == _LINE_BREAK:
+            flush()
+        elif element.tag == "a" and (url := link(element)) is not None:
+            anchors.append(url)
+        if element.text:
+            pieces.append(element.text)
+        for child in element.iterchildren():
+            # A comment has no words and a skipped element contributes none; the
+            # text after either still belongs to this run.
+            if isinstance(child.tag, str) and child.tag not in PAGE_SKIP_TAGS:
+                inline(child)
+            if child.tail:
+                pieces.append(child.tail)
+        # ``element.tail`` belongs to the parent's run and is appended by the caller.
+
+    def holds_block(element: lxml_html.HtmlElement) -> bool:
+        return any(
+            isinstance(child.tag, str) and child.tag in PAGE_BLOCK_TAGS
+            for child in element.iterdescendants()
+        )
+
+    def walk(element: lxml_html.HtmlElement) -> None:
+        """Enter an element that holds a block; every run between its blocks is a
+        paragraph, and every block inside it is walked in turn."""
+        # A card: an anchor wrapping a heading and a paragraph. The link is the
+        # first paragraph's inside it, which is where ``flush`` places it.
+        entered = link(element) if element.tag == "a" else None
+        if entered is not None:
+            wrapping.append(entered)
+        if element.text:
+            pieces.append(element.text)
+        for child in element.iterchildren():
+            if not isinstance(child.tag, str) or child.tag in PAGE_SKIP_TAGS:
+                pass
+            elif holds_block(child):
+                flush()
+                walk(child)
+                flush()
+            elif child.tag in PAGE_BLOCK_TAGS:
+                flush()
+                block(child)
+            else:
+                inline(child)
+            if child.tail:
+                pieces.append(child.tail)
+        if entered is not None:
+            wrapping.clear()  # a card with no words inside cites nothing
+
+    def block(element: lxml_html.HtmlElement) -> None:
+        """A block that holds no other: one paragraph."""
+        inline(element)
+        flush()
+
+    if root.tag in PAGE_SKIP_TAGS:
+        return paragraphs, links, notes
+    if holds_block(root):
+        walk(root)
+    else:
+        block(root)
+    flush()
+    return paragraphs, links, notes
 
 
 def _read(path: Path) -> str:
@@ -806,13 +1096,18 @@ def from_pdf(path: Path) -> Document:
         # pymupdf's FileDataError, FileNotFoundError and EmptyFileError are all
         # RuntimeError subclasses; a document nobody can open is not a page error.
         raise IngestError(f"cannot open {path}: {error}") from error
+    return _pdf_document(opened, name=path.name, source=str(path))
 
+
+def _pdf_document(opened: pymupdf.Document, *, name: str, source: str) -> Document:
+    """The pages of an opened PDF, wherever it was opened from. ``source`` is what
+    an error names: a path on disk, or the address a page was fetched from."""
     errors: list[PageError] = []
     pages: list[list[_Block]] = []
     with opened as document:
         count = document.page_count
         if count < 1:
-            raise IngestError(f"cannot read {path}: the document has no pages")
+            raise IngestError(f"cannot read {source}: the document has no pages")
         for index in range(count):
             number = index + 1
             try:
@@ -827,7 +1122,7 @@ def from_pdf(path: Path) -> Document:
                 errors.append(PageError(page=number, detail=SCANNED_PAGE))
     return _assemble(
         _paragraphs_of_pages(_without_furniture(pages)),
-        name=path.name,
+        name=name,
         kind="pdf",
         pages=count,
         errors=errors,

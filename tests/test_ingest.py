@@ -11,18 +11,22 @@ import pymupdf
 import pytest
 
 from proofpath.document import Document, Locator, PageError
+from proofpath.fetch import Fetched, Outcome
 from proofpath.ingest import (
+    SELF_LINK_DROPPED,
     IngestError,
     _line_text,
     find_bibliography,
     from_docx,
     from_markdown,
+    from_page,
     from_pdf,
     from_plain,
     from_text,
     load,
     paragraphs_from_lines,
     split_references,
+    with_carried_links,
 )
 
 PLAIN = "Alpha one. Alpha two.\n\nBeta one. Beta two.\n"
@@ -1119,3 +1123,285 @@ def test_pasted_text_without_a_heading_keeps_its_numbered_list(tmp_path: Path) -
     numbered list is not silently turned into a bibliography."""
     body = "Do it [1].\n\n" + "\n\n".join(NATURE_ENTRIES) + "\n"
     assert from_text(body, name="draft.md", kind="markdown", markdown=True).references == ()
+
+
+# --- a page read as the document (bare URL, spec section 13) --------------------
+
+PAGE_URL = "https://example.test/news/story"
+
+STORY_HTML = b"""<html><head><title>Story</title></head><body>
+<nav><a href="/">Home</a> <a href="/about">About</a></nav>
+<main>
+  <h1>A finding was announced</h1>
+  <p>Scientists <a href="/papers/one">reported</a> a large effect,
+     see also <a href="https://other.test/coverage#top">coverage</a>.</p>
+  <ul>
+    <li>Point one, with <a href="#footnote">a footnote</a>.</li>
+    <li>Point two, <a href="mailto:someone@example.test">by mail</a>.</li>
+  </ul>
+  <blockquote><p>A quoted sentence with
+    <a href="https://example.test/news/story/#cite">a self link</a>.</p></blockquote>
+  <div>Loose words in a div.</div>
+  <aside><a href="/related/1">Related story</a></aside>
+  <script>var x = "<a href='/js'>never</a>";</script>
+</main>
+<footer><a href="/privacy">Privacy</a></footer>
+</body></html>"""
+
+
+def page(
+    body: bytes, *, kind: str = "html", content_type: str = "text/html", url: str = PAGE_URL
+) -> Fetched:
+    return Fetched(
+        url=url,
+        final_url=url,
+        step=1,
+        outcome=Outcome.OK,
+        status=200,
+        content_type=content_type,
+        kind=kind,  # type: ignore[arg-type]
+        body=body,
+        text="",
+        notes=[],
+    )
+
+
+def test_from_page_cuts_html_into_one_paragraph_per_block() -> None:
+    read = from_page(page(STORY_HTML))
+
+    assert read.document.kind == "page"
+    assert read.document.name == PAGE_URL
+    assert [p.text for p in read.document.paragraphs] == [
+        "A finding was announced",
+        "Scientists reported a large effect, see also coverage.",
+        "Point one, with a footnote.",
+        "Point two, by mail.",
+        "A quoted sentence with a self link.",
+        "Loose words in a div.",
+    ]
+    # No bibliography was printed, so the page keeps none; the links are separate.
+    assert read.document.references == ()
+
+
+def test_from_page_keeps_each_paragraphs_links_resolved_against_the_page() -> None:
+    read = from_page(page(STORY_HTML))
+
+    lines = {p.text: p.lines[0][0] for p in read.document.paragraphs}
+    assert read.links == {
+        lines["Scientists reported a large effect, see also coverage."]: [
+            "https://example.test/papers/one",
+            "https://other.test/coverage#top",
+        ],
+    }
+    # Nothing from the nav, the aside, the footer or the script; no fragment-only
+    # or mailto links; and the page's own address is dropped and named.
+    assert read.notes == (SELF_LINK_DROPPED.format(url="https://example.test/news/story/#cite"),)
+
+
+def test_from_page_uses_article_over_body_like_the_ladders_text_does() -> None:
+    body = b"<body><p>outside</p><article><p>inside <a href='/x'>x</a></p></article></body>"
+    read = from_page(page(body))
+    assert [p.text for p in read.document.paragraphs] == ["inside x"]
+    assert list(read.links.values()) == [["https://example.test/x"]]
+
+
+def test_from_page_finds_a_printed_reference_list() -> None:
+    body = (
+        b"<article><p>The effect was large [1].</p>"
+        b"<h2>References</h2>"
+        b"<ol><li>Vaswani A. Attention is all you need. NeurIPS 2017.</li></ol></article>"
+    )
+    read = from_page(page(body))
+    assert read.document.kind == "page"
+    assert [p.text for p in read.document.paragraphs] == ["The effect was large [1]."]
+    assert [r.raw for r in read.document.references] == [
+        "Vaswani A. Attention is all you need. NeurIPS 2017."
+    ]
+
+
+def test_from_page_reads_a_pdf_body_like_a_pdf_on_disk(tmp_path: Path) -> None:
+    pdf = pymupdf.open()
+    pdf.new_page().insert_text((72, 72), "A claim from a fetched PDF.")
+    body = pdf.tobytes()
+    pdf.close()
+    read = from_page(page(body, kind="pdf", content_type="application/pdf"))
+    assert read.document.kind == "pdf"
+    assert read.document.name == PAGE_URL
+    assert read.document.paragraphs[0].text == "A claim from a fetched PDF."
+
+
+def test_from_page_refuses_a_corrupt_pdf_by_name() -> None:
+    with pytest.raises(IngestError, match=PAGE_URL):
+        from_page(page(b"%PDF-1.4 not really", kind="pdf", content_type="application/pdf"))
+
+
+def test_from_page_takes_plain_text_as_pasted_text() -> None:
+    fetched = page(b"", kind="text", content_type="text/plain")
+    fetched = Fetched(**{**fetched.__dict__, "text": "A line.\n\nAnother https://a.test/x here."})
+    read = from_page(fetched)
+    assert read.document.kind == "page"
+    assert [p.text for p in read.document.paragraphs] == [
+        "A line.",
+        "Another https://a.test/x here.",
+    ]
+
+
+def test_from_page_refuses_what_nothing_here_reads() -> None:
+    with pytest.raises(IngestError, match="unsupported content type image/png"):
+        from_page(page(b"\x89PNG", kind="other", content_type="image/png"))
+
+
+def test_with_carried_links_makes_the_links_the_bibliography_in_order() -> None:
+    read = from_page(page(STORY_HTML))
+    linked = with_carried_links(read.document, read.links)
+
+    assert linked.kind == "linked"
+    assert [r.raw for r in linked.references] == [
+        "https://example.test/papers/one",
+        "https://other.test/coverage#top",
+    ]
+    # Placed at the paragraph that carries them: the line ``pair_links`` keys on.
+    carrier = next(p for p in linked.paragraphs if p.text.startswith("Scientists"))
+    assert all(r.locator == carrier.locator for r in linked.references)
+
+
+def test_from_page_counts_an_address_printed_in_full_once_with_its_anchor() -> None:
+    body = b"<article><p>Written out: https://a.test/one and <a href='https://a.test/one'>again</a>.</p></article>"
+    read = from_page(page(body))
+    linked = with_carried_links(read.document, read.links)
+    assert [r.raw for r in linked.references] == ["https://a.test/one"]
+
+
+def test_with_carried_links_leaves_a_page_with_no_links_as_it_is() -> None:
+    read = from_page(page(b"<article><p>Nothing linked.</p></article>"))
+    assert with_carried_links(read.document, read.links) is read.document
+
+
+def test_from_page_keeps_the_words_a_container_carries_between_its_blocks() -> None:
+    """A div-based page: the words around an inline link, on either side of a
+    ``<br>``, and around a nested block are paragraphs, not lost with the container."""
+    body = (
+        b"<body><div class='content'>"
+        b"Words before <a href='/x'>a link</a> and after."
+        b"<br>Second line.<br>"
+        b"<div>Intro. <p>Inner.</p> Trailing.</div>"
+        b"<li>Outer <a href='/o'>o</a><ul><li>Sub</li></ul></li>"
+        b"<td>Cell <p>inner cell</p></td>"
+        b"</div></body>"
+    )
+    read = from_page(page(body))
+    assert [p.text for p in read.document.paragraphs] == [
+        "Words before a link and after.",
+        "Second line.",
+        "Intro.",
+        "Inner.",
+        "Trailing.",
+        "Outer o",
+        "Sub",
+        "Cell",
+        "inner cell",
+    ]
+    lines = {p.text: p.lines[0][0] for p in read.document.paragraphs}
+    assert read.links == {
+        lines["Words before a link and after."]: ["https://example.test/x"],
+        lines["Outer o"]: ["https://example.test/o"],
+    }
+
+
+def test_from_page_takes_no_words_and_no_links_from_a_skipped_element() -> None:
+    body = (
+        b"<article><p>Kept <noscript><a href='/js'>never</a></noscript> here."
+        b"<button>Share</button></p><aside><p>Related <a href='/r'>r</a></p></aside></article>"
+    )
+    read = from_page(page(body))
+    assert [p.text for p in read.document.paragraphs] == ["Kept here."]
+    assert read.links == {}
+
+
+def test_from_page_never_lists_the_page_itself_as_a_source() -> None:
+    """Product rule 1, three ways in: a tracking query on a self link, the address
+    printed in full, and a link to the page's own path with a fragment."""
+    body = (
+        b"<article>"
+        b"<p>Share <a href='https://example.test/news/story?utm_source=x'>this</a>.</p>"
+        b"<p>Permalink: https://example.test/news/story</p>"
+        b"<p>Or <a href='/news/story/#cite'>cite</a>, unlike <a href='/news/other'>that</a>.</p>"
+        b"</article>"
+    )
+    read = from_page(page(body))
+    assert list(read.links.values()) == [["https://example.test/news/other"]]
+    # Anchors are noted as the page is walked, printed addresses after it.
+    assert read.notes == (
+        SELF_LINK_DROPPED.format(url="https://example.test/news/story?utm_source=x"),
+        SELF_LINK_DROPPED.format(url="https://example.test/news/story/#cite"),
+        SELF_LINK_DROPPED.format(url="https://example.test/news/story"),
+    )
+
+
+def test_from_page_resolves_links_against_the_address_the_page_was_served_from() -> None:
+    """A redirect moves the base, and both addresses are the page itself."""
+    fetched = page(
+        b"<article><p><a href='/tally'>t</a> <a href='https://example.test/news/story'>self</a>"
+        b" <a href='https://moved.test/story'>self too</a></p></article>"
+    )
+    fetched = Fetched(**{**fetched.__dict__, "final_url": "https://moved.test/story"})
+    read = from_page(fetched)
+    assert read.document.name == PAGE_URL
+    assert list(read.links.values()) == [["https://moved.test/tally"]]
+    assert len(read.notes) == 2
+
+
+def test_from_page_resolves_a_wayback_copys_links_against_the_page_not_the_archive() -> None:
+    """The raw ``id_`` snapshot keeps the page's own links unrewritten."""
+    archive = "https://web.archive.org/web/20260101000000id_/https://example.test/news/story"
+    fetched = page(
+        b"<article><p><a href='/tally'>t</a> <a href='https://example.test/news/story'>self</a></p></article>"
+    )
+    fetched = Fetched(**{**fetched.__dict__, "final_url": archive, "step": 4})
+    read = from_page(fetched)
+    assert read.document.name == PAGE_URL
+    assert list(read.links.values()) == [["https://example.test/tally"]]
+    assert read.notes == (SELF_LINK_DROPPED.format(url="https://example.test/news/story"),)
+
+
+def test_from_page_plain_text_carries_the_addresses_it_prints_but_not_its_own() -> None:
+    fetched = page(b"", kind="text", content_type="text/plain")
+    text = "See https://a.test/x and https://example.test/news/story for more."
+    read = from_page(Fetched(**{**fetched.__dict__, "text": text}))
+    assert list(read.links.values()) == [["https://a.test/x"]]
+    assert read.notes == (SELF_LINK_DROPPED.format(url="https://example.test/news/story"),)
+
+
+def test_from_page_gives_a_card_anchor_wrapping_blocks_to_its_first_paragraph() -> None:
+    body = (
+        b"<article><li><a href='https://other.test/r'><h3>Report title</h3><p>desc</p></a></li>"
+        b"<p>after <a href='/x'>x</a></p></article>"
+    )
+    read = from_page(page(body))
+    assert [(p.lines[0][0], p.text) for p in read.document.paragraphs] == [
+        (1, "Report title"),
+        (2, "desc"),
+        (3, "after x"),
+    ]
+    assert read.links == {1: ["https://other.test/r"], 3: ["https://example.test/x"]}
+
+
+def test_from_page_never_hands_a_wordless_link_to_the_paragraph_after_it() -> None:
+    """A hero image linked to a gallery, an icon link, a figure's image link: none
+    of them is the next paragraph's citation (product rule 1)."""
+    body = (
+        b"<article>"
+        b"<a href='https://photos.test/gallery'><img></a><p>The count rose 17%.</p>"
+        b"<div><a href='https://share.test/s'><svg/></a></div><p>Second.</p>"
+        b"<figure><a href='https://cdn.test/big.jpg'><img></a><figcaption>Caption.</figcaption></figure>"
+        b"<a href='https://empty.test/card'><h3></h3><p></p></a><p>Third <a href='/x'>x</a>.</p>"
+        b"</article>"
+    )
+    read = from_page(page(body))
+    assert [p.text for p in read.document.paragraphs] == [
+        "The count rose 17%.",
+        "Second.",
+        "Caption.",
+        "Third x.",
+    ]
+    assert read.links == {4: ["https://example.test/x"]}

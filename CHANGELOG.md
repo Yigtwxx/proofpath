@@ -6,6 +6,19 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- **A page as the target.** A bare address on any host that is not a social platform
+  — pasted into the TUI bar or given to `check --url` — is read as the document
+  itself instead of being refused as "a page, not a post". The page is fetched up
+  the same ladder its sources are, cut into one paragraph per block, and cites the
+  way a post does: each paragraph's sentences are checked against the pages that
+  paragraph links to. A page that prints a reference list is paired by citation
+  number like a paper. A page the ladder could not read ends the run in the ladder's
+  own words (`UNVERIFIED (blocked)`, `… (unreachable)`, …), with the setting to type
+  when the browser step was the missing one; a page with no links is reported rather
+  than passed as clean; the page's own address is never one of its sources
+  (`docs/superpowers/specs/2026-09-17-page-target-design.md`).
+
 ## [0.4.3] - 2026-09-17
 
 The TUI says what to type when it stops you, and every tag gets a GitHub Release.

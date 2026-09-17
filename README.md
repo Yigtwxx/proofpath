@@ -243,8 +243,21 @@ proofpath check --url https://news.ycombinator.com/item?id=8863
 proofpath check -                 # paste the text of a post that cannot be read
 ```
 
-A page is not a post: paste the claim as text with the address inside it, and the page
-is fetched as that claim's source.
+Any other address is a **page**, and a page is read as the document itself:
+
+```bash
+proofpath check --url https://en.wikipedia.org/wiki/AlphaFold
+```
+
+The page is fetched up the same ladder its sources are — same permissions, same
+consent prompt for the browser step — and cut into paragraphs. A page that prints a
+reference list (a journal's article page) is paired by citation number like a paper; any
+other page cites by linking, like a post: each paragraph's sentences are checked against
+the pages that paragraph links to. A page the ladder could not read ends the run with the
+ladder's own words (`UNVERIFIED (blocked)`, `UNVERIFIED (unreachable)`, …), never with a
+verdict. A profile, a subreddit or a platform's front page is still "a page, not a post":
+there is no one post there to check. To check one claim *about* a page rather than the
+page's own words, paste the claim as text with the address inside it.
 
 Every sentence of the post is checked against the pages its links point to, and the post's
 own words are never allowed to stand as their own evidence.

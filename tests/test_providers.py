@@ -95,7 +95,12 @@ class StubFetcher:
         self.calls: list[str] = []
 
     def fetch(
-        self, url: str, *, text_kind: str = "fulltext", counts_as_source: bool = True
+        self,
+        url: str,
+        *,
+        text_kind: str = "fulltext",
+        counts_as_source: bool = True,
+        use_cache: bool = True,
     ) -> Fetched:
         self.calls.append(url)
         return self.page if self.page is not None else unreachable(url)

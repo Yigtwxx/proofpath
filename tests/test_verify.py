@@ -20,6 +20,7 @@ from typing import NoReturn
 
 import pytest
 
+from proofpath import ingest as ingest_mod
 from proofpath import oa, pipeline, retrieval
 from proofpath.browser import ConsentGate
 from proofpath.cache import Cache
@@ -51,6 +52,7 @@ from proofpath.report import (
 )
 from proofpath.resolve import Candidate, ResolveResult, Retraction, State
 from proofpath.retrieval import Embedder
+from proofpath.settings_hints import BROWSER_SETTING
 from proofpath.ui import json_text
 from proofpath.verify import (
     CACHE_BY,
@@ -58,12 +60,14 @@ from proofpath.verify import (
     FETCHING,
     JUDGING,
     LOADING_MODELS,
+    MARKERS_SET_ASIDE,
     NO_IDENTIFIER,
     NO_MODEL,
     NO_TEXT,
     NOT_ATTEMPTED,
     NOTHING_TO_VERIFY,
     PARSING,
+    POST_READER,
     RESOLVERS_BY,
     RESOLVING,
     RETRACTION_UNAVAILABLE,
@@ -73,6 +77,7 @@ from proofpath.verify import (
     Engine,
     Prepared,
     _escalates,
+    _parser_for,
     decide_all,
     prepare,
     target_document,
@@ -152,13 +157,21 @@ class StubFetcher:
         self.network_note = network_note
         self.calls: list[str] = []
         self.asked: list[tuple[str, str]] = []  # (url, text_kind) as the ladder saw it
+        # (url, counts_as_source, use_cache): how the target page was asked for.
+        self.options: list[tuple[str, bool, bool]] = []
         self.on_call: Callable[[], None] | None = None
 
     def fetch(
-        self, url: str, *, text_kind: str = "fulltext", counts_as_source: bool = True
+        self,
+        url: str,
+        *,
+        text_kind: str = "fulltext",
+        counts_as_source: bool = True,
+        use_cache: bool = True,
     ) -> Fetched:
         self.calls.append(url)
         self.asked.append((url, text_kind))
+        self.options.append((url, counts_as_source, use_cache))
         if self.on_call is not None:
             self.on_call()
         return self.pages.get(url, unreachable(url))
@@ -308,6 +321,166 @@ def test_target_document_treats_other_strings_as_pasted_text() -> None:
     assert doc.name == "pasted text"
     assert doc.kind == "text"
     assert target_document("hello", name="a post").name == "a post"
+
+
+# --- a page as the target (a bare address on a host that is not a platform) ----
+
+PAGE_URL = "https://example.test/news/story"
+STORY_LINK = "https://other.test/report"
+PAGE_HTML = (
+    b"<html><body><nav><a href='/'>Home</a></nav><article>"
+    b"<p>The count rose 17% last year, see <a href='/tally'>the tally</a>.</p>"
+    b"<p>A separate body <a href='https://other.test/report'>disagreed</a>.</p>"
+    b"<p>Nothing is linked from here.</p>"
+    b"</article></body></html>"
+)
+
+
+def page(url: str = PAGE_URL, body: bytes = PAGE_HTML, *, outcome: Outcome = Outcome.OK) -> Fetched:
+    ok = outcome is Outcome.OK
+    return Fetched(
+        url=url,
+        final_url=url,
+        step=1 if ok else 4,
+        outcome=outcome,
+        status=200 if ok else 403,
+        content_type="text/html" if ok else "",
+        kind="html" if ok else "other",
+        body=body if ok else b"",
+        text="",
+        notes=["step 1 httpx: HTTP 200"]
+        if ok
+        else ["step 1 httpx: HTTP 403 (blocked)", "step 4 wayback: no snapshot"],
+    )
+
+
+def test_a_bare_page_address_is_read_as_the_document_up_the_ladder() -> None:
+    fetcher = StubFetcher({PAGE_URL: page()})
+
+    ready = prepare(PAGE_URL, engine(fetcher=fetcher))
+
+    # The page itself is not a source, and the cache is climbed past: a cached copy
+    # is text alone, and the page's links are its bibliography.
+    assert fetcher.options[0] == (PAGE_URL, False, False)
+    assert ready.document.name == PAGE_URL
+    assert ready.document.kind == "linked"
+    assert [r.raw for r in ready.document.references] == [
+        "https://example.test/tally",
+        STORY_LINK,
+    ]
+    assert ready.stages[0].name == PARSING
+    assert ready.stages[0].by == "fetch ladder"
+    assert ready.stages[0].summary == "1 pages, 2 refs"
+    # Each paragraph's sentences cite that paragraph's links and nothing else.
+    by_paragraph = {claim.paragraph: claim.cited_refs for claim in ready.claims.claims}
+    assert by_paragraph == {0: (1,), 1: (2,)}
+    # And the links were then fetched as sources, the ordinary way.
+    assert fetcher.options[1:] == [
+        ("https://example.test/tally", True, True),
+        (STORY_LINK, True, True),
+    ]
+
+
+def test_a_page_the_ladder_could_not_read_is_refused_in_the_ladders_words() -> None:
+    for outcome in (
+        Outcome.BLOCKED,
+        Outcome.BLOCKED_NO_BROWSER,
+        Outcome.BLOCKED_ROBOTS,
+        Outcome.UNREACHABLE,
+        Outcome.UNAVAILABLE,
+    ):
+        fetcher = StubFetcher({PAGE_URL: page(outcome=outcome)})
+        with pytest.raises(ingest_mod.IngestError) as refused:
+            prepare(PAGE_URL, engine(fetcher=fetcher))
+        assert PAGE_URL in str(refused.value), outcome
+        assert outcome.value in str(refused.value), outcome
+        # The step that decided it, not the archive miss every wall ends on.
+        assert "step 1 httpx: HTTP 403 (blocked)" in str(refused.value), outcome
+        assert "wayback" not in str(refused.value), outcome
+        # Only the browser refusal has a setting to point at.
+        hinted = f"config set {BROWSER_SETTING}" in str(refused.value)
+        assert hinted == (outcome is Outcome.BLOCKED_NO_BROWSER), outcome
+
+
+def test_a_denied_run_reads_no_page_at_all_and_says_so() -> None:
+    fetcher = StubFetcher({PAGE_URL: page()}, network_allowed=False, network_note="network: deny")
+
+    with pytest.raises(ingest_mod.IngestError) as refused:
+        prepare(PAGE_URL, engine(fetcher=fetcher))
+
+    assert fetcher.calls == []
+    assert Outcome.NETWORK_DENIED.value in str(refused.value)
+
+
+def test_a_page_with_no_links_is_reported_rather_than_read_as_clean() -> None:
+    body = b"<article><p>Nothing is linked from here.</p></article>"
+    ready = prepare(PAGE_URL, engine(fetcher=StubFetcher({PAGE_URL: page(body=body)})))
+
+    assert ready.document.kind == "page"
+    assert ready.document.references == ()
+    assert ready.claims.claims == ()
+    titles = [f.title for f in ready.findings if f.kind is Kind.PARSE_ERROR]
+    assert titles == ["page carries no links; nothing to verify against"]
+
+
+def test_a_page_that_prints_a_bibliography_is_paired_by_number() -> None:
+    body = (
+        b"<article><p>The effect was large [1].</p><h2>References</h2>"
+        b"<ol><li>Vaswani, A. Attention is all you need. NeurIPS, 2017.</li></ol></article>"
+    )
+    resolver = StubResolver({"Vaswani": resolved()})
+    ready = prepare(
+        PAGE_URL, engine(resolver=resolver, fetcher=StubFetcher({PAGE_URL: page(body=body)}))
+    )
+
+    assert ready.document.kind == "page"
+    assert [r.number for r in ready.document.references] == [1]
+    assert [claim.cited_refs for claim in ready.claims.claims] == [(1,)]
+
+
+def test_a_bracketed_number_in_a_page_does_not_cost_it_its_links() -> None:
+    """Only a printed reference list makes a page cite by number. A "[1]" in the prose
+    of a page with no list is prose, and the page still cites by linking."""
+    body = b"<article><p>The effect was large [1], see <a href='/x'>x</a>.</p></article>"
+    ready = prepare(PAGE_URL, engine(fetcher=StubFetcher({PAGE_URL: page(body=body)})))
+
+    assert ready.document.kind == "linked"
+    assert [r.raw for r in ready.document.references] == ["https://example.test/x"]
+    assert ready.claims.unresolved == ()
+    assert [claim.cited_refs for claim in ready.claims.claims] == [(1,)]
+    # ... and says so, because a "Sources" list the finder missed looks the same.
+    titles = [f.title for f in ready.findings if f.kind is Kind.PARSE_ERROR]
+    assert titles == [MARKERS_SET_ASIDE.format(count=1)]
+
+
+def test_a_mastodon_status_on_an_unlisted_instance_is_still_a_post_not_a_page() -> None:
+    """``is_social`` knows the listed platforms; a Mastodon status is known by its
+    shape on any instance, and must keep being read as a post (task 10.3)."""
+    url = "https://hachyderm.io/users/someone/statuses/109384756"
+    fetcher = StubFetcher({url: page(url)}, network_allowed=False, network_note="network: deny")
+
+    with pytest.raises(ingest_mod.IngestError) as refused:
+        prepare(url, engine(fetcher=fetcher))
+
+    # Refused by the post reader's first rule, before the ladder was ever asked.
+    assert fetcher.calls == []
+    assert Outcome.NETWORK_DENIED.value in str(refused.value)
+    assert _parser_for(url) == POST_READER
+    assert _parser_for("https://mastodon.social/explore") == POST_READER
+    assert _parser_for(PAGE_URL) == "fetch ladder"
+
+
+def test_pasted_text_with_links_is_still_read_by_the_text_parser() -> None:
+    """The ``linked`` kind is shared with a page; the stage line is not."""
+    ready = prepare(f"A claim, see {STORY_LINK} for the tally.", engine())
+    assert ready.document.kind == "linked"
+    assert (ready.stages[0].by, ready.stages[0].name) == ("text", PARSING)
+
+
+def test_a_page_address_with_a_space_around_it_is_still_a_page() -> None:
+    fetcher = StubFetcher({PAGE_URL: page()})
+    ready = prepare(f"  {PAGE_URL}\n", engine(fetcher=fetcher))
+    assert ready.document.name == PAGE_URL
 
 
 # --- stage 1: parsing --------------------------------------------------------

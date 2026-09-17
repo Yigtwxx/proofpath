@@ -258,21 +258,37 @@ def extract_text(body: bytes, kind: Kind) -> str:
         with pymupdf.open(stream=body, filetype="pdf") as doc:  # type: ignore[no-untyped-call]
             return "\f".join(page.get_text() for page in doc)
     if kind == "html":
-        if not body.strip():
+        root = content_root(body)
+        if root is None:
             return ""
-        page = Selector(body)
-        # The first article or main element is the content; the body is the fallback.
-        for selector in ("article", "main", "body"):
-            found = page.css(selector)
-            if found:
-                text: str = found[0].get_all_text(
-                    separator="\n", strip=True, ignore_tags=BOILERPLATE_TAGS
-                )
-                return text
-        return ""
+        text: str = root.get_all_text(separator="\n", strip=True, ignore_tags=BOILERPLATE_TAGS)
+        return text
     if kind == "text":
         return body.decode("utf-8", errors="replace")
     return ""
+
+
+#: Where a page's content lives, first match wins: the page reader in ``ingest``
+#: cuts its paragraphs from the same element ``extract_text`` grades a source on.
+CONTENT_ROOTS = ("article", "main", "body")
+
+
+def content_root(body: bytes) -> Selector | None:
+    """The element a page's content lives in, or ``None`` for an empty page.
+
+    The first ``article`` or ``main`` element is the content; the ``body`` is the
+    fallback (``CONTENT_ROOTS``, which the page reader in ``ingest`` applies to its
+    own tree, so a source's text and a page's paragraphs are cut from one element).
+    """
+    if not body.strip():
+        return None
+    page = Selector(body)
+    for selector in CONTENT_ROOTS:
+        found = page.css(selector)
+        if found:
+            root: Selector = found[0]
+            return root
+    return None
 
 
 def html_title(body: bytes) -> str:
@@ -397,24 +413,34 @@ class Fetcher:
         return FetchStats(counts=dict(self._counts), browser_skipped=self._gate.skipped)
 
     def fetch(
-        self, url: str, *, text_kind: str = "fulltext", counts_as_source: bool = True
+        self,
+        url: str,
+        *,
+        text_kind: str = "fulltext",
+        counts_as_source: bool = True,
+        use_cache: bool = True,
     ) -> Fetched:
         """One climb. A bare URL is one source, so a browser refusal here is one
         skipped source; the open-access chain fetches several locations for one
-        DOI and counts that source itself (``counts_as_source=False``)."""
-        result = self._climb(url, text_kind)
+        DOI and counts that source itself (``counts_as_source=False``).
+
+        ``use_cache=False`` climbs past a cached copy. A hit carries the text alone
+        (``body=b""``), which is all a *source* needs; a page read as the document
+        itself needs its markup back, because its links are its bibliography.
+        """
+        result = self._climb(url, text_kind, use_cache=use_cache)
         self._counts[result.outcome] += 1
         if counts_as_source and result.outcome is Outcome.BLOCKED_NO_BROWSER:
             self._gate.skipped += 1
         return result
 
-    def _climb(self, url: str, text_kind: str) -> Fetched:
+    def _climb(self, url: str, text_kind: str, *, use_cache: bool = True) -> Fetched:
         notes: list[str] = []
         if self.network_note:
             notes.append(self.network_note)
         if not self.network_allowed:
             return _failed(url, 0, Outcome.NETWORK_DENIED, _no_response(url), notes)
-        if self._cache is not None:
+        if use_cache and self._cache is not None:
             cached = self._cache.get_raw_text(f"url:{url}")
             if cached:  # only non-empty text is ever stored, so empty means miss
                 notes.append("cache: hit")
