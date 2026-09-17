@@ -27,6 +27,7 @@ import CoverageBar from './CoverageBar.astro';
                             {m.set}
                             {m.against ? <span class="measured__against">{m.against}</span> : null}
                         </p>
+                        {m.note ? <p class="measured__note">{m.note}</p> : null}
                         <a class="measured__link" href={evalUrl(m.doc)} rel="noopener">
                             the run
                         </a>
@@ -224,6 +225,13 @@ import CoverageBar from './CoverageBar.astro';
     }
     .measured__figure--weak b {
         font-size: var(--step-6);
+    }
+    .measured__note {
+        margin: var(--space-2) 0 0;
+        font-family: var(--font-mono);
+        font-size: var(--step--1);
+        line-height: 1.5;
+        color: var(--rose-soft);
     }
     .measured__weak-note {
         margin: 0;

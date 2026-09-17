@@ -1,0 +1,151 @@
+---
+/* The cache, after the pipe: everything a run fetched, embedded and decided
+   lands in one SQLite file, and the commands that look inside it. The 1.35 s
+   in the ledger above is what that file buys on the second run. */
+import { cacheCommands } from '../data/commands';
+import SketchBox from './sketch/SketchBox.astro';
+import SketchArrow from './sketch/SketchArrow.astro';
+
+const expiries = [
+    ['resolutions', '30 days'],
+    ['retraction hit', '30 days'],
+    ['retraction miss', '7 days'],
+    ['fetched text', '7 days'],
+    ['chunks, verdicts', 'while the text is unchanged'],
+] as const;
+---
+
+<div class="cache">
+    <div class="cache__text">
+        <h3 class="cache__title">Everything it read is in one file.</h3>
+        <p>
+            One plain SQLite file, no server, no extension. Raw publisher text expires after{' '}
+            <em class="key">seven days</em>; a verdict keeps <em class="key">the passage</em> it
+            quotes; a provider outage is <em class="key">never stored</em>. Open{' '}
+            <code>proofpath cache path</code> in DB Browser for SQLite, TablePlus or DBeaver — plain
+            tables. <code>proofpath resolve REF</code> and <code>proofpath fetch URL|DOI</code> run
+            either half on its own.
+        </p>
+        <SketchBox padding="md" draw class="cache__commands">
+            <div class="cache__pre" role="figure" aria-label="Cache commands">
+                {cacheCommands.map((c) => (
+                    <div class="cache__line">
+                        <span class="cache__prompt" aria-hidden="true">
+                            $&nbsp;
+                        </span>
+                        <span class="cache__cmd">{c.cmd}</span>
+                        {c.comment ? (
+                            <span class="cache__comment">{`  # ${c.comment}`}</span>
+                        ) : null}
+                    </div>
+                ))}
+            </div>
+        </SketchBox>
+    </div>
+    <div class="cache__side">
+        <div class="cache__arrow">
+            <SketchArrow direction="curve-down" size={56} />
+            <p class="marginalia">
+                since v0.2 the resolution, the retraction check, the text, the chunks and the
+                verdicts are all kept — the 1.35 s in the ledger is the second run of the draft in
+                the demo
+            </p>
+        </div>
+        <SketchBox padding="sm" tone="crimson" fill class="cache__expiry">
+            <dl class="cache__expiries">
+                {expiries.map(([what, how]) => (
+                    <div class="cache__expiry-row">
+                        <dt>{what}</dt>
+                        <dd>{how}</dd>
+                    </div>
+                ))}
+            </dl>
+        </SketchBox>
+    </div>
+</div>
+
+<style>
+    .cache {
+        display: grid;
+        gap: var(--space-6);
+        margin-top: var(--space-8);
+        padding-top: var(--space-7);
+        border-top: 1px solid var(--paper-line);
+    }
+    @media (min-width: 64rem) {
+        .cache {
+            grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
+            gap: var(--space-8);
+            align-items: start;
+        }
+    }
+    .cache__text {
+        display: grid;
+        gap: var(--space-4);
+        min-width: 0;
+    }
+    .cache__title {
+        font-size: var(--step-3);
+        max-width: 18ch;
+        margin: 0;
+    }
+    .cache__text p {
+        margin: 0;
+    }
+    .cache__text code {
+        white-space: nowrap;
+    }
+    .cache__pre {
+        font-family: var(--font-mono);
+        font-size: var(--step--1);
+        line-height: 1.6;
+        overflow-x: auto;
+    }
+    .cache__line {
+        display: grid;
+        grid-template-columns: auto 1fr;
+        white-space: nowrap;
+        padding-block: 0.15em;
+    }
+    .cache__prompt,
+    .cache__comment {
+        color: var(--ink-mute);
+    }
+    .cache__comment {
+        grid-column: 2;
+        display: block;
+        white-space: normal;
+    }
+    .cache__side {
+        display: grid;
+        gap: var(--space-4);
+        min-width: 0;
+    }
+    .cache__arrow {
+        display: flex;
+        gap: var(--space-3);
+        align-items: flex-start;
+    }
+    .cache__arrow .marginalia {
+        margin: 0;
+    }
+    .cache__expiries {
+        margin: 0;
+        font-family: var(--font-mono);
+        font-size: var(--step--1);
+        line-height: 1.55;
+    }
+    .cache__expiry-row {
+        display: grid;
+        grid-template-columns: minmax(0, 9.5rem) minmax(0, 1fr);
+        gap: var(--space-3);
+        padding-block: 0.15em;
+    }
+    .cache__expiry-row dt {
+        color: var(--crimson);
+    }
+    .cache__expiry-row dd {
+        margin: 0;
+        color: var(--ink-soft);
+    }
+</style>

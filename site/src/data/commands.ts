@@ -33,6 +33,18 @@ export const judgeCommands: readonly Command[] = [
     { cmd: 'proofpath config check', comment: 'proves the key works before you spend a run on it' },
 ];
 
+/* Everything a run fetched, embedded and decided is one SQLite file; these
+   look inside it. An empty comment prints no comment. */
+export const cacheCommands: readonly Command[] = [
+    {
+        cmd: 'proofpath cache',
+        comment: 'where it is, what it holds',
+    },
+    { cmd: 'proofpath cache ls', comment: 'sources, chunk/verdict counts, text expiry' },
+    { cmd: 'proofpath cache show <id>', comment: "one source's chunks and verdicts" },
+    { cmd: 'proofpath cache clear --expired', comment: '' },
+];
+
 /* The judge's line from the live run of 2026-09-15, beside the local verdict
    it did not replace (docs/eval/2026-09-15-judge-live.md). */
 export const judgeLine = {

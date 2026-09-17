@@ -15,6 +15,8 @@ export interface Measure {
     doc: string;
     /** Second figure, when the row carries a comparison. */
     against?: string;
+    /** A mono footnote under the row, for the caveat that belongs next to the number. */
+    note?: string;
     /** True for the row that reports a weakness. */
     weak?: boolean;
 }
@@ -45,6 +47,16 @@ export const measures: readonly Measure[] = [
         what: 'Citation pairing',
         set: '61 and 55 hand-built passages',
         doc: '2026-09-12-pairing-author-year.md',
+    },
+    {
+        id: 'speed',
+        figure: '1.35 s',
+        reading: 'second run · 79.3 s cold',
+        against:
+            'the second run asks the network for nothing; a 19-page arXiv PDF with 68 references: 12 m 57 s, then 3 m 42 s',
+        what: 'Speed',
+        set: '1-page draft, 7 references, Apple Silicon',
+        doc: '2026-09-15-v0.2-live.md',
     },
     {
         id: 'averitec',
