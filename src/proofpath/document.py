@@ -88,7 +88,7 @@ class PageError:
 # and pairing one of those by position would put a verdict on a source no sentence
 # cited (product rule 1). Said in the kind rather than guessed from the shape of the
 # document, because the guess is what got that wrong.
-Kind = Literal["pdf", "docx", "markdown", "text", "post", "linked"]
+Kind = Literal["pdf", "docx", "markdown", "text", "post", "linked", "page"]
 KIND_VALUES: tuple[str, ...] = get_args(Kind)
 #: The kinds whose references are the links in their own body.
 LINK_CITED: frozenset[str] = frozenset({"post", "linked"})

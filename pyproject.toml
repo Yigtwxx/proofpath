@@ -38,6 +38,9 @@ dependencies = [
     "httpx>=0.28",
     "curl_cffi>=0.16.1",
     "scrapling>=0.4.15",
+    # Pulled in by scrapling already; declared because ingest.py walks a page's
+    # tree with it directly.
+    "lxml>=5.0",
     "protego>=0.3",  # parses robots.txt for fetch-ladder steps 1-2
     "pymupdf>=1.25",
     "python-docx>=1.1",
@@ -64,6 +67,7 @@ dev = [
     "pytest>=8.3",
     "pytest-cov>=6.0",
     "mypy>=1.14",
+    "lxml-stubs>=0.5",  # types for the page walk in ingest.py
     "respx>=0.22",
     # Validates the SARIF writer's output against the vendored 2.1.0 schema.
     "jsonschema>=4.23",

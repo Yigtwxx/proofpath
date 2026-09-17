@@ -510,3 +510,18 @@ Findings from inspecting the installed base environment, and the decisions they 
 | 15.9 | The Reddit token exchange follows redirects with basic auth attached | httpx re-applies the credential along a redirect chain. The URL is a fixed Reddit constant, so it needs Reddit itself to be the attacker, but `follow_redirects=False` on that one call costs nothing |
 | 15.5 | `NO_REASON_RECORDED` is a user-visible state outside §15 | it is a guard that should never print; if it can print, it belongs in the table |
 | 15.6 | `NOT_READ_HERE` is provably unreachable through `verify` | kept deliberately for a sixth platform, like `checker_for`'s `arxiv:` row |
+
+## 16. Page targets — v0.4.4, 2026-09-17
+
+A bare address on any host that is not a platform is read as the document itself
+(`2026-09-17-page-target-design.md`).
+
+### New open items
+
+| # | Item | Note |
+|---|---|---|
+| 16.1 | No cap on a link-heavy page | a Wikipedia article carries hundreds of links and every paragraph's links are fetched as sources; coverage is reported and the run can be cancelled, but a cap with a reported remainder would be kinder |
+| 16.2 | A page's words and `href`s inside `PAGE_SKIP_TAGS` are dropped with the element | `aside`, `form`, `button`, `svg`, `template` on top of the ladder's boilerplate; a site that puts its citations in an `aside` loses them silently |
+| 16.5 | `find_bibliography` knows five headings | a page (or paper) whose list sits under "Sources", "Notes", "Footnotes" or "Citations" is not seen to print one; a page then cites by its links and says so (`MARKERS_SET_ASIDE`), a paper reports its markers unresolved. Widening `_BIBLIOGRAPHY_HEADING` needs the eval sets re-run, so it is not done here |
+| 16.4 | A page's self-link rule ignores the query | `_page_key` drops `?utm_source=` and `?page=2` alike, so a page that keys its articles by query (`?id=123`) would drop a link to a sibling article as a link to itself; no such page has been seen |
+| 16.3 | Scheme-less links in pasted text are not references | `resolve._HTTP_URL` wants `http(s)://`; `nature.com/articles/…` in a pasted paragraph is verified against nothing |

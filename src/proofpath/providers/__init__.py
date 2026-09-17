@@ -100,7 +100,12 @@ class FetchesUrl(Protocol):
     network_note: str
 
     def fetch(
-        self, url: str, *, text_kind: str = "fulltext", counts_as_source: bool = True
+        self,
+        url: str,
+        *,
+        text_kind: str = "fulltext",
+        counts_as_source: bool = True,
+        use_cache: bool = True,
     ) -> Fetched: ...
 
     def summary(self) -> FetchStats: ...

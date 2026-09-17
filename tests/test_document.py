@@ -150,7 +150,7 @@ def test_page_error_records_the_page_it_failed_on() -> None:
 
 
 def test_kind_values_are_the_supported_inputs_and_the_two_that_cite_by_linking() -> None:
-    assert KIND_VALUES == ("pdf", "docx", "markdown", "text", "post", "linked")
+    assert KIND_VALUES == ("pdf", "docx", "markdown", "text", "post", "linked", "page")
     # ``claims.extract`` pairs a document against the links in its own body for
     # exactly these two and nothing else (spec section 6.2, product rule 1).
     assert set(LINK_CITED) == {"post", "linked"}

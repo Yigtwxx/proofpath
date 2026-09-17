@@ -518,6 +518,7 @@ uv tool install proofpath             # everything except the browser engine
 proofpath                                  # bare command → interactive TUI
 proofpath check paper.pdf                  # academic provider (default)
 proofpath check --url https://bsky.app/... # social provider
+proofpath check --url https://example.org/story  # any other page, read as the document (2026-09-17-page-target-design.md)
 proofpath check draft.md --format sarif    # inline problems in VS Code
 proofpath check paper.pdf --judge llm      # opt-in second opinion
 

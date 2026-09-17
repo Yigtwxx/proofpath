@@ -102,7 +102,12 @@ class StubFetcher:
         self.network_note = ""
 
     def fetch(
-        self, url: str, *, text_kind: str = "fulltext", counts_as_source: bool = True
+        self,
+        url: str,
+        *,
+        text_kind: str = "fulltext",
+        counts_as_source: bool = True,
+        use_cache: bool = True,
     ) -> Fetched:
         return self.pages.get(url, unreachable(url))
 
@@ -162,6 +167,7 @@ def built_engine(
     *,
     resolver: StubResolver | None = None,
     chain: StubOpenAccess | None = None,
+    fetcher: StubFetcher | None = None,
     embedder: Embedder | None = None,
     scorer: object | None = None,
 ) -> Engine:
@@ -170,7 +176,7 @@ def built_engine(
         config=Config(),
         cache=None,
         resolver=resolver or StubResolver({"Vaswani": resolved()}),
-        fetcher=StubFetcher(),
+        fetcher=fetcher or StubFetcher(),
         oa=chain or StubOpenAccess({DOI: text_evidence(PAPER)}),
         gate=ConsentGate("deny", interactive=False),
         embedder=lambda: embedder if embedder is not None else WordEmbedder(),
@@ -238,6 +244,67 @@ def test_a_clean_draft_prints_the_stage_table_and_footer_and_exits_0(
     assert "abstract   0%" in result.stdout
     assert "unverified 0%" in result.stdout
     assert "report.md written" in result.stdout
+
+
+PAGE_URL = "https://example.test/news/story"
+SOURCE_URL = "https://other.test/report"
+
+
+def html_page(url: str, body: bytes, text: str = "") -> Fetched:
+    """``body`` is what a page read as the document is cut up; ``text`` is what a
+    source is graded on."""
+    return Fetched(
+        url=url,
+        final_url=url,
+        step=1,
+        outcome=Outcome.OK,
+        status=200,
+        content_type="text/html",
+        kind="html",
+        body=body,
+        text=text,
+        notes=[],
+    )
+
+
+def test_check_url_on_a_page_reads_the_page_as_the_document(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A bare address on a host that is not a platform is the page at that address:
+    its paragraphs are the claims and the links they carry are the sources."""
+    story = f"<article><p><a href='{SOURCE_URL}'>{SUPPORTING}</a></p></article>"
+    install(
+        monkeypatch,
+        built_engine(
+            fetcher=StubFetcher(
+                {
+                    PAGE_URL: html_page(PAGE_URL, story.encode()),
+                    # Long enough to be full text rather than "abstract only".
+                    SOURCE_URL: html_page(
+                        SOURCE_URL, b"", PAPER + " Appendix on tokenisers." * 600
+                    ),
+                }
+            )
+        ),
+    )
+
+    result = runner.invoke(app, ["check", "--url", PAGE_URL])
+
+    assert result.exit_code == 0, result.output
+    assert "  Parsing" in result.stdout and "fetch ladder" in result.stdout
+    assert "1 claim: 1 supported" in result.stdout
+    assert "1 refs: 1 ok" in result.stdout
+
+
+def test_check_url_on_a_page_the_ladder_cannot_read_is_an_error_not_a_verdict(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    install(monkeypatch, built_engine(fetcher=StubFetcher()))
+
+    result = runner.invoke(app, ["check", "--url", PAGE_URL])
+
+    assert result.exit_code == 2, result.output
+    assert f"{PAGE_URL} could not be read: {Outcome.UNREACHABLE.value}" in result.output
 
 
 def test_a_finding_is_printed_as_a_diagnostic_and_exits_1(

@@ -504,7 +504,10 @@ def check(
         str | None,
         typer.Option(
             "--url",
-            help="A post to check instead of a file: Bluesky, Hacker News, Reddit or Mastodon.",
+            help=(
+                "An address to check instead of a file: a post (Bluesky, Hacker News, "
+                "Reddit, Mastodon) or any other page, read as the document itself."
+            ),
         ),
     ] = None,
     fmt: Annotated[Format, typer.Option("--format", help="Output format.")] = Format.TEXT,
@@ -681,8 +684,8 @@ def _flush_streams() -> None:
 def _check_target(out: ui.Ui, target: str | None, url: str | None) -> tuple[Path | str, str | None]:
     """The document and the name its locations carry.
 
-    ``--url`` is a post, handed on as the address it is: what can be read at one is
-    ``verify``'s to decide, not the CLI's. ``-`` is the document itself, arriving on
+    ``--url`` is a post or a page, handed on as the address it is: what can be read
+    at one is ``verify``'s to decide, not the CLI's. ``-`` is the document itself, arriving on
     stdin and named for where it came from; anything else is a file that has to
     exist, and a file names itself.
     """
