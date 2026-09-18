@@ -176,6 +176,17 @@ NO_DOCUMENT = "UNVERIFIED (the provider returned no document)"
 # text to check any of it against, and the report has to tell the two apart (rule 6).
 NOTHING_TO_VERIFY = "nothing to verify"
 
+# What the parsing stage says of pasted text that neither links nor cites anything:
+# a bare claim. The tool never goes looking for evidence of its own (README: it
+# checks the sources *behind* a claim), so a claim with no source behind it ends
+# with the stages all at zero -- which, unsaid, looks exactly like a clean run to
+# the reader who typed it (product rule 6). The hint says what to paste instead.
+NO_SOURCE_IN_TEXT = "the text links or cites no source; nothing to verify against"
+NO_SOURCE_HINT = (
+    "proofpath checks a claim against the sources it cites, and does not search for "
+    "any: paste the claim with its source's address, or the address itself"
+)
+
 # Said *before* the factories run rather than after: the first use of either model
 # downloads it, which takes minutes, and a front end that says nothing here looks hung.
 LOADING_MODELS = "loading models …"
@@ -459,12 +470,8 @@ def target_document(
     address = _bare_address(target)
     if address is not None:
         return _address_document(address, client, fetcher, network_allowed=network_allowed)[0]
-    if isinstance(target, Path):
-        return ingest.load(target)
-    with suppress(OSError, ValueError):
-        path = Path(target)
-        if path.is_file():
-            return ingest.load(path)
+    if _is_file(target):
+        return ingest.load(Path(target))
     return _pasted(target, name or "pasted text")
 
 
@@ -498,6 +505,15 @@ def _target(
         ),
         (),
     )
+
+
+def _is_file(target: Path | str) -> bool:
+    """Whether the target is a file on disk, by the same test ``target_document`` uses."""
+    if isinstance(target, Path):
+        return True
+    with suppress(OSError, ValueError):
+        return Path(target).is_file()
+    return False
 
 
 def _bare_address(target: Path | str) -> str | None:
@@ -739,6 +755,24 @@ def prepare(
                 Kind.PARSE_ERROR,
                 Locator(line=1),
                 f"{document.kind} carries no links; nothing to verify against",
+            )
+        )
+    elif document.paragraphs and not document.references and not claims_mod.find_markers(document):
+        # A file or pasted text that neither prints a bibliography nor links nor
+        # marks a citation. The same silence as a post with no links, and reported
+        # for the same reason; pasted text also gets told what to paste instead,
+        # because the one who typed a bare claim is at the keyboard right now. Not
+        # by ``reader``: a paste ending in ".pdf" is parsed as text but named by its
+        # suffix, and the one thing every paste shares is not being a file.
+        pasted = not _is_file(target)
+        add(
+            _finding(
+                Kind.PARSE_ERROR,
+                Locator(line=1),
+                NO_SOURCE_IN_TEXT
+                if pasted
+                else f"{document.kind} cites nothing; nothing to verify against",
+                detail=(NO_SOURCE_HINT,) if pasted else (),
             )
         )
     if not document.paragraphs and not document.references:

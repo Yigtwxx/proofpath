@@ -63,6 +63,8 @@ from proofpath.verify import (
     MARKERS_SET_ASIDE,
     NO_IDENTIFIER,
     NO_MODEL,
+    NO_SOURCE_HINT,
+    NO_SOURCE_IN_TEXT,
     NO_TEXT,
     NOT_ATTEMPTED,
     NOTHING_TO_VERIFY,
@@ -421,6 +423,40 @@ def test_a_page_with_no_links_is_reported_rather_than_read_as_clean() -> None:
     assert ready.claims.claims == ()
     titles = [f.title for f in ready.findings if f.kind is Kind.PARSE_ERROR]
     assert titles == ["page carries no links; nothing to verify against"]
+
+
+def test_a_bare_claim_with_no_source_is_reported_rather_than_read_as_clean() -> None:
+    """A claim pasted without any address or citation has nothing behind it to check.
+    The run says so and says what to paste instead, rather than ending on an empty
+    stage list that looks exactly like a clean one (product rule 6)."""
+    ready = prepare("ChatGPT was shut down yesterday.", engine())
+
+    assert ready.document.kind == "text"
+    assert ready.document.references == ()
+    assert ready.claims.claims == ()
+    parse_errors = [f for f in ready.findings if f.kind is Kind.PARSE_ERROR]
+    assert [f.title for f in parse_errors] == [NO_SOURCE_IN_TEXT]
+    assert parse_errors[0].detail == (NO_SOURCE_HINT,)
+
+
+def test_a_pasted_claim_ending_in_a_file_suffix_still_gets_the_paste_hint() -> None:
+    """``_parser_for`` names a parser by suffix before anything is read; the hint
+    must not depend on that guess, only on the target not being a file."""
+    ready = prepare("ChatGPT was shut down, see notes.pdf", engine())
+
+    parse_errors = [f for f in ready.findings if f.kind is Kind.PARSE_ERROR]
+    assert [f.title for f in parse_errors] == [NO_SOURCE_IN_TEXT]
+    assert parse_errors[0].detail == (NO_SOURCE_HINT,)
+
+
+def test_a_file_that_cites_nothing_is_reported_without_the_paste_hint(tmp_path: Path) -> None:
+    path = tmp_path / "notes.txt"
+    path.write_text("A note that cites nothing at all.\n", encoding="utf-8")
+    ready = prepare(path, engine())
+
+    parse_errors = [f for f in ready.findings if f.kind is Kind.PARSE_ERROR]
+    assert [f.title for f in parse_errors] == ["text cites nothing; nothing to verify against"]
+    assert parse_errors[0].detail == ()
 
 
 def test_a_page_that_prints_a_bibliography_is_paired_by_number() -> None:
