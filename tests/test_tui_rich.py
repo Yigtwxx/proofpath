@@ -9,17 +9,23 @@ the proof that the second look draws the same truth.
 from __future__ import annotations
 
 from dataclasses import replace
+from pathlib import Path
 from typing import Any
 
 import pytest
 from rich.cells import cell_len
+from rich.text import Text
 from textual.content import Content
+from textual.style import Style
+from textual.widgets import Static
 
 from proofpath import __version__, ui, verify
+from proofpath.config import Config
 from proofpath.document import Claim, Locator, Reference
 from proofpath.events import Emitted, Note, Progress, StageEnd, StageStart
-from proofpath.tui import banner, wordmark
+from proofpath.tui import banner, commands, wordmark
 from proofpath.tui.app import (
+    HINT,
     Banner,
     CoverageFooter,
     FindingLine,
@@ -27,9 +33,13 @@ from proofpath.tui.app import (
     RunBlock,
     RunHeader,
     StageLine,
+    Suggestions,
+    run_context,
 )
 from proofpath.tui.theme import PLAIN, RICH
-from proofpath.tui.widgets import PANEL_FLOOR, CoverageLine
+from proofpath.tui.widgets import PANEL_FLOOR, CoverageLine, FrameEdge, Prompt
+from proofpath.tui.widgets.config_panel import BADGE_INK, ConfigPanel, PanelLine
+from proofpath.tui.widgets.prompt import TINT_ALPHA
 from proofpath.tui.widgets.run_block import NoteLine
 from tests.test_tui_app import (
     FakeScheduler,
@@ -38,11 +48,14 @@ from tests.test_tui_app import (
     a_verdict_finding,
     build_app,
     submit,
+    type_into,
 )
 
 SIZE = (100, 34)
 #: The run's accent at ``SIZE``: run #1 takes the first of the five.
 ACCENT = RICH.accents[0]
+#: The four parts of the bar's frame that go below the panel floor (design section 9).
+FRAME_PARTS = ("#frame-top", "#frame-bottom", "#edge-left", "#edge-right")
 
 
 def rich_app(**kwargs: Any) -> tuple[ProofpathApp, list[FakeScheduler]]:
@@ -474,18 +487,141 @@ async def test_a_click_on_the_top_border_folds_the_run_and_keeps_its_coverage() 
         assert not block.collapsed
 
 
+def spans_of(text: Text) -> list[tuple[str, str]]:
+    """Each span of ``text`` as ``(its plain text, its style)``, in order."""
+    return [(text.plain[s.start : s.end], str(s.style)) for s in text.spans]
+
+
 async def test_two_panels_wear_two_accents_and_so_does_the_prompt() -> None:
+    """The caret follows the next run's accent; the frame around it does not: it is
+    drawn in the wordmark's five bands, light at the left and dark at the right
+    (wordmark design section 9), whatever run is next."""
     app, schedulers = rich_app()
     async with app.run_test(size=SIZE) as pilot:
         await submit(pilot, "/check one.md")
-        row = app.query_one("#prompt-row")
-        assert row.styles.border.top[1].hex.lower() == RICH.accents[0]
+        caret = app.query_one("#caret", Static)
+        assert spans_of(caret.render()) == [(RICH.glyphs.prompt, RICH.accents[0])]  # type: ignore[arg-type]
         await submit(pilot, "/check two.md")
         blocks = list(app.query(RunBlock))
         assert [block.accent for block in blocks] == [RICH.accents[0], RICH.accents[1]]
-        assert row.styles.border.top[1].hex.lower() == RICH.accents[1]
-        assert app.query_one("#caret").render().plain == RICH.glyphs.prompt  # type: ignore[attr-defined]
+        assert spans_of(caret.render()) == [(RICH.glyphs.prompt, RICH.accents[1])]  # type: ignore[arg-type]
+        top = app.query_one("#frame-top", FrameEdge)
+        width = top.region.width
+        rendered = top.render()
+        assert rendered.plain == "╭" + "─" * (width - 2) + "╮"
+        painted = spans_of(rendered)
+        # Five spans, one per band, that together cover the whole row.
+        assert [style for _, style in painted] == [RICH.banner[t] for t in wordmark.GRADIENT_TONES]
+        assert "".join(text for text, _ in painted) == rendered.plain
+        assert painted[0][0].startswith("╭") and painted[0][1] == RICH.banner["g0"]
+        assert painted[-1][0].endswith("╮") and painted[-1][1] == RICH.banner["g4"]
+        bottom = app.query_one("#frame-bottom", FrameEdge).render()
+        assert bottom.plain == "╰" + "─" * (width - 2) + "╯"
+        assert [style for _, style in spans_of(bottom)] == [style for _, style in painted]
+        left = app.query_one("#edge-left", Static).render()
+        right = app.query_one("#edge-right", Static).render()
+        assert spans_of(left) == [("│ ", RICH.banner["g0"])]  # type: ignore[arg-type]
+        assert spans_of(right) == [(" │", RICH.banner["g4"])]  # type: ignore[arg-type]
     assert len(schedulers[0].submitted) == 2
+
+
+async def test_the_prompt_keeps_its_width_inside_the_frame() -> None:
+    """The frame replaces a CSS border row for row and column for column: the bar
+    is exactly as wide as it was, and its last column is on screen."""
+    app, _ = rich_app()
+    async with app.run_test(size=SIZE) as pilot:
+        prompt = app.query_one(Prompt)
+        # 92 is today's width, measured on ``main`` before the frame: the row was 98
+        # wide inside its margins, the border took one column each side, the padding
+        # another, and the caret two. (``Prompt.region.width`` read 94 then, but the
+        # last two of those overflowed the row and were clipped -- 92 were drawn.)
+        assert prompt.region.width == 92
+        assert prompt.region.x == 5
+        await pilot.press(*("a" * 150))
+        await pilot.pause()
+        # Every column of the bar is drawn: the cursor at the end of a long line is
+        # inside the frame, not under its right edge.
+        row_y = prompt.region.y
+        assert app.screen.get_widget_at(prompt.region.right - 1, row_y)[0] is prompt
+        assert app.screen.get_widget_at(prompt.region.right, row_y)[0].id == "edge-right"
+        assert app.query_one("#edge-left").region.x == 1
+        assert app.query_one("#edge-right").region.right == SIZE[0] - 1
+        assert app.query_one("#frame-top").region.width == SIZE[0] - 2
+        assert app.query_one("#bottom").region.height == 7
+    app, _ = build_app()
+    async with app.run_test(size=(80, 24)):
+        # 76 is today's width in ``plain`` at ``test_tui_app``'s ``SIZE``, measured
+        # the same way (a region of 78, two of them clipped).
+        prompt = app.query_one(Prompt)
+        assert prompt.region.width == 76
+        assert prompt.region.x == 3
+        assert app.query_one("#bottom").region.height == 4
+
+
+# --- the suggestion list (wordmark design section 10) ----------------------------------
+
+
+def _backgrounds(content: Content) -> list[tuple[int, int, float]]:
+    """Every background span of ``content`` as ``(start, end, alpha)``."""
+    return [
+        (span.start, span.end, span.style.background.a)
+        for span in content.spans
+        if isinstance(span.style, Style) and span.style.background is not None
+    ]
+
+
+async def test_the_selected_row_is_tinted_in_rich_and_marked_in_plain() -> None:
+    app, _ = rich_app()
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "/check one.md")  # the caret now wears run #1's accent
+        await type_into(pilot, "/")
+        await pilot.press("down")
+        suggestions = app.query_one(Suggestions)
+        content = suggestions.render()
+        assert isinstance(content, Content)
+        lines = content.plain.split("\n")
+        assert len(lines) == len(commands.VERBS)
+        # No marker column in RICH: the completion starts the row.
+        assert lines[0].startswith("/check")
+        starts = [sum(len(line) + 1 for line in lines[:index]) for index in range(len(lines))]
+        selected = 1
+        tinted = _backgrounds(content)
+        assert len(tinted) == 1
+        start, end, alpha = tinted[0]
+        assert alpha == pytest.approx(TINT_ALPHA)
+        assert start == starts[selected]
+        assert end == starts[selected] + len(lines[selected])
+        # The tinted row reaches the widget's edge, and the tint is the caret's accent
+        # (the current run's), not the frame's gradient.
+        assert len(lines[selected]) == suggestions.size.width
+        tint = next(
+            span.style.background
+            for span in content.spans
+            if span.start == start and isinstance(span.style, Style)
+        )
+        caret_accent = spans_of(app.query_one("#caret", Static).render())[0][1]  # type: ignore[arg-type]
+        assert caret_accent == RICH.accents[0]
+        assert tint.hex[:7].lower() == caret_accent.lower()
+        # Muted text, except the completion column.
+        muted = [
+            (span.start, span.end)
+            for span in content.spans
+            if isinstance(span.style, Style) and span.style.foreground is not None
+        ]
+        assert muted
+        assert all(
+            start > starts[row] for row, (start, _) in zip(range(len(lines)), muted, strict=True)
+        )
+        # The rows sit inside the bar's frame gap: directly above the frame's top edge.
+        assert suggestions.region.bottom == app.query_one("#frame-top").region.y
+        assert app.query_one("#bottom").region.height == 7 + len(lines)
+    app, _ = build_app()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await type_into(pilot, "/")
+        suggestions = app.query_one(Suggestions)
+        assert suggestions.held[0].startswith("> /check")
+        assert all(row.startswith("  /") for row in suggestions.held[1:])
+        assert _backgrounds(suggestions.render()) == []  # type: ignore[arg-type]
 
 
 # --- the footer ----------------------------------------------------------------------
@@ -544,10 +680,13 @@ async def test_a_forced_rich_theme_without_colour_still_draws_its_frames() -> No
         run = await a_run(pilot, schedulers)
         schedulers[0].move(run, "done", report=a_report())
         await pilot.pause()
-        row = app.query_one("#prompt-row")
         block = app.query_one(RunBlock)
-        assert row.styles.border.top[0] == "round"
-        assert row.styles.border.top[1].ansi == -1  # the terminal's default colour
+        top = app.query_one("#frame-top", FrameEdge).render()
+        # The frame is still drawn, in the terminal's default colour: no spans.
+        assert top.plain == "╭" + "─" * (top.cell_len - 2) + "╮"
+        assert top.spans == []
+        assert app.query_one("#edge-left", Static).render().spans == []  # type: ignore[attr-defined]
+        assert app.query_one("#edge-right", Static).render().spans == []  # type: ignore[attr-defined]
         assert block.styles.border.top[1].ansi == -1
         assert Content.from_markup(block.border_title or "").plain.endswith(" done")
         assert "[" not in (block.border_subtitle or "")  # no markup without colour
@@ -564,15 +703,34 @@ async def test_the_rich_banner_is_the_wordmark_with_the_text_under_it() -> None:
         mark = app.query_one(Banner)
         drawn = mark.drawn
         assert drawn is not None
-        assert mark.region.height == 8
-    assert len(drawn.lines) == 8
+        assert mark.region.height == 9
+    where = wordmark.rows(SIZE[0], version=__version__, context=run_context(Config()), hint=HINT)
+    assert where.beside is False
+    assert len(drawn.lines) == 9
     assert drawn.lines[:6] == wordmark.WORDMARK
-    assert drawn.lines[wordmark.VERSION_ROW].startswith(f"proofpath v{__version__}")
-    assert drawn.lines[wordmark.HINT_ROW].endswith("/help  /config  /quit")
+    assert drawn.lines[where.version].startswith(f"proofpath v{__version__}")
+    assert drawn.lines[where.hint].endswith("/help  /config  /quit")
+    assert drawn.lines[where.rule] == wordmark.RULE * (SIZE[0] - banner.RIGHT_MARGIN)
     for line in drawn.lines:
-        assert cell_len(line) == len(line) <= 100, line
+        assert cell_len(line) == len(line) <= SIZE[0], line
     allowed = set(wordmark.BLOCK + wordmark.SHADOW + " ")
     assert all(set(line) <= allowed for line in drawn.lines[:6])
+
+
+async def test_on_a_wide_terminal_the_text_sits_beside_the_mark() -> None:
+    app, _ = rich_app()
+    async with app.run_test(size=(140, 24)) as pilot:
+        await pilot.pause()
+        mark = app.query_one(Banner)
+        drawn = mark.drawn
+        assert drawn is not None
+        assert mark.region.height == 7
+    assert len(drawn.lines) == 7
+    assert drawn.lines[3].startswith(wordmark.WORDMARK[3])
+    assert drawn.lines[3].endswith("/help  /config  /quit")
+    assert drawn.lines[2].startswith(wordmark.WORDMARK[2])
+    assert drawn.lines[2].endswith(run_context(Config()))
+    assert drawn.lines[-1] == wordmark.RULE * (140 - banner.RIGHT_MARGIN)
 
 
 async def test_the_rich_wordmark_is_painted_in_the_theme_tones() -> None:
@@ -580,11 +738,14 @@ async def test_the_rich_wordmark_is_painted_in_the_theme_tones() -> None:
     async with app.run_test(size=SIZE):
         text = app.query_one(Banner).render()
     styles = {str(span.style) for span in text.spans}
-    assert RICH.banner["dark"] in styles and RICH.banner["light"] in styles
+    assert RICH.banner["g0"] in styles
+    assert RICH.banner["g4"] in styles
+    assert RICH.banner["shadow"] in styles
     # The text lines are not coloured.
     plain_rows = text.plain.split("\n")
-    for row in (wordmark.VERSION_ROW, wordmark.HINT_ROW):
-        text_start = sum(len(line) + 1 for line in plain_rows[:row]) + wordmark.TEXT_COLUMN
+    where = wordmark.rows(SIZE[0], version=__version__, context=run_context(Config()), hint=HINT)
+    for row in (where.version, where.hint):
+        text_start = sum(len(line) + 1 for line in plain_rows[:row])
         assert not any(span.start <= text_start < span.end for span in text.spans), row
 
 
@@ -595,18 +756,21 @@ async def test_the_wordmark_carries_no_styles_without_colour() -> None:
     assert text.spans == []
 
 
-async def test_the_wordmark_gives_way_to_the_plain_banner_below_the_floor() -> None:
+async def test_the_wordmark_gives_way_to_the_text_alone_below_the_floor() -> None:
     app, _ = rich_app()
     async with app.run_test(size=(69, 24)) as pilot:
         drawn = app.query_one(Banner).drawn
         assert drawn is not None
         assert drawn.lines[:6] == wordmark.WORDMARK
-        assert drawn.lines[wordmark.HINT_ROW].endswith("/help  /config  /quit")
+        assert drawn.lines[7].endswith("/help  /config  /quit")
         await pilot.resize_terminal(68, 24)
         await pilot.pause()
-        drawn = app.query_one(Banner).drawn
+        mark = app.query_one(Banner)
+        drawn = mark.drawn
         assert drawn is not None
-        assert drawn.lines[0] == banner.ART[0]
+        assert drawn.lines[0].startswith(f"proofpath v{__version__}")
+        assert len(drawn.lines) == 3
+        assert mark.region.height == 3
 
 
 # --- widths ----------------------------------------------------------------------------
@@ -665,6 +829,12 @@ async def test_narrow_terminals_get_the_flat_rows_and_the_panel_comes_back_on_re
         assert not block.panelled
         assert app.query_one(RunHeader).display
         assert app.query_one("#bottom").has_class("narrow")
+        # Below the panel floor the bar is one flat row: the frame's rows and edges
+        # are hidden, and the caret still starts it (wordmark design section 9).
+        assert app.query_one("#bottom").region.height == 5
+        assert not any(app.query_one(selector).display for selector in FRAME_PARTS)
+        assert app.query_one("#prompt-row").region.height == 1
+        assert app.query_one("#caret").region.x == 1
         # Today's two-line stage row, with the theme's own glyphs.
         assert rows_of(app.query_one(StageLine).render().plain)[0].startswith("✓ Parsing")
         assert "24 pages, 42 refs" in rows_of(app.query_one(StageLine).render().plain)[1]
@@ -673,6 +843,9 @@ async def test_narrow_terminals_get_the_flat_rows_and_the_panel_comes_back_on_re
         assert block.panelled
         assert not app.query_one(RunHeader).display
         assert not app.query_one("#bottom").has_class("narrow")
+        assert all(app.query_one(selector).display for selector in FRAME_PARTS)
+        assert app.query_one("#bottom").region.height == 7
+        assert app.query_one("#frame-top").region.width == 98
         assert "24 pages · 42 refs" in app.query_one(StageLine).render().plain
 
 
@@ -752,3 +925,49 @@ async def test_a_rich_render_uses_only_single_cell_glyphs() -> None:
     for text in texts:
         for row in rows_of(text):
             assert cell_len(row) == len(row) <= 80, row
+
+
+# --- the config panel (wordmark design section 12) -------------------------------------
+
+
+async def test_the_config_panel_marks_the_row_badges_the_value_and_wears_the_accent(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # This file has no ``isolated`` fixture of its own: the panel reads a real file
+    # and looks for a real key, so both are pointed at the test's own directory.
+    monkeypatch.setenv("PROOFPATH_CONFIG_DIR", str(tmp_path / "conf"))
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    monkeypatch.chdir(tmp_path)
+    app, _ = rich_app()
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "/config")
+        await pilot.pause()
+        panel = app.query_one(ConfigPanel)
+        assert panel.styles.border.top[0] == "round"
+        assert panel.styles.border.top[1].hex.lower() == ACCENT
+        assert panel.border_title == "/config"
+        lines = [line.render() for line in panel.query(PanelLine) if line.display]
+        await pilot.press("down")
+        moved = [line.render().plain for line in panel.query(PanelLine) if line.display]
+    plain = [line.plain for line in lines]
+    assert plain[0].startswith(" config   ")
+    assert plain[1].startswith(" key      GROQ_API_KEY · not set — put GROQ_API_KEY=… in ")
+    row = next(line for line in lines if "install_browser" in line.plain)
+    marker = RICH.glyphs.prompt
+    assert row.plain == f"{marker} install_browser   ask   allow   deny"
+    spans = {row.plain[span.start : span.end]: str(span.style) for span in row.spans}
+    # The current value is a badge in the panel's accent, the others muted (the same
+    # convention the findings' state words follow).
+    assert spans[" ask "] == f"{BADGE_INK} on {ACCENT}"
+    assert spans["allow"] == RICH.tone("muted")
+    assert spans[marker] == ACCENT
+    assert plain[-1] == " ↑↓ row   ←→ change   enter edit text   backspace default   esc close"
+    # The marker moves with the selection and nothing else about the rows changes.
+    assert next(line for line in moved if "network" in line).startswith(f"{marker} network")
+    assert next(line for line in moved if "install_browser" in line).startswith("  install")
+    # Single-cell glyphs throughout, and every row but the two that carry a path (the
+    # machine's, as long as it is) fits inside the panel at 100 columns.
+    for text in plain[2:]:
+        assert cell_len(text) == len(text) <= SIZE[0] - 6, text
+    for text in plain[:2]:
+        assert cell_len(text) == len(text), text

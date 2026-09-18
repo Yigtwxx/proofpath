@@ -74,8 +74,13 @@ def provider_defaults(name: str) -> JudgeConfig:
     try:
         return _PROVIDERS[name]
     except KeyError:
-        known = ", ".join(sorted(_PROVIDERS))
+        known = ", ".join(known_providers())
         raise JudgeError(f"unknown provider {name!r}; known: {known}") from None
+
+
+def known_providers() -> tuple[str, ...]:
+    """Every provider ``provider_defaults`` accepts, in the order its error lists them."""
+    return tuple(sorted(_PROVIDERS))
 
 
 def _no_key_detail(env_name: str) -> str:

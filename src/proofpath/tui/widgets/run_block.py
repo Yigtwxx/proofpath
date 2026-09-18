@@ -18,7 +18,7 @@ from textual.app import ComposeResult
 from textual.containers import Vertical
 from textual.geometry import Size
 from textual.markup import escape
-from textual.widget import Widget
+from textual.widget import AwaitMount, Widget
 from textual.widgets import Static
 
 from proofpath import ui
@@ -59,9 +59,6 @@ HONESTY_COUNT = re.compile(
     r"(?:unverified|ghost|amb(?:iguous)?|retracted|unavailable|not indexed|unresolved|NEI)\b"
     r"|^not attempted\b"
 )
-#: The title's fill between the command and the state word, drawn in the border's
-#: own colour so the word reads as part of the frame (design section 4).
-TITLE_FILL = "─"
 #: The state words a run's border subtitle draws, by the meaning each carries. The
 #: two busy states take the run's accent instead (design section 4).
 STATE_MEANINGS: dict[str, Meaning] = {
@@ -354,9 +351,10 @@ class CommandBlock(Vertical):
         self._working.update(Text(f"  {self.command}"))
         self._lines.mount_all([KvLine(line) for line in lines])
 
-    def ask(self, prompt: PermissionPrompt) -> None:
-        """Where a ``/fetch`` that hit the section 7.1 wall puts its question."""
-        self._lines.mount(prompt)
+    def ask(self, prompt: PermissionPrompt) -> AwaitMount:
+        """Where a ``/fetch`` that hit the section 7.1 wall puts its question. The
+        mount is handed back so the app can scroll to it once it is on screen."""
+        return self._lines.mount(prompt)
 
 
 class RunBlock(Vertical):
@@ -500,9 +498,11 @@ class RunBlock(Vertical):
             # was not are different runs (rule 6).
             self._add(self._stages, NoteLine(event.text, self._theme))
 
-    def ask(self, prompt: PermissionPrompt) -> None:
-        """Mount the section 7.1 question under the stage that ran into it."""
-        self._add(self._stages, prompt)
+    def ask(self, prompt: PermissionPrompt) -> AwaitMount | None:
+        """Mount the section 7.1 question under the stage that ran into it. The mount
+        is handed back so the app can scroll to it once it is on screen; ``None``
+        when the block itself is not on screen yet and the question is queued."""
+        return self._add(self._stages, prompt)
 
     def toggle(self) -> None:
         """Fold the run away, or open it again. The frame always stays (rule 6).
@@ -538,7 +538,7 @@ class RunBlock(Vertical):
             limit = max(inner - len(word) - 2, 2)
             if len(command) > limit:
                 command = command[: limit - 1] + "…"
-            fill = TITLE_FILL * max(inner - len(command) - len(word) - 2, 0)
+            fill = self._theme.glyphs.title_fill * max(inner - len(command) - len(word) - 2, 0)
             self.border_title = f"{escape(command)} {fill} {state}"
         else:
             self.border_title = f"{escape(command)} {state}"
@@ -584,12 +584,12 @@ class RunBlock(Vertical):
         self.summarised = True
         self._add(self._findings, KvLine(line))
 
-    def _add(self, parent: Widget, child: Widget) -> None:
+    def _add(self, parent: Widget, child: Widget) -> AwaitMount | None:
         """Mount ``child``, or queue it when this block is not on screen yet."""
         if self._ready:
-            parent.mount(child)
-        else:
-            self._pending.append((parent, child))
+            return parent.mount(child)
+        self._pending.append((parent, child))
+        return None
 
     def _settle_transient(self) -> None:
         """Take back the transient note lines: what they described is over."""

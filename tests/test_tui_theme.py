@@ -231,7 +231,7 @@ def test_rich_tones_are_truecolor():
 def test_every_plain_glyph_is_ascii():
     for field in fields(Glyphs):
         value = getattr(PLAIN.glyphs, field.name)
-        assert value.isascii(), (field.name, value)
+        assert "".join(value).isascii(), (field.name, value)
 
 
 def test_plain_has_no_box_and_rich_has_a_round_one():
@@ -248,6 +248,8 @@ def test_rich_glyphs_are_the_design_set():
     assert (g.bar_full, g.bar_empty) == ("▰", "▱")
     assert (g.cov_full, g.cov_abstract, g.cov_unverified) == ("█", "▓", "░")
     assert (g.rule, g.copy, g.prompt, g.sep) == ("─", "⧉", "›", "·")  # noqa: RUF001
+    assert (g.box, g.title_fill) == ("round", "─")
+    assert g.frame == ("╭", "╮", "╰", "╯", "─", "│")
 
 
 def test_plain_glyphs_are_the_design_set():
@@ -257,15 +259,23 @@ def test_plain_glyphs_are_the_design_set():
     assert (g.bar_full, g.bar_empty) == ("#", "-")
     assert (g.cov_full, g.cov_abstract, g.cov_unverified) == ("#", "=", ".")
     assert (g.rule, g.copy, g.prompt, g.sep) == ("-", "[copy]", ">", ",")
+    # No frame and no panel title in PLAIN, but nothing is spelled in a widget.
+    assert (g.box, g.title_fill) == ("none", "-")
+    assert g.frame == ("+", "+", "+", "+", "-", "|")
 
 
 def test_single_column_glyphs_are_one_character():
-    # ``copy`` is the one glyph allowed to be a word in PLAIN.
+    # ``copy`` is the one glyph allowed to be a word in PLAIN; ``frame`` is six
+    # glyphs, each one cell.
     for t in (RICH, PLAIN):
         for field in fields(Glyphs):
             if field.name in {"box", "copy"}:
                 continue
-            assert len(getattr(t.glyphs, field.name)) == 1, (t.name, field.name)
+            value = getattr(t.glyphs, field.name)
+            if field.name == "frame":
+                assert len(value) == 6 and all(len(glyph) == 1 for glyph in value), t.name
+                continue
+            assert len(value) == 1, (t.name, field.name)
 
 
 # --- accents and the banner ------------------------------------------------------------
@@ -273,7 +283,7 @@ def test_single_column_glyphs_are_one_character():
 
 def test_plain_accents_are_ui_accents() -> None:
     assert PLAIN.accents == ui.ACCENTS
-    assert PLAIN.banner == {"dark": ui.PET_COLOUR, "light": ui.PET_COLOUR}
+    assert PLAIN.banner == dict.fromkeys(theme.BANNER_TONES, ui.PET_COLOUR)
     assert PLAIN.badge is False
 
 
@@ -300,12 +310,14 @@ def test_rich_accents_are_five_distinct_hex_hues_never_red_yellow_green():
         assert not (75 < hue <= 165), (accent, hue)
 
 
-def test_rich_banner_is_two_crimsons_and_neither_is_an_accent() -> None:
-    assert set(RICH.banner) == {"dark", "light"}
+def test_rich_banner_is_a_crimson_gradient_and_no_tone_is_an_accent() -> None:
+    assert set(RICH.banner) == set(theme.BANNER_TONES)
+    assert set(theme.BANNER_TONES) == {"g0", "g1", "g2", "g3", "g4", "shadow", "light", "dark"}
     for tone in RICH.banner.values():
         hue = _hue(tone)
         assert hue < 20 or hue > 335, tone
         assert tone not in RICH.accents
+    assert RICH.banner["g0"] != RICH.banner["g4"]
     assert RICH.banner["dark"] != RICH.banner["light"]
 
 

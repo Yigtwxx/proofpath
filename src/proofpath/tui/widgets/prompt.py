@@ -1,4 +1,4 @@
-"""The input bar and the inline section 7.1 question."""
+"""The input bar, the frame around it, and the inline section 7.1 question."""
 
 from __future__ import annotations
 
@@ -12,13 +12,15 @@ from textual.app import ComposeResult
 from textual.binding import Binding, BindingType
 from textual.color import Color
 from textual.containers import Horizontal, Vertical
+from textual.message import Message
 from textual.widgets import Button, Input, Static
 
 from proofpath import ui
 from proofpath.browser import TUI_ANSWERS, Answer, prompt_text
+from proofpath.tui import wordmark
 from proofpath.tui.history import History
 from proofpath.tui.theme import Theme
-from proofpath.tui.widgets._shared import textual_colour
+from proofpath.tui.widgets._shared import DEFAULT_WIDTH, textual_colour
 
 #: The spec's "~15-20%" tint, at the quiet end: an accent on a bar, not a highlight.
 TINT_ALPHA = 0.15
@@ -35,6 +37,22 @@ ANSWER_ID = "allow-"
 #: What the bar shows while it holds a paste of several lines: the paste itself would
 #: not fit, and Textual's ``Input`` would keep its first line and drop the rest.
 HELD_SUMMARY = "pasted {sep} {lines} lines {sep} {chars} chars {sep} enter to check, esc to drop"
+#: The bands the two edges of the input row wear: the left one is the gradient's
+#: first, the right one its last, the same ends the frame's rows run between. The
+#: glyphs themselves are the theme's (:attr:`Glyphs.frame`).
+EDGE_LEFT_TONE = wordmark.GRADIENT_TONES[0]
+EDGE_RIGHT_TONE = wordmark.GRADIENT_TONES[-1]
+
+
+def tinted(accent: str) -> Color:
+    """``accent`` at :data:`TINT_ALPHA`: the awaiting bar's wash, and the list's.
+
+    The ANSI flag is dropped on purpose: a palette entry cannot be blended, and the
+    spec asks for a tint rather than a solid bar. The *name* still comes from the
+    theme's accents; only its RGB is borrowed.
+    """
+    base = textual_colour(accent)
+    return Color(base.r, base.g, base.b, TINT_ALPHA)
 
 
 class PermissionPrompt(Vertical):
@@ -118,6 +136,13 @@ class Prompt(Input):
     edit ends the cycle. The app hands in ``complete`` because only it knows which
     runs are still live; the bar never decides what a line may become.
 
+    The cycle is also the list above the bar (wordmark design section 10): the app
+    reads :attr:`candidates` and :attr:`selected` on every ``Changed`` and after
+    every :class:`SuggestionsChanged` it is sent, and draws them. While the bar holds
+    a ``/`` line with candidates, ``up`` and ``down`` move the selection instead of
+    walking the history, and ``tab`` puts the selected candidate in the bar; a
+    recalled line shows no list over itself, so the walk can go on past it.
+
     A paste of two or more lines is *held*: the bar shows :data:`HELD_SUMMARY` and
     keeps the text whole in :attr:`held` until ``enter`` takes it or an edit drops
     it. A one-line paste is text in the bar like any other. The app hands in ``sep``
@@ -140,7 +165,7 @@ class Prompt(Input):
         sep: str = "·",
     ) -> None:
         # ``Input`` selects all its text on focus by default; a key handed over from a
-        # log line (``Line.on_key``) must insert at the cursor, not replace a draft,
+        # log line (the app's ``on_key``) must insert at the cursor, not replace a draft,
         # and a command bar keeps its cursor where it left it, the way a shell does.
         super().__init__(placeholder=placeholder, id=id, select_on_focus=False)
         self.history = history if history is not None else History()
@@ -149,6 +174,15 @@ class Prompt(Input):
         #: cleared by any edit that is not the cycle's own.
         self._candidates: list[str] = []
         self._candidate = 0
+        #: The bar's text the cycle is good for: the line it was built over, then
+        #: whatever ``tab`` last put in the bar. The bar holding anything else means
+        #: the cycle is stale and is rebuilt before it is read (see ``_sync``).
+        self._cycle_over: str | None = None
+        #: Raised by a history step, lowered by an edit or a ``tab``: a recalled line
+        #: is not being typed, so nothing is suggested over it. Without this, ``up``
+        #: onto ``/config`` would open a one-row list that takes the next ``up`` for
+        #: itself, and the walk could never get past the newest slash command.
+        self._recalled = False
         #: The lines the walk has put in the bar whose ``Changed`` has not arrived yet,
         #: oldest first. A flag raised around the assignment would not do: ``Input``
         #: *posts* ``Changed`` rather than calling the handler, so it arrives a tick
@@ -164,17 +198,69 @@ class Prompt(Input):
         #: summary — a history step, a completion, an empty bar — is not the paste.
         self.held: str | None = None
 
+    class SuggestionsChanged(Message):
+        """The cycle moved or was rebuilt by a key: the list above the bar is stale."""
+
     def action_history_previous(self) -> None:
+        if self.suggesting:
+            self.select(-1)
+            return
         self.drop()  # a held paste is not a draft; the walk must not bring it back
-        line = self.history.previous(self.value)
-        if line is not None:
-            self._show(line)
+        self._recall(self.history.previous(self.value))
 
     def action_history_next(self) -> None:
+        if self.suggesting:
+            self.select(1)
+            return
         self.drop()
-        line = self.history.next()
+        self._recall(self.history.next())
+
+    def _recall(self, line: str | None) -> None:
         if line is not None:
+            self._recalled = True
             self._show(line)
+
+    @property
+    def suggesting(self) -> bool:
+        """Whether the list above the bar is showing: a ``/`` line with candidates."""
+        return self.value.startswith("/") and bool(self.candidates)
+
+    @property
+    def candidates(self) -> tuple[str, ...]:
+        """What the bar may become, in order; empty when nothing is suggested."""
+        self._sync()
+        return tuple(self._candidates)
+
+    @property
+    def selected(self) -> int:
+        """Which of :attr:`candidates` is selected: the one ``tab`` would put in the bar."""
+        self._sync()
+        return self._candidate
+
+    def select(self, delta: int) -> None:
+        """Move the selection ``delta`` rows, wrapping. The bar's text is left alone."""
+        self._sync()
+        if self._candidates:
+            self._candidate = (self._candidate + delta) % len(self._candidates)
+        self.post_message(self.SuggestionsChanged())
+
+    def _sync(self) -> None:
+        # A cycle is only good for the line it was built over, or the candidate it
+        # last put in the bar. A history step goes through ``_show`` too, so
+        # ``on_input_changed`` never sees it as an edit and never clears
+        # ``_candidates`` -- without this check, a stale cycle from before the step
+        # would be read, or overwrite whatever the step just put in the bar. So the
+        # cycle is stale, and rebuilt, whenever the bar holds anything else, for any
+        # reason, not just an edit. A recalled line is the one exception: nothing is
+        # suggested over it until it is edited or completed.
+        if self._recalled:
+            self._candidates = []
+            self._candidate = 0
+            self._cycle_over = None
+        elif self.value != self._cycle_over:
+            self._candidates = self._complete(self.value)
+            self._candidate = 0
+            self._cycle_over = self.value
 
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
         # ``tab`` is completion only inside a slash command; anywhere else it stays
@@ -189,22 +275,22 @@ class Prompt(Input):
         return True
 
     def action_complete(self) -> None:
-        # A cycle is only good for the line it was built over. A history step goes
-        # through ``_show`` too, so ``on_input_changed`` never sees it as an edit and
-        # never clears ``_candidates`` — without this check, a stale cycle from before
-        # the step would overwrite whatever the step just put in the bar. So the cycle
-        # is stale, and rebuilt, whenever the bar no longer holds the candidate it last
-        # showed, for any reason, not just an edit.
-        if not self._candidates or self.value != self._candidates[self._candidate]:
-            self._candidates = self._complete(self.value)
-            self._candidate = 0
-            if not self._candidates:
-                return
-        else:
+        # ``tab`` on a recalled line is a request for its completions: the cycle is
+        # built over it as over any other line.
+        self._recalled = False
+        self._sync()
+        if not self._candidates:
+            return
+        # The bar already holds the selected candidate: step on to the next. Any
+        # other line the cycle is good for -- the line it was built over, with the
+        # selection where the arrows left it -- takes the selected one as it is.
+        if self.value == self._candidates[self._candidate]:
             self._candidate = (self._candidate + 1) % len(self._candidates)
+        self._cycle_over = self._candidates[self._candidate]
         # Through ``_show`` like a history step: the replacement is the bar's own, so
         # its ``Changed`` is matched off the queue instead of ending the cycle.
-        self._show(self._candidates[self._candidate])
+        self._show(self._cycle_over)
+        self.post_message(self.SuggestionsChanged())
 
     def _show(self, line: str) -> None:
         # A reactive posts no ``Changed`` for an equal assignment, so only a line that
@@ -264,15 +350,116 @@ class Prompt(Input):
         self._pending.clear()
         self.history.reset()
         self._candidates = []
+        self._cycle_over = None
+        self._recalled = False
         # An edit of the summary is an edit of nothing: the paste goes with it.
         self.drop()
 
     def tint(self, accent: str) -> None:
-        base = textual_colour(accent)
-        # The ANSI flag is dropped on purpose: a palette entry cannot be blended, and
-        # the spec asks for a tint rather than a solid bar. The *name* still comes
-        # from the theme's accents; only its RGB is borrowed.
-        self.styles.background = Color(base.r, base.g, base.b, TINT_ALPHA)
+        self.styles.background = tinted(accent)
 
     def untint(self) -> None:
         self.styles.background = None
+
+
+class FrameEdge(Static):
+    """One horizontal edge of the bar's frame, coloured through the wordmark's bands.
+
+    The top row is ``╭───╮``, the bottom ``╰───╯``, each as wide as the widget is,
+    and each painted in the five gradient tones over its own width -- left light,
+    right dark, the way the mark runs. Without colour the row is drawn in the
+    terminal's default, as the CSS border it replaces was: still a frame, where a
+    border in the background colour would have been three empty rows.
+    """
+
+    def __init__(self, *, top: bool, theme: Theme, coloured: bool, id: str) -> None:  # noqa: A002 - Textual's own keyword
+        super().__init__(id=id)
+        top_left, top_right, bottom_left, bottom_right, self._rule, _ = theme.glyphs.frame
+        self._corners = (top_left, top_right) if top else (bottom_left, bottom_right)
+        self._theme = theme
+        self._coloured = coloured
+
+    def render(self) -> Text:
+        # The bands are cut over the row's width, so a resize moves every one of
+        # them; Textual redraws a widget whose size changed, and this is the redraw.
+        width = self.size.width or DEFAULT_WIDTH
+        left, right = self._corners
+        text = Text(left + self._rule * max(width - 2, 0) + right)
+        if self._coloured:
+            # One span per band, not one per column: neighbouring columns of the
+            # same band are merged, so the row carries five spans, and a reader of
+            # them (a test, a terminal) sees five runs and not ninety-eight.
+            start = 0
+            for column in range(1, width + 1):
+                if column == width or wordmark.band(column, width) != wordmark.band(start, width):
+                    text.stylize(self._theme.banner[wordmark.band(start, width)], start, column)
+                    start = column
+        return text
+
+
+class PromptFrame(Vertical):
+    """The input bar and the frame around it (wordmark design section 9).
+
+    Three rows in RICH at panel width: a :class:`FrameEdge` above, the input row --
+    a ``│`` edge, the caret, the :class:`Prompt`, a ``│`` edge -- and a
+    :class:`FrameEdge` below. The frame is drawn, not a CSS border, because a border
+    has one colour and this one runs through the wordmark's five bands, light at the
+    left and dark at the right. The stylesheet hides the frame's rows and edges below
+    the panel floor and in ``plain``, where the bar is one flat row, and gives the
+    container its heights; nothing here decides that.
+
+    The caret is not coloured here. It follows the next run's accent, which only the
+    app knows, and it keeps doing so: the frame is the one thing that stopped.
+    """
+
+    def __init__(
+        self,
+        *,
+        theme: Theme,
+        coloured: bool,
+        placeholder: str,
+        history: History,
+        complete: Callable[[str], list[str]],
+        sep: str,
+    ) -> None:
+        super().__init__(id="prompt-frame")
+        self._theme = theme
+        self._coloured = coloured
+        self._placeholder = placeholder
+        self._history = history
+        self._complete = complete
+        self._sep = sep
+
+    @property
+    def rows(self) -> int:
+        """How many rows the frame takes right now: three panelled RICH, one flat.
+
+        Read from the resolved stylesheet rather than duplicated as a constant
+        (mirrors :attr:`~.footer.CoverageFooter.rows`): the app sets ``#bottom``'s
+        ``rich``/``narrow`` classes before asking, and Textual resolves a widget's
+        own ``styles.height`` from them immediately, ahead of the next layout pass.
+        """
+        height = self.styles.height
+        assert height is not None  # the stylesheet gives every state a fixed height
+        return int(height.value)
+
+    def compose(self) -> ComposeResult:
+        edge = self._theme.glyphs.frame[-1]
+        yield FrameEdge(top=True, theme=self._theme, coloured=self._coloured, id="frame-top")
+        with Horizontal(id="prompt-row"):
+            yield Static(self._edge(edge + " ", EDGE_LEFT_TONE), id="edge-left")
+            yield Static(self._theme.glyphs.prompt, id="caret")
+            yield Prompt(
+                placeholder=self._placeholder,
+                id="prompt",
+                history=self._history,
+                complete=self._complete,
+                sep=self._sep,
+            )
+            yield Static(self._edge(" " + edge, EDGE_RIGHT_TONE), id="edge-right")
+        yield FrameEdge(top=False, theme=self._theme, coloured=self._coloured, id="frame-bottom")
+
+    def _edge(self, glyphs: str, tone: str) -> Text:
+        # An edge is one cell of one band, so it is styled once and for good; only
+        # the rows, whose bands move with the width, are drawn again on a resize.
+        return Text(glyphs, style=self._theme.banner[tone] if self._coloured else "")

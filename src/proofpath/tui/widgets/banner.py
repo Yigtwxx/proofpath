@@ -1,10 +1,10 @@
-"""The wordmark, pinned above the log and redrawn on every resize (wordmark design
-§4; the plain raven, ``banner.py``, is unchanged).
+"""The wordmark, in both themes, pinned above the log and redrawn on every resize
+(wordmark design §4, §8 and §8.1).
 
 The art and the layout are :mod:`proofpath.tui.wordmark`'s; this widget only asks it
 what to draw for the theme and the width and paints the colour runs it returns with
-the theme's two banner tones. Nothing moves: ``set_busy`` and ``flash`` are kept so
-the app can keep calling them, and do nothing, until an animation is designed again.
+the theme's banner tones. Nothing moves: ``set_busy`` and ``flash`` are kept so the
+app can keep calling them, and do nothing, until an animation is designed again.
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ Mood = Literal["findings", "clean"]
 
 
 class Banner(Static):
-    """The wordmark, pinned above the log and redrawn on every resize."""
+    """The wordmark, in both themes, pinned above the log and redrawn on every resize."""
 
     def __init__(
         self,
@@ -81,19 +81,21 @@ class Banner(Static):
     def get_content_height(self, container: Size, viewport: Size, width: int) -> int:
         """The drawn lines, but more rows than lines once one of them wraps.
 
-        ``wordmark.render`` never truncates: in ``rich`` the plain banner is drawn
-        below 69 columns, and the plain version/context pair itself stops fitting
-        side by side below 57, so the container is sized to what was actually drawn
-        rather than to the line count.
+        The banner is 3, 7 or 9 rows (no mark, beside, under); ``wordmark.render``
+        never truncates, so a text row longer than the width wraps, and the container
+        is sized to what was actually drawn rather than to the line count.
         """
         return sum(max(1, -(-len(line) // max(width, 1))) for line in self._draw(width).lines)
 
     def _draw(self, width: int) -> banner.Banner:
         self._drawn = self._render_banner(width, self._hint)
-        if self._theme.name == "rich" and len(self._drawn.lines[wordmark.hint_row(width)]) > width:
-            # The RICH hint drops its command list rather than overflow (``/help``
-            # lists them). Below the floor the plain art is drawn and the same rule
-            # applies; only the PLAIN theme leaves its lines to wrap.
+        where = wordmark.rows(
+            width, version=self._version, context=self._banner_context, hint=self._hint
+        )
+        if len(self._drawn.lines[where.hint]) > width:
+            # The hint drops its command list rather than overflow (``/help`` lists
+            # them), in both themes: the plain banner is the same drawing now. Below
+            # the floor there is no mark and the same rule applies to the bare text.
             self._drawn = self._render_banner(width, banner.split_hint(self._hint)[0])
         return self._drawn
 
