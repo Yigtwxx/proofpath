@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.7] - 2026-09-18
+
 Two more platforms a post can be read from without an account: Lobste.rs and Lemmy.
 
 ### Added
