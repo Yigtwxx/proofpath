@@ -1,0 +1,18 @@
+{
+  "post_view": {
+    "post": {
+      "id": 4343,
+      "name": "Our 2025 moderation report is out",
+      "url": "https://example.test/moderation-report-2025",
+      "body": "",
+      "creator_id": 7,
+      "community_id": 3,
+      "removed": true,
+      "deleted": false,
+      "ap_id": "https://lemmy.world/post/4343",
+      "local": true
+    },
+    "creator": { "id": 7, "name": "someone" },
+    "community": { "id": 3, "name": "science" }
+  }
+}

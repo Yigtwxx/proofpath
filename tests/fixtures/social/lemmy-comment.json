@@ -1,0 +1,23 @@
+{
+  "comment_view": {
+    "comment": {
+      "id": 100,
+      "creator_id": 9,
+      "post_id": 4242,
+      "content": "\"revised\" is the author's word & not mine — see the [paper](https://example.test/paper.pdf) and https://example.test/data.csv",
+      "removed": false,
+      "published": "2026-09-02T08:00:00.000000Z",
+      "deleted": false,
+      "ap_id": "https://lemmy.world/comment/100",
+      "local": true,
+      "path": "0.99.100",
+      "distinguished": false,
+      "language_id": 37
+    },
+    "creator": { "id": 9, "name": "reviewer", "banned": false, "actor_id": "https://lemmy.world/u/reviewer", "local": true },
+    "post": { "id": 4242, "name": "Our 2025 moderation report is out", "url": "https://example.test/moderation-report-2025" },
+    "community": { "id": 3, "name": "science" },
+    "counts": { "comment_id": 100, "score": 3 }
+  },
+  "recipient_ids": []
+}

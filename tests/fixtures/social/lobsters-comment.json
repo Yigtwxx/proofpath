@@ -1,0 +1,16 @@
+{
+  "short_id": "c0ffee",
+  "short_id_url": "https://lobste.rs/c/c0ffee",
+  "created_at": "2026-09-02T08:00:00.000-05:00",
+  "last_edited_at": "2026-09-02T08:00:00.000-05:00",
+  "is_deleted": false,
+  "is_moderated": false,
+  "score": 3,
+  "flags": 0,
+  "parent_comment": null,
+  "comment": "<p>&quot;revised&quot; is the author's word &amp; not mine — see the <a href=\"https://example.test/paper.pdf\" rel=\"ugc\">paper</a> and <a href=\"https://example.test/data.csv\" rel=\"ugc\">the data</a>.</p>\n",
+  "comment_plain": "\"revised\" is the author's word & not mine",
+  "depth": 0,
+  "commenting_user": "reviewer",
+  "url": "https://lobste.rs/s/abc123/our_2025_moderation_report_is_out#c_c0ffee"
+}

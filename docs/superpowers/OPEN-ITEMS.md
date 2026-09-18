@@ -505,11 +505,11 @@ Findings from inspecting the installed base environment, and the decisions they 
 | 15.2 | The Reddit path has never run against Reddit | fixtures reproduce the documented shapes; nobody on this machine has an app to register. The first real-credential run should check the comment-listing shape first |
 | 15.3 | `/r/<sub>/s/<hash>` share links are unrecognised | they degrade to the web ladder, so nothing is invented; the shape is simply not parsed |
 | 15.4 | The TUI footer ignores `Footer.reasons` | the per-reason coverage lines reach the terminal and the markdown report but not the TUI, so a TUI run whose sources were half blocked still shows three numbers and no reason |
-| 15.7 | A Mastodon status is read outside the fetch ladder | `check --url https://<any host>/@a/123` issues a request to that host's `/api/v1/statuses/123` directly: no `robots.txt` check and no entry in `polite.MIN_INTERVAL`. The user typed the address, so it is not a rule breach, but it is the one read path that skips the politeness machinery |
+| 15.7 | A Mastodon status is read outside the fetch ladder | `check --url https://<any host>/@a/123` issues a request to that host's `/api/v1/statuses/123` directly: no `robots.txt` check and no entry in `polite.MIN_INTERVAL`. The user typed the address, so it is not a rule breach, but it is the one read path that skips the politeness machinery. *v0.4.7:* Lemmy shares this exactly — the host is the instance — with one narrowing: only a host that passes `providers.is_lemmy_host` is asked, so the request never goes to an arbitrary site |
 | 15.8 | `target_document`'s `network_allowed` defaults to `True` | every in-tree caller passes the resolved permission, so the default is unreachable today; it is a footgun for the next caller and should be a required keyword |
 | 15.9 | The Reddit token exchange follows redirects with basic auth attached | httpx re-applies the credential along a redirect chain. The URL is a fixed Reddit constant, so it needs Reddit itself to be the attacker, but `follow_redirects=False` on that one call costs nothing |
 | 15.5 | `NO_REASON_RECORDED` is a user-visible state outside §15 | it is a guard that should never print; if it can print, it belongs in the table |
-| 15.6 | `NOT_READ_HERE` is provably unreachable through `verify` | kept deliberately for a sixth platform, like `checker_for`'s `arxiv:` row |
+| 15.6 | `NOT_READ_HERE` is provably unreachable through `verify` | kept deliberately for a sixth platform, like `checker_for`'s `arxiv:` row. *v0.4.7:* the sixth and seventh (Lobste.rs, Lemmy) arrived and each got a reader, so it is still unreachable and still kept, now for the eighth |
 
 ## 16. Page targets — v0.4.4, 2026-09-17
 
@@ -544,3 +544,18 @@ against. "Paste the text" is only an answer for a tweet that links its source.
 | 17.1 | **Evidence search for a source-less claim** (decided 2026-09-18: this is the fix, path B) | An opt-in stage for a document that cites nothing: query a web search provider with the user's own key (Tavily / Brave / SearXNG; consent per §7.1, never on by default), take the top N pages and run them through the existing fetch → retrieval → entailment path. The report must carry a **distinct state** for such a source — `found by proofpath, not cited by the author` — on every finding and in coverage; rules 1–2 stay: passage or no verdict, unreachable stays unreachable. **Gate:** AVeriTeC (§15.1) measures exactly this scenario at 0.270 vs a 0.708 majority baseline, so the stage ships only once a web-claim eval is above baseline, or it ships flagged experimental with that number printed in the report. Not the judge: a judge answering with no source is the truth oracle §3 forbids |
 | 17.2 | README:280 and the `check --url` X message overstate "paste the text" | both should say a tweet with no link cannot be checked, until 17.1 lands |
 | 17.3 | The "cites nothing" finding fires for a whole document, never per paragraph | a long pasted post where only some paragraphs link is fine today (it has references); a `.txt` mixing cited and uncited claims reports nothing about the uncited ones — that is the existing per-claim coverage's job, but worth checking it says so |
+
+## 18. Lobste.rs and Lemmy — v0.4.7, 2026-09-18
+
+Two readers added on the Hacker News and Mastodon patterns respectively
+(`providers/social.py`). Both probed without auth and read live before release (spec §6.2).
+
+### New open items
+
+| # | Item | Note |
+|---|---|---|
+| 18.1 | The Lemmy instance list is a list | `providers.LEMMY_HOSTS` is five hosts plus the `lemmy.` prefix, chosen 2026-09-18 over shape-only matching so no `/api/v3` request is sent to a blog whose articles live at `/post/<n>`. A big instance not on it is read as a page. A probe path — try `/api/v3/site` once per unknown host and remember the answer — would widen coverage without the list, at the cost of one request to every `/post/<n>` address that is not Lemmy |
+| 18.2 | Lemmy cross-posts and Lobste.rs "hats" are not read | a Lemmy post's `cross_posts` list names the same link in other communities; neither is a source of the post and neither is followed. Recorded so nobody reads their absence as an oversight |
+| 18.3 | A Lobste.rs comment permalink's story is never read | `/c/<id>` reads the comment alone (its parent is other people's words, as on Hacker News). A user who pastes `/s/<id>/<slug>#c_<id>` meaning "this thread" gets the one comment; the address says so, but the report does not |
+| 18.4 | `_is_own_story` sees only absolute anchors | a relative `href="/s/<id>"` in a Lobste.rs description has no host and passes the filter; downstream `find_url` reads no address out of it either, so nothing is fetched, but the link is not named among the dropped ones |
+| 18.5 | `ProviderError.code` is read by one caller | the token is parsed for every 4xx/5xx a `PoliteClient` raises; Crossref, OpenAlex and the rest could use it the same way the Lemmy reader does, and today none does |

@@ -1,9 +1,10 @@
 """The ``social://`` family: a post read without an account, and what it links to.
 
-Spec section 6.2, and every platform on its list is answered for. Two are readable
-by anyone with no key and no login, so those two are first class: Bluesky through
-``public.api.bsky.app`` and Hacker News through its Firebase export. The other three
-each answer differently, and the difference is the point (product rule 2):
+Spec section 6.2, and every platform on its list is answered for. Three are readable
+by anyone with no key and no login, so those three are first class: Bluesky through
+``public.api.bsky.app``, Hacker News through its Firebase export and Lobste.rs through
+the ``.json`` twin every story and comment page has. The other four each answer
+differently, and the difference is the point (product rule 2):
 
 * **Reddit** takes a free app the user registers under their own account. When the
   two variables are absent the post is reported as ``UNVERIFIED (credentials
@@ -12,6 +13,9 @@ each answer differently, and the difference is the point (product rule 2):
 * **Mastodon** is thousands of independent instances, so it is read best effort from
   whichever one hosts the status. An instance that requires a login says so and the
   status is ``BLOCKED``: it is there, and this reader may not have it.
+* **Lemmy** is instances too and is read the same way, from the ``/api/v3`` every
+  instance serves without a login -- but only from a host that says it is Lemmy
+  (``providers.is_lemmy_host``), because ``/post/<n>`` alone is any blog's address.
 * **X** has no read-only API at all. It is answered without a request, in its own
   words: paste the post's text and the links inside it are verified as usual.
 
@@ -35,7 +39,15 @@ from urllib.parse import SplitResult, parse_qs, urlsplit
 from proofpath.document import Reference
 from proofpath.fetch import Outcome
 from proofpath.polite import PoliteClient, ProviderError
-from proofpath.providers import NO_TEXT, URL_PREFIX, EvidenceDoc, FetchesUrl, Scheme, is_social
+from proofpath.providers import (
+    NO_TEXT,
+    URL_PREFIX,
+    EvidenceDoc,
+    FetchesUrl,
+    Scheme,
+    is_lemmy_host,
+    is_social,
+)
 from proofpath.providers.web import WebProvider
 from proofpath.resolve import Candidate, ResolveResult, Retraction, State, find_url
 from proofpath.secrets import (
@@ -49,6 +61,7 @@ from proofpath.secrets import (
 
 BSKY_API = "https://public.api.bsky.app/xrpc"
 HN_API = "https://hacker-news.firebaseio.com/v0"
+LOBSTERS_API = "https://lobste.rs"
 REDDIT_TOKEN_URL = "https://www.reddit.com/api/v1/access_token"
 REDDIT_API = "https://oauth.reddit.com"
 
@@ -56,6 +69,8 @@ BLUESKY = "Bluesky"
 HACKER_NEWS = "Hacker News"
 REDDIT = "Reddit"
 MASTODON = "Mastodon"
+LEMMY = "Lemmy"
+LOBSTERS = "Lobste.rs"
 X = "X"
 
 #: What an address on a platform this version does not read is answered with. Every
@@ -65,7 +80,7 @@ X = "X"
 #: anyone anything" instead of a borrowed fetch outcome.
 NOT_READ_HERE = "UNVERIFIED (platform not read in this version)"
 UNSUPPORTED_HINT = (
-    "this version reads Bluesky, Hacker News, Reddit and Mastodon; "
+    "this version reads Bluesky, Hacker News, Lobste.rs, Reddit, Mastodon and Lemmy; "
     "paste the post's own text instead"
 )
 
@@ -88,14 +103,23 @@ COMMENT_NOT_LISTED = "the thread was returned without the comment this address n
 MASTODON_LOGIN_HINT = "this instance requires a login"
 _MASTODON_LOGIN = frozenset({401, 403, 422})
 
+#: A Lemmy instance that serves posts only to people logged into it answers an
+#: anonymous reader with the *same* 400 it gives a missing post, and this token in the
+#: body. ``couldnt_find_post`` / ``couldnt_find_comment`` are the missing one. Any other
+#: 400 says nothing about the post and is filed as the platform saying nothing.
+LEMMY_LOGIN_HINT = "this instance requires a login"
+_LEMMY_NOT_LOGGED_IN = "not_logged_in"
+_LEMMY_NOT_FOUND = frozenset({"couldnt_find_post", "couldnt_find_comment"})
+
 #: The hosts with a reader bound to them. Mastodon is not here and cannot be: the
 #: host is whichever instance carries the status, so it is recognised by the shape of
-#: its address instead (:func:`_mastodon_status`) — which is also why the four below
+#: its address instead (:func:`_mastodon_status`) — which is also why the five below
 #: are checked first, so an instance-shaped path on one of them cannot be mistaken
-#: for a status.
+#: for a status. Lemmy is instances too, and its hosts are ``providers.LEMMY_HOSTS``.
 _READ_HOSTS = frozenset({"bsky.app", "news.ycombinator.com"})
 _REDDIT_HOSTS = frozenset({"reddit.com"})
 _X_HOSTS = frozenset({"x.com", "twitter.com"})
+_LOBSTERS_HOSTS = frozenset({"lobste.rs"})
 
 #: What a quoted record says when it is not a post the reader may have. Bluesky names
 #: each case in the view's own ``$type``, so each is reported as itself rather than
@@ -179,14 +203,16 @@ class Unreadable:
 def read_post(url: str, client: PoliteClient) -> Post | Unreadable:
     """One post address, read through whatever its platform offers a reader.
 
-    Bluesky, Hacker News and Mastodon need no key, no account and no contact address,
-    so ``mailto`` is kept off all of them: it is a courtesy Crossref and OpenAlex ask
-    for and these would only log it. Reddit needs the user's own app and says so when
-    it has none. X needs nothing, because there is nobody to ask.
+    Bluesky, Hacker News, Lobste.rs, Mastodon and Lemmy need no key, no account and
+    no contact address, so ``mailto`` is kept off all of them: it is a courtesy
+    Crossref and OpenAlex ask for and these would only log it. Reddit needs the user's
+    own app and says so when it has none. X needs nothing, because there is nobody to
+    ask.
 
-    The order is the order the matchers are specific in: the four host-bound
-    platforms first, then Mastodon, which is recognised by the shape of its address
-    on any instance.
+    The order is the order the matchers are specific in: the five host-bound
+    platforms first, then the two recognised on any instance -- Mastodon by the shape
+    of its address, Lemmy by a host that says so. Those two cannot claim the same
+    address: a Mastodon status is ``/@user/<n>``, a Lemmy post ``/post/<n>``.
     """
     bluesky = _bluesky_post(url)
     if bluesky is not None:
@@ -194,6 +220,9 @@ def read_post(url: str, client: PoliteClient) -> Post | Unreadable:
     item = _hn_item(url)
     if item is not None:
         return _read_hn(url, item, client)
+    story = _lobsters_target(url)
+    if story is not None:
+        return _read_lobsters(url, story, client)
     article = _reddit_article(url)
     if article is not None:
         return _read_reddit(url, article, client)
@@ -202,6 +231,9 @@ def read_post(url: str, client: PoliteClient) -> Post | Unreadable:
     status = _mastodon_status(url)
     if status is not None:
         return _read_mastodon(url, status, client)
+    lemmy = _lemmy_target(url)
+    if lemmy is not None:
+        return _read_lemmy(url, lemmy, client)
     return Unreadable(platform="", url=url, state=NOT_READ_HERE, hint=UNSUPPORTED_HINT)
 
 
@@ -215,9 +247,11 @@ def is_post_url(url: str) -> bool:
     return (
         _bluesky_post(url) is not None
         or _hn_item(url) is not None
+        or _lobsters_target(url) is not None
         or _reddit_article(url) is not None
         or _x_status(url)
         or _mastodon_status(url) is not None
+        or _lemmy_target(url) is not None
     )
 
 
@@ -520,6 +554,106 @@ def _html_text(markup: str, breaks: re.Pattern[str]) -> tuple[str, list[str]]:
     return html.unescape(text).strip(), anchors
 
 
+# --- Lobste.rs ------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _LobstersTarget:
+    """Which story an address names, or which comment, if it names one instead."""
+
+    story: str
+    comment: str  # "" when the address names the story itself
+
+
+def _lobsters_target(url: str) -> _LobstersTarget | None:
+    """``lobste.rs/s/<id>[/<slug>][#c_<id>]`` or ``lobste.rs/c/<id>``, else ``None``.
+
+    The front page, ``/newest``, a tag and a user page (``/~name``) are not posts. A
+    story address whose fragment names a comment is that comment: the fragment is
+    the only part of the address that changes between one reply and the next.
+    """
+    split = urlsplit(url)
+    if not _in((split.hostname or "").lower(), _LOBSTERS_HOSTS):
+        return None
+    parts = [part for part in split.path.split("/") if part]
+    if len(parts) >= 2 and parts[0] == "s" and _is_short_id(parts[1]):
+        fragment = split.fragment
+        comment = fragment.removeprefix("c_") if fragment.startswith("c_") else ""
+        return _LobstersTarget(parts[1], comment if _is_short_id(comment) else "")
+    if len(parts) == 2 and parts[0] == "c" and _is_short_id(parts[1]):
+        return _LobstersTarget("", parts[1])
+    return None
+
+
+def _is_short_id(part: str) -> bool:
+    """The site's ids are short ASCII letters and digits; nothing else is asked for."""
+    return part.isascii() and part.isalnum()
+
+
+def _read_lobsters(url: str, target: _LobstersTarget, client: PoliteClient) -> Post | Unreadable:
+    """One story or one comment from the ``.json`` twin of its page. No key, no account.
+
+    A comment is read by its own permalink and never through its story: the thread
+    above it is other people's words, not this comment's sources.
+    """
+    kind = "comment" if target.comment else "story"
+    path = f"c/{target.comment}" if target.comment else f"s/{target.story}"
+    try:
+        response = client.get(f"{LOBSTERS_API}/{path}.json", mailto=False)
+    except ProviderError as error:
+        return _failed(LOBSTERS, url, error)
+    if response.status_code == 404:
+        return _gone(LOBSTERS, url, f"the {kind} was not found")
+    payload = _json(response)
+    if not payload:
+        return _gone(LOBSTERS, url, f"the site answered with no {kind}")
+    # The site names the two separately, so they are reported separately: moderated
+    # is a comment the site still has and no longer shows, deleted is one that is
+    # gone. Spec section 15 keeps BLOCKED and UNREACHABLE apart for exactly this.
+    if payload.get("is_moderated"):
+        return _blocked(LOBSTERS, url, f"the {kind} was removed by moderation")
+    if payload.get("is_deleted"):
+        return _gone(LOBSTERS, url, f"the {kind} was deleted")
+    if target.comment:
+        text, anchors = _html_text(_text_field(payload, "comment"), _HN_BREAK)
+        return Post(
+            platform=LOBSTERS,
+            url=url,
+            author=_text_field(payload, "commenting_user"),
+            text=text,
+            links=_ordered(anchors),
+            quoted=(),
+            fetched_at=_now(),
+        )
+    body, anchors = _html_text(_text_field(payload, "description"), _HN_BREAK)
+    title = _text_field(payload, "title").strip()
+    submitted = _text_field(payload, "url")
+    # An anchor pointing back at this story's own discussion page -- with or without
+    # the slug the site appends -- is not a source. ``ingest.from_post`` drops a link
+    # that matches the address it was read from, but the slug form would slip past it.
+    own = f"/s/{_text_field(payload, 'short_id') or target.story}"
+    anchors = [anchor for anchor in anchors if not _is_own_story(anchor, own)]
+    return Post(
+        platform=LOBSTERS,
+        url=url,
+        author=_text_field(payload, "submitter_user"),
+        text="\n".join(part for part in (title, body) if part),
+        # A story's submitted address is the thing it is about, so it comes first.
+        links=_ordered([submitted, *anchors] if submitted else anchors),
+        quoted=(),
+        fetched_at=_now(),
+    )
+
+
+def _is_own_story(anchor: str, own: str) -> bool:
+    """Whether an anchor points at the story at ``own`` (``/s/<id>``), slug or no slug."""
+    split = urlsplit(anchor)
+    if not _in((split.hostname or "").lower(), _LOBSTERS_HOSTS):
+        return False
+    path = split.path.rstrip("/")
+    return path == own or path.startswith(f"{own}/")
+
+
 # --- Reddit ---------------------------------------------------------------------------
 
 
@@ -743,6 +877,8 @@ def _mastodon_status(url: str) -> tuple[str, str] | None:
     # request to an endpoint that was never there.
     if not host or _in(host, _READ_HOSTS) or _in(host, _REDDIT_HOSTS) or _in(host, _X_HOSTS):
         return None
+    if _in(host, _LOBSTERS_HOSTS) or is_lemmy_host(host.removeprefix("www.")):
+        return None
     instance = _instance(split)
     if not instance:
         return None
@@ -795,6 +931,105 @@ def _read_mastodon(url: str, target: tuple[str, str], client: PoliteClient) -> P
         # The anchors in the author's own words first, then the preview card, which
         # the instance builds from the last link and is usually one of them anyway.
         links=_ordered([*anchors, _text_field(_mapping(payload, "card"), "url")]),
+        quoted=(),
+        fetched_at=_now(),
+    )
+
+
+# --- Lemmy ----------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _LemmyTarget:
+    """Which instance to ask, and which post or comment on it."""
+
+    instance: str
+    kind: str  # "post" or "comment": the ``/api/v3`` endpoint and the address's first part
+    item: int
+
+
+def _lemmy_target(url: str) -> _LemmyTarget | None:
+    """``<lemmy host>/post/<n>`` or ``<lemmy host>/comment/<n>``, else ``None``.
+
+    The host must pass ``providers.is_lemmy_host``: ``/post/<n>`` is any blog's
+    address, and a reader that took the shape alone would ask arbitrary sites for an
+    ``/api/v3`` they never had. A community (``/c/``), a user (``/u/``) and the front
+    page are not posts.
+    """
+    split = urlsplit(url)
+    host = (split.hostname or "").lower().removeprefix("www.")
+    if not host or not is_lemmy_host(host):
+        return None
+    instance = _instance(split)
+    if not instance:
+        return None
+    parts = [part for part in split.path.split("/") if part]
+    if len(parts) == 2 and parts[0] in ("post", "comment") and parts[1].isdigit():
+        return _LemmyTarget(instance, parts[0], int(parts[1]))
+    return None
+
+
+def _read_lemmy(url: str, target: _LemmyTarget, client: PoliteClient) -> Post | Unreadable:
+    """One post or one comment from the instance that hosts it. No key, no account.
+
+    A missing id is a 400 with ``couldnt_find_post`` in the body, not a 404 -- and a
+    private instance is a 400 too, with ``not_logged_in``. The status alone cannot
+    tell "there is no such post" from "the post is there and this reader may not have
+    it", which is the pair product rule 2 exists to keep apart, so the body's token
+    decides; a 400 naming neither is the instance saying nothing about the post. A
+    comment's post is never followed: the thread above it is other people's words.
+    """
+    try:
+        response = client.get(
+            f"https://{target.instance}/api/v3/{target.kind}",
+            params={"id": target.item},
+            mailto=False,
+        )
+    except ProviderError as error:
+        if error.status == 400:
+            if error.code == _LEMMY_NOT_LOGGED_IN:
+                return _blocked(LEMMY, url, LEMMY_LOGIN_HINT)
+            if error.code in _LEMMY_NOT_FOUND:
+                return _gone(LEMMY, url, f"the {target.kind} was not found ({error.code})")
+            return Unreadable(
+                platform=LEMMY, url=url, state=Outcome.UNAVAILABLE.value, hint=str(error)
+            )
+        return _failed(LEMMY, url, error)
+    if response.status_code == 404:
+        return _gone(LEMMY, url, f"the {target.kind} was not found")
+    view = _mapping(_json(response), f"{target.kind}_view")
+    item = _mapping(view, target.kind)
+    if not item:
+        return _gone(LEMMY, url, f"the instance answered with no {target.kind}")
+    # ``deleted`` is the author's doing and the words are gone; ``removed`` is a
+    # moderator's and they are still on the instance. UNREACHABLE and BLOCKED, and
+    # deleted wins when both are set, as with Hacker News's ``deleted`` over ``dead``.
+    if item.get("deleted"):
+        return _gone(LEMMY, url, f"the {target.kind} was deleted by its author")
+    if item.get("removed"):
+        return _blocked(LEMMY, url, f"the {target.kind} was removed by moderation")
+    author = _text_field(_mapping(view, "creator"), "name")
+    if target.kind == "comment":
+        body = _text_field(item, "content").strip()
+        return Post(
+            platform=LEMMY,
+            url=url,
+            author=author,
+            text=body,
+            links=_ordered(_markdown_links(body)),
+            quoted=(),
+            fetched_at=_now(),
+        )
+    title = _text_field(item, "name").strip()
+    body = _text_field(item, "body").strip()
+    submitted = _text_field(item, "url")
+    return Post(
+        platform=LEMMY,
+        url=url,
+        author=author,
+        text="\n".join(part for part in (title, body) if part),
+        # A link post's submitted address is the thing it is about, so it comes first.
+        links=_ordered([submitted, *_markdown_links(body)] if submitted else _markdown_links(body)),
         quoted=(),
         fetched_at=_now(),
     )

@@ -210,6 +210,9 @@ def test_a_social_address_goes_to_the_social_provider_when_there_is_one() -> Non
         "https://mastodon.social/@a/1",
         "https://x.com/a/status/1",
         "https://twitter.com/a/status/1",
+        "https://lobste.rs/s/abc123",
+        "https://lemmy.world/post/1",
+        "https://sh.itjust.works/comment/1",
     ):
         assert provider_for(ref(raw), providers) is social, raw
 
