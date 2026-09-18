@@ -6,6 +6,37 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+Two more platforms a post can be read from without an account: Lobste.rs and Lemmy.
+
+### Added
+- **Lobste.rs.** `check --url https://lobste.rs/s/<id>` reads a story — its title, its
+  submitted address first and the links in its text — and `/c/<id>` or a `#c_<id>`
+  fragment reads one comment, never the thread above it. Read from the `.json` twin
+  of each page; no key, no account. A moderated comment is `UNVERIFIED (blocked)`, a
+  deleted one `UNVERIFIED (unreachable)`, as spec §15 keeps them apart. An anchor
+  pointing back at the story's own discussion page is not a source and is left out.
+- **Lemmy.** `check --url https://<instance>/post/<n>` and `/comment/<n>` read from
+  the `/api/v3` every instance serves without a login. A post's submitted address
+  comes first, then the markdown links in its body. `removed` (a moderator's doing)
+  is `UNVERIFIED (blocked)`; `deleted` is `UNVERIFIED (unreachable)`. A private
+  instance answers an anonymous reader with the *same* `400` as a missing post and
+  `not_logged_in` in the body, so the body's token decides: `not_logged_in` is
+  `UNVERIFIED (blocked)`, `couldnt_find_post` is `UNVERIFIED (unreachable)`, and a
+  `400` naming neither is `UNVERIFIED (unavailable)` — never a guess about the post.
+  Lemmy is known by its **host** — the
+  `lemmy.` prefix or one of `lemm.ee`, `sh.itjust.works`, `beehaw.org`,
+  `programming.dev`, `feddit.org` — never by `/post/<n>` alone, which is how any
+  blog addresses an article; a post on an instance outside that rule is read as a
+  page, as before, and no `/api/v3` request is ever sent to a host that did not say
+  it is Lemmy.
+
+### Changed
+- The "platform not read in this version" hint, the `check --url` help and the README
+  table name all seven platforms.
+- `polite.ProviderError` carries `code`: the one snake_case token a JSON error body's
+  `error` field named, when it named one, and nothing else from the body. It is what
+  lets the Lemmy reader tell the two facts above apart; no other caller reads it yet.
+
 ## [0.4.6] - 2026-09-18
 
 The terminal looks like the product: the wordmark in both themes, a settings

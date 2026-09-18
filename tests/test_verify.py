@@ -506,6 +506,16 @@ def test_a_mastodon_status_on_an_unlisted_instance_is_still_a_post_not_a_page() 
     assert _parser_for(PAGE_URL) == "fetch ladder"
 
 
+def test_a_lemmy_post_on_a_listed_instance_is_a_post_where_a_blog_post_is_a_page() -> None:
+    """Lemmy is known by its host -- the ``lemmy.`` prefix or one of the big instances
+    -- never by ``/post/<n>`` alone, which is how half the web addresses an article."""
+    assert _parser_for("https://lemmy.world/post/4242") == POST_READER
+    assert _parser_for("https://sh.itjust.works/comment/100") == POST_READER
+    assert _parser_for("https://lemmy.world/c/science") == POST_READER
+    assert _parser_for("https://lobste.rs/s/abc123") == POST_READER
+    assert _parser_for("https://example.test/post/4242") == "fetch ladder"
+
+
 def test_pasted_text_with_links_is_still_read_by_the_text_parser() -> None:
     """The ``linked`` kind is shared with a page; the stage line is not."""
     ready = prepare(f"A claim, see {STORY_LINK} for the tally.", engine())

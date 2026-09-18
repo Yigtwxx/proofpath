@@ -527,10 +527,11 @@ def from_post(post: SocialPost) -> tuple[Document, tuple[str, ...]]:
     ``SocialProvider.fetch``, and the post would be read a second time -- handing its
     own sentence back as the passage that supports it, which is product rule 1's
     whole subject. Posts reach this shape by ordinary means: a Bluesky facet or link
-    card pointing at its own permalink, a Mastodon anchor, and a Hacker News story
-    whose submitted ``url`` is the item itself. ``providers.social`` already refuses
-    the same thing for a Reddit self post, whose ``url`` is the post; this is that
-    rule where every platform passes. The returned notes name each dropped link, so a
+    card pointing at its own permalink, a Mastodon or Lemmy anchor, and a Hacker News
+    story whose submitted ``url`` is the item itself. ``providers.social`` already
+    refuses the same thing for a Reddit self post, whose ``url`` is the post, and for
+    a Lobste.rs anchor at the story's own discussion page; this is that rule where
+    every platform passes. The returned notes name each dropped link, so a
     reader comparing the report against the post can see why one is not in it.
     """
     lines: list[str] = []

@@ -1,0 +1,27 @@
+{
+  "post_view": {
+    "post": {
+      "id": 4242,
+      "name": "Our 2025 moderation report is out",
+      "url": "https://example.test/moderation-report-2025",
+      "body": "The regulator published [its own tally](https://example.test/regulator-tally) & we agree.\n\nRaw data: https://example.test/data.csv.",
+      "creator_id": 7,
+      "community_id": 3,
+      "removed": false,
+      "locked": false,
+      "published": "2026-09-01T10:00:00.000000Z",
+      "deleted": false,
+      "nsfw": false,
+      "embed_title": "Moderation report 2025",
+      "ap_id": "https://lemmy.world/post/4242",
+      "local": true,
+      "language_id": 37
+    },
+    "creator": { "id": 7, "name": "someone", "banned": false, "actor_id": "https://lemmy.world/u/someone", "local": true },
+    "community": { "id": 3, "name": "science", "title": "Science", "actor_id": "https://lemmy.world/c/science" },
+    "counts": { "post_id": 4242, "comments": 12, "score": 104 }
+  },
+  "community_view": {},
+  "moderators": [],
+  "cross_posts": []
+}

@@ -18,6 +18,10 @@ export const postCommands: readonly { cmd: string; comment: string }[] = [
         cmd: 'proofpath check --url https://news.ycombinator.com/item?id=8863',
         comment: "a story's URL, and the links in a comment",
     },
+    {
+        cmd: 'proofpath check --url https://lemmy.world/post/1',
+        comment: 'the same on Lobste.rs and the Lemmy instances it knows',
+    },
     { cmd: 'proofpath check -', comment: 'paste the text of a post that cannot be read' },
     {
         cmd: 'proofpath check --url https://en.wikipedia.org/wiki/AlphaFold',
@@ -37,6 +41,11 @@ export const platforms: readonly Platform[] = [
         state: { label: 'read', tone: 'ink' },
     },
     {
+        name: 'Lobste.rs',
+        how: "The .json twin of every story and comment page, no account. A story's URL, the links in its text and in a comment.",
+        state: { label: 'read', tone: 'ink' },
+    },
+    {
         name: 'Reddit',
         how: 'With a free app you register yourself: REDDIT_CLIENT_ID and REDDIT_CLIENT_SECRET in .env. Without them no request is made: the post is UNVERIFIED (credentials missing), and the run names both variables.',
         state: { label: 'credentials missing', tone: 'slate' },
@@ -45,6 +54,11 @@ export const platforms: readonly Platform[] = [
         name: 'Mastodon',
         how: 'Best effort, per instance. An instance that wants a login says so, and that answer is reported as UNVERIFIED (blocked) — not as a missing post.',
         state: { label: 'blocked', tone: 'slate' },
+    },
+    {
+        name: 'Lemmy',
+        how: "Best effort, per instance, through the /api/v3 every instance serves without a login. Known by its host — lemmy.* and the big instances — never by /post/<n> alone, which is any blog's address.",
+        state: { label: 'read', tone: 'ink' },
     },
     {
         name: 'X',

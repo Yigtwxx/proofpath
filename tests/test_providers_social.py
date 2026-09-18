@@ -30,6 +30,7 @@ from proofpath.providers.social import (
     BSKY_API,
     COMMENT_NOT_LISTED,
     HN_API,
+    LEMMY_LOGIN_HINT,
     MASTODON_LOGIN_HINT,
     NOT_READ_HERE,
     REDDIT_API,
@@ -1288,3 +1289,255 @@ def test_a_cited_reddit_post_with_no_app_is_counted_under_its_own_reason(
     assert (doc.text_kind, doc.state) == ("none", CREDENTIALS_MISSING)
     assert doc.notes and REDDIT_CLIENT_ID_ENV in doc.notes[0]
     assert respx.calls.call_count == 0
+
+
+# --- Lemmy and Lobste.rs --------------------------------------------------------------
+
+
+LEMMY_POST_URL = "https://lemmy.world/post/4242"
+LEMMY_COMMENT_URL = "https://lemmy.world/comment/100"
+LEMMY_POST_API = "https://lemmy.world/api/v3/post"
+LEMMY_COMMENT_API = "https://lemmy.world/api/v3/comment"
+LOBSTERS_STORY_URL = "https://lobste.rs/s/abc123"
+LOBSTERS_SLUG_URL = "https://lobste.rs/s/abc123/our_2025_moderation_report_is_out"
+LOBSTERS_COMMENT_URL = "https://lobste.rs/c/c0ffee"
+LOBSTERS_FRAGMENT_URL = f"{LOBSTERS_SLUG_URL}#c_c0ffee"
+
+
+def lemmy_route(instance: str, kind: str, name: str, status: int = 200) -> Any:
+    return respx.get(f"https://{instance}/api/v3/{kind}").mock(
+        return_value=httpx.Response(status, json=fixture(name))
+    )
+
+
+def lobsters_route(path: str, name: str | None, status: int = 200) -> Any:
+    response = (
+        httpx.Response(status, json=fixture(name))
+        if name is not None
+        else httpx.Response(status, text="<!doctype html><html><body>Not found</body></html>")
+    )
+    return respx.get(f"https://lobste.rs/{path}.json").mock(return_value=response)
+
+
+def test_lemmy_and_lobsters_addresses_are_posts_this_version_answers_for() -> None:
+    for url in (LEMMY_POST_URL, LEMMY_COMMENT_URL, LOBSTERS_STORY_URL, LOBSTERS_SLUG_URL,
+                LOBSTERS_COMMENT_URL, LOBSTERS_FRAGMENT_URL):  # fmt: skip
+        assert is_post_url(url), url
+        assert is_read_here(url), url
+    # A community, a user page and the front pages are not single posts, but they are
+    # read here: the answer is "not a post", not "nobody reads this".
+    for url in (
+        "https://lemmy.world/c/science",
+        "https://lemmy.world/u/someone",
+        "https://lobste.rs/",
+        "https://lobste.rs/newest",
+        "https://lobste.rs/~someone",
+    ):
+        assert not is_post_url(url), url
+        assert is_read_here(url), url
+
+
+def test_a_post_shaped_path_on_an_unknown_host_is_not_a_lemmy_post() -> None:
+    """``/post/<n>`` is how half the web's blogs address an article. Only a host that
+    says it is Lemmy -- by prefix or by being one of the big instances -- is asked."""
+    for url in (
+        "https://example.test/post/4242",
+        "https://blog.example.test/comment/100",
+        "https://www.bsky.app/post/4242",
+        "https://mastodon.social/post/4242",
+    ):
+        assert not is_post_url(url), url
+    for url in (
+        "https://sh.itjust.works/post/4242",
+        "https://lemm.ee/comment/100",
+        "https://lemmy.ml/post/1",
+    ):
+        assert is_post_url(url), url
+        assert is_read_here(url), url
+
+
+def test_lobsters_is_paced_like_the_other_public_apis() -> None:
+    assert MIN_INTERVAL["lobste.rs"] == 0.5
+
+
+@respx.mock
+def test_a_lemmy_post_carries_its_title_body_and_the_address_it_submitted(client: Any) -> None:
+    route = lemmy_route("lemmy.world", "post", "lemmy-post.json")
+
+    post = read_post(LEMMY_POST_URL, client)
+
+    assert isinstance(post, Post)
+    assert [str(call.request.url) for call in route.calls] == [f"{LEMMY_POST_API}?id=4242"]
+    assert post.platform == "Lemmy"
+    assert post.author == "someone"
+    assert post.text.startswith("Our 2025 moderation report is out\n")
+    assert "its own tally" in post.text
+    # The submitted address first, then the body's markdown links in order.
+    assert post.links == (REPORT_LINK, REGULATOR_LINK, DATA_LINK)
+    assert post.quoted == ()
+    assert "Authorization" not in route.calls.last.request.headers
+
+
+@respx.mock
+def test_a_lemmy_comment_reads_its_own_text_and_never_follows_its_post(client: Any) -> None:
+    route = lemmy_route("lemmy.world", "comment", "lemmy-comment.json")
+
+    post = read_post(LEMMY_COMMENT_URL, client)
+
+    assert isinstance(post, Post)
+    assert [str(call.request.url) for call in route.calls] == [f"{LEMMY_COMMENT_API}?id=100"]
+    assert post.author == "reviewer"
+    assert post.links == (PAPER_LINK, DATA_LINK)
+    assert post.text.startswith('"revised" is the author\'s word & not mine')
+
+
+@respx.mock
+def test_a_removed_lemmy_post_is_blocked_where_a_deleted_one_is_unreachable(
+    client: Any,
+) -> None:
+    lemmy_route("lemmy.world", "post", "lemmy-removed.json")
+    removed = read_post("https://lemmy.world/post/4343", client)
+    respx.calls.reset()
+    lemmy_route("lemmy.world", "post", "lemmy-deleted.json")
+    deleted = read_post("https://lemmy.world/post/4444", client)
+
+    assert isinstance(removed, Unreadable) and removed.state == Outcome.BLOCKED.value
+    assert isinstance(deleted, Unreadable) and deleted.state == Outcome.UNREACHABLE.value
+
+
+@respx.mock
+def test_a_lemmy_post_the_instance_cannot_find_is_unreachable(client: Any) -> None:
+    """Lemmy answers a missing id with 400 and ``couldnt_find_post``, not with 404."""
+    lemmy_route("lemmy.world", "post", "lemmy-error.json", status=400)
+
+    unreadable = read_post("https://lemmy.world/post/999999999", client)
+
+    assert isinstance(unreadable, Unreadable)
+    assert unreadable.state == Outcome.UNREACHABLE.value
+
+
+@respx.mock
+def test_a_private_lemmy_instance_is_blocked_not_unreachable(client: Any) -> None:
+    """A private instance answers an anonymous reader with the *same* 400 as a missing
+    post, and ``not_logged_in`` in the body. The post is there; this reader may not
+    have it (spec section 15) -- filing it as "not found" is product rule 2's whole
+    subject."""
+    lemmy_route("lemmy.world", "post", "lemmy-not-logged-in.json", status=400)
+
+    unreadable = read_post(LEMMY_POST_URL, client)
+
+    assert isinstance(unreadable, Unreadable)
+    assert unreadable.state == Outcome.BLOCKED.value
+    assert unreadable.hint == LEMMY_LOGIN_HINT
+
+
+@respx.mock
+def test_a_lemmy_400_that_names_neither_fact_is_neither_gone_nor_blocked(client: Any) -> None:
+    """A 400 with a token this reader does not know says nothing about the post."""
+    respx.get(f"{LEMMY_POST_API}").mock(
+        return_value=httpx.Response(400, json={"error": "rate_limit_error"})
+    )
+
+    unreadable = read_post(LEMMY_POST_URL, client)
+
+    assert isinstance(unreadable, Unreadable)
+    assert unreadable.state == Outcome.UNAVAILABLE.value
+
+
+@respx.mock
+def test_a_mastodon_shaped_path_on_a_lemmy_or_lobsters_host_is_never_read_as_mastodon(
+    client: Any,
+) -> None:
+    for url in ("https://lemmy.world/@someone/109384756", "https://lobste.rs/@someone/1"):
+        unreadable = read_post(url, client)
+
+        assert isinstance(unreadable, Unreadable), url
+        assert unreadable.state == NOT_READ_HERE, url
+    assert respx.calls.call_count == 0
+
+
+@respx.mock
+def test_a_lemmy_post_is_read_from_a_listed_instance_that_has_no_lemmy_prefix(
+    client: Any,
+) -> None:
+    route = lemmy_route("sh.itjust.works", "post", "lemmy-post.json")
+
+    post = read_post("https://sh.itjust.works/post/4242", client)
+
+    assert isinstance(post, Post)
+    assert route.call_count == 1
+
+
+@respx.mock
+def test_a_lemmy_address_with_userinfo_or_a_port_is_read_from_the_instance_alone(
+    client: Any,
+) -> None:
+    route = respx.get("https://lemmy.example:8443/api/v3/post").mock(
+        return_value=httpx.Response(200, json=fixture("lemmy-post.json"))
+    )
+
+    post = read_post("https://someone@lemmy.example:8443/post/4242", client)
+
+    assert isinstance(post, Post)
+    assert route.call_count == 1
+    assert "Authorization" not in route.calls.last.request.headers
+
+
+@respx.mock
+def test_a_lobsters_story_carries_its_title_its_address_and_its_own_words_links(
+    client: Any,
+) -> None:
+    route = lobsters_route("s/abc123", "lobsters-story.json")
+
+    post = read_post(LOBSTERS_SLUG_URL, client)
+
+    assert isinstance(post, Post)
+    assert route.call_count == 1
+    assert post.platform == "Lobste.rs"
+    assert post.author == "someone"
+    assert post.text.startswith("Our 2025 moderation report is out\n")
+    assert "<p>" not in post.text and "&amp;" not in post.text
+    assert "its own tally & we agree" in post.text
+    # The submitted address first, then the anchors in the text. The anchor pointing
+    # at this story's own discussion page is not a source and is left out.
+    assert post.links == (REPORT_LINK, REGULATOR_LINK)
+
+
+@respx.mock
+def test_a_lobsters_comment_is_read_by_its_permalink_and_by_its_fragment(client: Any) -> None:
+    route = lobsters_route("c/c0ffee", "lobsters-comment.json")
+
+    for url in (LOBSTERS_COMMENT_URL, LOBSTERS_FRAGMENT_URL):
+        post = read_post(url, client)
+
+        assert isinstance(post, Post), url
+        assert post.author == "reviewer"
+        assert post.links == (PAPER_LINK, DATA_LINK)
+        assert '"revised" is the author\'s word & not mine' in post.text
+    # One request each, for the comment itself: the story it sits under is never read.
+    comment_api = "https://lobste.rs/c/c0ffee.json"
+    assert [str(call.request.url) for call in route.calls] == [comment_api, comment_api]
+
+
+@respx.mock
+def test_a_moderated_lobsters_comment_is_blocked_where_a_deleted_one_is_unreachable(
+    client: Any,
+) -> None:
+    lobsters_route("c/m0dded", "lobsters-moderated.json")
+    lobsters_route("c/g0ne00", "lobsters-deleted.json")
+
+    moderated = read_post("https://lobste.rs/c/m0dded", client)
+    deleted = read_post("https://lobste.rs/c/g0ne00", client)
+
+    assert isinstance(moderated, Unreadable) and moderated.state == Outcome.BLOCKED.value
+    assert isinstance(deleted, Unreadable) and deleted.state == Outcome.UNREACHABLE.value
+
+
+@respx.mock
+def test_a_missing_lobsters_story_is_unreachable(client: Any) -> None:
+    lobsters_route("s/zzzzzz", None, status=404)
+
+    unreadable = read_post("https://lobste.rs/s/zzzzzz", client)
+
+    assert isinstance(unreadable, Unreadable)
+    assert unreadable.state == Outcome.UNREACHABLE.value

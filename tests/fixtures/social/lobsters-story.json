@@ -1,0 +1,33 @@
+{
+  "short_id": "abc123",
+  "short_id_url": "https://lobste.rs/s/abc123",
+  "created_at": "2026-09-01T10:00:00.000-05:00",
+  "title": "Our 2025 moderation report is out",
+  "url": "https://example.test/moderation-report-2025",
+  "score": 42,
+  "flags": 0,
+  "comment_count": 1,
+  "description": "<p>The regulator published <a href=\"https://example.test/regulator-tally\" rel=\"ugc\">its own tally</a> &amp; we agree.</p>\n<p>Discussion of <a href=\"https://lobste.rs/s/abc123/our_2025_moderation_report_is_out\">this story</a> is welcome.</p>\n",
+  "description_plain": "The regulator published its own tally & we agree.\r\n\r\nDiscussion of this story is welcome.",
+  "comments_url": "https://lobste.rs/s/abc123/our_2025_moderation_report_is_out",
+  "submitter_user": "someone",
+  "user_is_author": false,
+  "tags": ["practices"],
+  "comments": [
+    {
+      "short_id": "c0ffee",
+      "short_id_url": "https://lobste.rs/c/c0ffee",
+      "created_at": "2026-09-02T08:00:00.000-05:00",
+      "last_edited_at": "2026-09-02T08:00:00.000-05:00",
+      "is_deleted": false,
+      "is_moderated": false,
+      "score": 3,
+      "flags": 0,
+      "parent_comment": null,
+      "comment": "<p>&quot;revised&quot; is the author's word &amp; not mine — see the <a href=\"https://example.test/paper.pdf\" rel=\"ugc\">paper</a> and <a href=\"https://example.test/data.csv\" rel=\"ugc\">the data</a>.</p>\n",
+      "comment_plain": "\"revised\" is the author's word & not mine",
+      "depth": 0,
+      "commenting_user": "reviewer"
+    }
+  ]
+}

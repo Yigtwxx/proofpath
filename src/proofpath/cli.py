@@ -506,7 +506,8 @@ def check(
             "--url",
             help=(
                 "An address to check instead of a file: a post (Bluesky, Hacker News, "
-                "Reddit, Mastodon) or any other page, read as the document itself."
+                "Lobste.rs, Reddit, Mastodon, Lemmy) or any other page, read as the "
+                "document itself."
             ),
         ),
     ] = None,

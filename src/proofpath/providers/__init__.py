@@ -44,9 +44,9 @@ NO_IDENTIFIER = "UNVERIFIED (no identifier to fetch)"
 NO_TEXT = "UNVERIFIED (reached, no text extracted)"
 
 # Hosts whose content is a post rather than a document, all of spec section 6.2's
-# list. ``providers.social`` answers for every one of them: Bluesky, Hacker News and
-# Mastodon through public APIs, Reddit through the user's own free app, and X by
-# saying it cannot be read and the text should be pasted instead.
+# list. ``providers.social`` answers for every one of them: Bluesky, Hacker News,
+# Lobste.rs, Mastodon and Lemmy through public APIs, Reddit through the user's own
+# free app, and X by saying it cannot be read and the text should be pasted instead.
 SOCIAL_HOSTS = frozenset(
     {
         "bsky.app",
@@ -54,6 +54,7 @@ SOCIAL_HOSTS = frozenset(
         "reddit.com",
         "x.com",
         "twitter.com",
+        "lobste.rs",
     }
 )
 # Mastodon is thousands of instances, not a host: there is no list to check against,
@@ -63,6 +64,23 @@ SOCIAL_HOSTS = frozenset(
 # guess about a host, where reading one the user handed to ``check --url`` is not.
 _MASTODON_PREFIXES = ("mastodon.", "mstdn.")
 _MASTODON_SUFFIX = ".social"
+# Lemmy is instances too, but its post address -- ``/post/<n>`` -- is how half the
+# web's blogs address an article, so the shape alone can never say "Lemmy" the way
+# ``/@user/<n>`` says "Mastodon". The host has to: the ``lemmy.`` prefix most
+# instances carry, or one of the big ones that do not. The list is short on purpose
+# and a miss costs what a Mastodon miss costs, a post read as a page. Public because
+# ``social`` reads by the same rule: asking an arbitrary host for ``/api/v3/post``
+# would send a request it never invited, and reading is held to the routing test.
+LEMMY_PREFIXES = ("lemmy.",)
+LEMMY_HOSTS = frozenset(
+    {
+        "lemm.ee",
+        "sh.itjust.works",
+        "beehaw.org",
+        "programming.dev",
+        "feddit.org",
+    }
+)
 
 # What is left of an entry once its address is taken out, if the entry was nothing
 # but an address. ``find_url`` already drops trailing ``.,;)``; a style that wraps
@@ -285,7 +303,16 @@ def is_social(url: str) -> bool:
         return False
     if any(host == known or host.endswith(f".{known}") for known in SOCIAL_HOSTS):
         return True
-    return host.startswith(_MASTODON_PREFIXES) or host.endswith(_MASTODON_SUFFIX)
+    if host.startswith(_MASTODON_PREFIXES) or host.endswith(_MASTODON_SUFFIX):
+        return True
+    return is_lemmy_host(host)
+
+
+def is_lemmy_host(host: str) -> bool:
+    """Whether a lowercased host, ``www.`` already gone, is one this tool reads as Lemmy."""
+    return host.startswith(LEMMY_PREFIXES) or any(
+        host == known or host.endswith(f".{known}") for known in LEMMY_HOSTS
+    )
 
 
 def doi_of(resolved: ResolveResult) -> str | None:

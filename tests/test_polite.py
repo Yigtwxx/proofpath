@@ -118,6 +118,37 @@ def test_403_raises_without_retry() -> None:
 
 
 @respx.mock
+def test_a_4xx_carries_the_error_token_its_json_body_named() -> None:
+    """Lemmy says ``400 {"error": "not_logged_in"}`` for a private instance and
+    ``400 {"error": "couldnt_find_post"}`` for a missing one -- the same status for
+    two facts spec section 15 keeps apart, told apart only by that one token."""
+    respx.get("https://lemmy.example/api/v3/post").mock(
+        return_value=httpx.Response(400, json={"error": "not_logged_in"})
+    )
+    with pytest.raises(pl.ProviderError) as raised:
+        pl.PoliteClient().get("https://lemmy.example/api/v3/post")
+    assert raised.value.status == 400
+    assert raised.value.code == "not_logged_in"
+    assert "not_logged_in" not in str(raised.value)
+
+
+@respx.mock
+def test_a_4xx_whose_body_is_not_a_bare_token_carries_no_code() -> None:
+    """Only a short identifier is kept. A message, a stack trace or an echoed request
+    is not a code and must never travel in the exception (security rules)."""
+    for body in (
+        httpx.Response(400, json={"error": "Bad request: token abc.def.ghi rejected"}),
+        httpx.Response(400, json={"message": "not_logged_in"}),
+        httpx.Response(400, text="<html>not_logged_in</html>"),
+        httpx.Response(400, json={"error": {"code": "not_logged_in"}}),
+    ):
+        respx.get("https://lemmy.example/api/v3/post").mock(return_value=body)
+        with pytest.raises(pl.ProviderError) as raised:
+            pl.PoliteClient().get("https://lemmy.example/api/v3/post")
+        assert raised.value.code is None, body
+
+
+@respx.mock
 def test_503_then_200_succeeds_on_the_second_attempt(monkeypatch: pytest.MonkeyPatch) -> None:
     clock = {"now": 0.0}
     slept: list[float] = []

@@ -543,9 +543,10 @@ def _address_document(
     """What one address names: a post on a platform that is read, else a page.
 
     Both tests, because they answer different questions: ``is_social`` knows the
-    listed platforms, and ``is_read_here`` knows a Mastodon status by its shape on
-    an instance no list names. Either makes the address a platform's, and a
-    platform's profile or front page is refused as one rather than read as a page.
+    listed platforms (a Lemmy host among them), and ``is_read_here`` knows a Mastodon
+    status by its shape on an instance no list names. Either makes the address a
+    platform's, and a platform's profile or front page is refused as one rather than
+    read as a page.
     """
     if is_social(url) or social.is_read_here(url):
         return _post_document(url, client, network_allowed=network_allowed)

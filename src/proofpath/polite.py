@@ -15,6 +15,7 @@ runs hit Crossref three times in the interval meant for one.
 
 from __future__ import annotations
 
+import re
 import threading
 import time
 from typing import Any
@@ -42,9 +43,11 @@ MIN_INTERVAL: dict[str, float] = {
     # client would keep anyway; a run reads one post, not a feed. Reddit does publish
     # one -- 60 requests a minute for an OAuth client -- and both of its hosts are
     # written down at that rate rather than left to the default that happens to match.
-    # Mastodon is not here: the host is the instance, and there is no list of those.
+    # Lobste.rs publishes none either and gets the same courtesy. Mastodon and Lemmy
+    # are not here: the host is the instance, and there is no list of those.
     "public.api.bsky.app": 0.5,
     "hacker-news.firebaseio.com": 0.5,
+    "lobste.rs": 0.5,
     "www.reddit.com": 1.0,
     "oauth.reddit.com": 1.0,
 }
@@ -60,11 +63,34 @@ class ProviderError(RuntimeError):
     provider that was down and said nothing about it (product rule 2) -- and the
     message alone cannot be read back reliably by the caller that has to tell them
     apart.
+
+    ``code`` is the one word a JSON error body named, when it named one -- Lemmy's
+    ``{"error": "not_logged_in"}`` against its ``{"error": "couldnt_find_post"}``,
+    the same 400 for two facts spec section 15 keeps apart. Only a bare identifier
+    is kept (:data:`ERROR_CODE`): a message or an echoed request is not a code, and
+    must not travel in an exception that ends up in a report (security rules).
     """
 
-    def __init__(self, message: str, status: int | None = None) -> None:
+    def __init__(self, message: str, status: int | None = None, code: str | None = None) -> None:
         super().__init__(message)
         self.status = status
+        self.code = code
+
+
+#: The shape of an error token worth carrying: a short snake_case identifier.
+ERROR_CODE = re.compile(r"^[a-z][a-z0-9_]{1,63}$")
+
+
+def error_code(response: httpx.Response) -> str | None:
+    """The bare token an error body's ``error`` field named, or ``None``."""
+    try:
+        payload = response.json()
+    except ValueError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    code = payload.get("error")
+    return code if isinstance(code, str) and ERROR_CODE.match(code) else None
 
 
 class HostThrottle:
@@ -221,6 +247,7 @@ class PoliteClient:
         """
         last = ""
         status: int | None = None
+        code: str | None = None
         for attempt in range(self._retries + 1):
             self.throttle(url)
             delay: float | None = 0.5 * 2.0**attempt
@@ -236,20 +263,22 @@ class PoliteClient:
             except httpx.HTTPError as exc:
                 last = type(exc).__name__
                 status = None
+                code = None
             else:
                 if response.status_code == 404 or response.status_code < 400:
                     return response
                 last = f"HTTP {response.status_code}"
                 status = response.status_code
+                code = error_code(response)
                 if response.status_code not in RETRYABLE:
                     break
                 retry_after = response.headers.get("Retry-After")
                 delay = backoff_delay(attempt, response.status_code, retry_after)
                 if delay is None:
                     # A daily budget is gone (OpenAlex answers with hours).
-                    raise ProviderError(f"{last}, retry after {retry_after}s", status)
+                    raise ProviderError(f"{last}, retry after {retry_after}s", status, code)
             if attempt < self._retries:
                 # None only when backoff_delay's cap check already raised, above.
                 assert delay is not None
                 time.sleep(delay)
-        raise ProviderError(last, status)
+        raise ProviderError(last, status, code)

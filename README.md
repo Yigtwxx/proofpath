@@ -249,6 +249,8 @@ back what it says:
 ```bash
 proofpath check --url https://bsky.app/profile/bsky.app/post/3movpwtbjgs2d
 proofpath check --url https://news.ycombinator.com/item?id=8863
+proofpath check --url https://lobste.rs/s/htziuj
+proofpath check --url https://lemmy.world/post/1
 proofpath check -                 # paste the text of a post that cannot be read
 ```
 
@@ -275,13 +277,15 @@ own words are never allowed to stand as their own evidence.
 |---|---|
 | Bluesky | `public.api.bsky.app`, no account, first-class. Link cards, rich-text links and one level of quoted post |
 | Hacker News | the official Firebase API, no account, first-class. A story's URL and the links in a comment |
+| Lobste.rs | the `.json` twin of every story and comment page, no account, first-class. A story's URL, the links in its text and the links in a comment |
 | Reddit | with a **free app you register yourself**: put `REDDIT_CLIENT_ID` and `REDDIT_CLIENT_SECRET` in `.env`. Without them the run says `UNVERIFIED (credentials missing)` and names both variables — it never quietly skips the post |
 | Mastodon | best effort, per instance. Many instances now require a login for the public API, and that answer is reported as `UNVERIFIED (blocked)`, not as a missing post |
+| Lemmy | best effort, per instance, through the `/api/v3` every instance serves without a login; a private instance's `not_logged_in` is reported as `UNVERIFIED (blocked)`, not as a missing post. A post's URL and the links in its body or in a comment. Known by its host — `lemmy.*` and the big instances without that prefix (`lemm.ee`, `sh.itjust.works`, `beehaw.org`, `programming.dev`, `feddit.org`) — never by `/post/<n>` alone, which is any blog's address; a post on an instance outside that rule is read as a page |
 | X / Twitter | cannot be read at all. `check --url` says so and asks you to paste the text; the links inside it are then verified normally |
 
 The Reddit path is built against Reddit's documented shapes and covered by fixtures, but it
 has never run against Reddit on this machine — nobody here has an app to register. Bluesky,
-Hacker News and Mastodon were each read live before release.
+Hacker News, Mastodon, Lobste.rs and Lemmy were each read live before release.
 
 ## Optional LLM judge (v0.3)
 

@@ -63,8 +63,8 @@ The core is source-agnostic. Everything platform-specific lives behind an
                      ▼                     ▼                     ▼
                academic://              web://               social://
            Crossref, OpenAlex,     search + primary      Bluesky, Reddit, HN,
-           PubMed, arXiv,          source fetch          Mastodon, Community
-           Unpaywall,                                    Notes dumps
+           PubMed, arXiv,          source fetch          Mastodon, Lobste.rs,
+           Unpaywall,                                    Lemmy
            Retraction Watch
 ```
 
@@ -150,6 +150,8 @@ Tested without authentication:
 | **Reddit** | `.json` suffix, `www` and `old` | **403 / HTML login wall** | free OAuth app registration required; user supplies credentials |
 | **Mastodon** | `/api/v1/timelines/public` | 422, auth required (instance-dependent) | per-instance, best effort |
 | **X / Twitter** | status URL | **404, 92 words** | not readable; Community Notes dumps only |
+| **Lobste.rs** (added 2026-09-18) | `/s/<id>.json`, `/c/<id>.json` | **200, clean JSON, no auth**; missing story 404, missing comment 400 | first-class support |
+| **Lemmy** (added 2026-09-18) | `/api/v3/post?id=`, `/api/v3/comment?id=` | **200, clean JSON, no auth** on `lemmy.world` and `lemmy.ml` (0.19.x); missing id is **400** `couldnt_find_post`, not 404, and a private instance is the same 400 with `not_logged_in` — the body's token, not the status, tells the two apart | per-instance, best effort; recognised by host (`lemmy.` prefix or a short list), never by `/post/<n>` alone |
 
 Consequence: the social provider is built **Bluesky-first**, not X-first. X is the
 exception, not the model. Where a post cannot be read, the user pastes its text and
@@ -1011,6 +1013,9 @@ line per reason on the terminal and in the markdown report (the TUI footer does 
 carry them — OPEN-ITEMS 15.4). X Community Notes dumps were **not** built — the paste
 path replaced them (OPEN-ITEMS 3.5). Measured: `docs/eval/2026-09-16-averitec.md`, and the
 number is bad — see §14.
+*v0.4.7, 2026-09-18:* Lobste.rs (first class, like Hacker News) and Lemmy (per instance,
+like Mastodon, but recognised by host because `/post/<n>` is any blog's address) — both
+probed without auth and read live before release, §6.2.
 
 **Later.** Turkish sources as a separate provider (TR Dizin / DergiPark class),
 `spiyweb` graph retrieval as an alternative backend, GROBID parser.
