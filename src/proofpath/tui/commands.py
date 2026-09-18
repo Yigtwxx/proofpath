@@ -13,7 +13,7 @@ parser has no idea which permission is being answered and should not guess.
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 
 VERBS = (
@@ -44,6 +44,20 @@ NEEDS_ARGUMENT = {
 #: is narrower than :data:`NEEDS_ARGUMENT` rather than equal to it.
 AWAITING_VERBS = ("check", "resolve", "fetch")
 ALLOW_ANSWERS = ("once", "always", "no", "never")
+#: One line per verb, for the list above the bar and for ``/help`` (wordmark design
+#: section 10): at most 40 characters and no trailing period, so a row stays a row.
+DESCRIPTIONS: Mapping[str, str] = {
+    "check": "verify a file, URL or pasted text",
+    "resolve": "does a cited reference exist",
+    "fetch": "read one URL, DOI or arXiv id",
+    "config": "settings panel, or show/set/check",
+    "cache": "list or drop cached sources",
+    "allow": "answer the permission question",
+    "summarize": "a paragraph over the last run",
+    "cancel": "stop a run",
+    "help": "commands and keys",
+    "quit": "leave",
+}
 #: The implicit verb: a line that is not a slash command is something to check.
 DEFAULT_VERB = "check"
 #: Splits the verb off at the first run of whitespace, whatever the terminal sent.

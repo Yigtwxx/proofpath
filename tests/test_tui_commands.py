@@ -12,6 +12,7 @@ import pytest
 from proofpath.tui.commands import (
     ALLOW_ANSWERS,
     AWAITING_VERBS,
+    DESCRIPTIONS,
     NEEDS_ARGUMENT,
     VERBS,
     Awaiting,
@@ -171,3 +172,19 @@ def test_awaiting_verbs_are_the_ones_that_open_a_run() -> None:
 )
 def test_complete(text: str, run_ids: tuple[int, ...], expected: list[str]) -> None:
     assert complete(text, run_ids=run_ids) == expected
+
+
+# --- the descriptions behind the suggestion list (wordmark design section 10) --------
+
+
+def test_every_verb_has_a_short_description_and_nothing_else_does() -> None:
+    """One line per verb, short enough for a row, and no verb the list cannot name."""
+    assert set(DESCRIPTIONS) == set(VERBS)
+    for verb, text in DESCRIPTIONS.items():
+        assert 0 < len(text) <= 40 and not text.endswith("."), verb
+
+
+def test_config_is_described_as_the_panel_first() -> None:
+    """``/config`` alone opens the settings panel (wordmark design section 12); the
+    scriptable forms come after it in the one line the list has."""
+    assert DESCRIPTIONS["config"] == "settings panel, or show/set/check"

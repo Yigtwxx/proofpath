@@ -1,7 +1,7 @@
 # The raven — the TUI pet, redrawn
 
 **Status:** approved 2026-09-16; implementation follows this document.
-**`RICH` superseded 2026-09-18 by `2026-09-18-wordmark-banner-design.md`; §5 (`PLAIN`) stands.**
+**Superseded in full 2026-09-18 by `2026-09-18-wordmark-banner-design.md` (§8.1); the raven remains on the website only.**
 Amends spec §13.1 of `2026-09-10-proofpath-design.md` and §3 of
 `2026-09-15-tui-v2-design.md` (the pet only; nothing else in either changes).
 

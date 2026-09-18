@@ -8,7 +8,7 @@ from rich.text import Text
 from textual import events as tevents
 from textual.binding import Binding, BindingType
 from textual.geometry import Size
-from textual.widgets import Input, Static
+from textual.widgets import Static
 
 from proofpath import ui
 from proofpath.report import Finding
@@ -187,24 +187,8 @@ class Line(Static):
         if 0 <= target < len(lines):
             lines[target].focus()
 
-    def on_key(self, event: tevents.Key) -> None:
-        """A printable key on a line is typing, and typing belongs to the bar.
-
-        ``c`` is the one exception: it is this line's copy (spec section 13.1). The
-        key is stopped here and posted to the bar afresh rather than inserted: an
-        unstopped key bubbles up to the screen and then to the app's own bindings,
-        where it would be checked against the bar's after focus has already moved.
-        Focused on the screen directly -- ``Widget.focus`` defers, and the key would
-        overtake the ``Focus`` -- and posted after it, the key is typed the way the
-        bar types every other one.
-        """
-        if not event.is_printable or event.character is None or event.key == "c":
-            return
-        event.stop()
-        event.prevent_default()
-        prompt = self.screen.query_one("#prompt", Input)
-        self.screen.set_focus(prompt)
-        prompt.post_message(tevents.Key(event.key, event.character))
+    # A printable key on a focused line is typing and goes to the bar; that is the
+    # app's ``on_key`` (wordmark design section 11), one rule in one place.
 
 
 class FindingsRule(Static):

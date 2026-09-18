@@ -15,27 +15,28 @@ from collections.abc import Callable
 from concurrent.futures import Future
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
 from textual import events as tevents
-from textual.widgets import Button
+from textual.binding import BindingType
+from textual.widgets import Button, Input, Static
 from textual.widgets.input import Selection as InputSelection
 
 from proofpath import __version__, browser, ui
 from proofpath import commands as library
 from proofpath import verify as verify_mod
 from proofpath.browser import ConsentGate
-from proofpath.config import Config, Permissions
+from proofpath.config import Config, ConfigError, JudgeConfig, Permissions, load_config
 from proofpath.document import Document, Locator, Reference
 from proofpath.events import Emitted, Event, Note, Progress, Prompted, StageEnd, StageStart
-from proofpath.judge import JudgeCost, JudgeError
+from proofpath.judge import JudgeCost, JudgeError, provider_defaults
 from proofpath.models import Label, Passage, Verdict
 from proofpath.paths import config_path
 from proofpath.report import Coverage, Finding, Kind, Report, summary_silence
 from proofpath.resolve import Candidate, ResolveResult
 from proofpath.resolve import State as ResolveState
-from proofpath.tui import banner, commands
+from proofpath.tui import commands, wordmark
 from proofpath.tui.app import (
     ANSWER_LABELS,
     AWAITING_VERBS,
@@ -49,16 +50,20 @@ from proofpath.tui.app import (
     NoteLine,
     PermissionPrompt,
     Prompt,
+    PromptFrame,
     ProofpathApp,
     RunBlock,
     RunHeader,
     RunLog,
     StageLine,
+    Suggestions,
     accent_for,
     run_context,
 )
+from proofpath.tui.banner import split_hint
 from proofpath.tui.runs import Run, State
 from proofpath.tui.theme import PLAIN, RICH
+from proofpath.tui.widgets.config_panel import ConfigPanel, PanelLine
 from proofpath.tui.widgets.prompt import HELD_SUMMARY
 from proofpath.verify import Engine
 
@@ -308,12 +313,14 @@ async def test_banner_reproduces_the_renderer_at_eighty_columns() -> None:
     async with app.run_test(size=SIZE):
         drawn = app.query_one(Banner).drawn
     assert drawn is not None
-    expected = banner.render(80, version=__version__, context=run_context(Config()), hint=HINT)
+    expected = wordmark.render(
+        80, PLAIN, version=__version__, context=run_context(Config()), hint=HINT
+    )
     assert drawn.lines == expected.lines
 
 
 async def test_banner_is_pure_ascii() -> None:
-    """Assumption 3.3: the pet renders identically in Windows Terminal."""
+    """Assumption 3.3: the banner renders identically in Windows Terminal."""
     app, _ = build_app()
     async with app.run_test(size=SIZE):
         drawn = app.query_one(Banner).drawn
@@ -531,7 +538,7 @@ async def test_two_hundred_notes_keep_the_footer_and_the_banner_in_place() -> No
         banner_widget = app.query_one(Banner)
         footer = app.query_one(CoverageFooter)
         assert banner_widget.region.y == 0
-        assert banner_widget.region.height == 6
+        assert banner_widget.region.height == 9  # the mark, the two text rows, the rule
         assert footer.display
         assert footer.region.bottom <= app.size.height
         assert "coverage" in footer.render().plain
@@ -565,6 +572,25 @@ async def test_help_lists_every_verb() -> None:
         text = "\n".join(line.render().plain for line in app.query(NoteLine))
     for verb in commands.VERBS:
         assert f"/{verb}" in text
+
+
+async def test_help_prints_each_verbs_description_after_its_placeholder() -> None:
+    """``commands.DESCRIPTIONS`` feeds ``/help`` too, not only the list above the
+    bar: each row is the verb, its placeholder (if any), the theme's own separator
+    glyph, and the description -- so ``/help`` never drifts from what the list
+    above the bar says a verb does."""
+    app, _ = build_app()  # PLAIN: sep is ","
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "/help")
+        notes = [line.render().plain for line in app.query(NoteLine)]
+    for verb in commands.VERBS:
+        placeholder = commands.NEEDS_ARGUMENT.get(verb, "")
+        expected = (
+            f"/{verb} {placeholder}".rstrip()
+            + f" {PLAIN.glyphs.sep} "
+            + commands.DESCRIPTIONS[verb]
+        )
+        assert any(note.endswith(expected) for note in notes), expected
 
 
 class FakeJudge:
@@ -838,9 +864,26 @@ async def test_a_stage_never_drops_its_attribution(width: int) -> None:
         assert len(row) <= width, row
 
 
+async def test_the_plain_banner_drops_the_command_list_when_the_hint_row_overflows() -> None:
+    """The overflow rule is the widget's, not the rich theme's: at 46 columns the
+    prompt and the command list cannot share a row, so the plain hint row is the
+    prompt alone and ``/help`` lists the commands."""
+    app, _ = build_app()
+    async with app.run_test(size=(46, 24)):
+        drawn = app.query_one(Banner).drawn
+    assert drawn is not None
+    where = wordmark.rows(46, version=__version__, context=run_context(Config()), hint=HINT)
+    prompt, _ = split_hint(HINT)
+    assert drawn.lines[where.hint] == prompt
+    assert "/quit" not in drawn.lines[where.hint]
+    assert all(len(line) <= 46 for line in drawn.lines)
+
+
 @pytest.mark.parametrize("width", [80, 60, 46])
 async def test_the_banner_container_fits_every_line_it_drew(width: int) -> None:
-    """Line 3 wraps below about 60 columns; the hint line must still be on screen."""
+    """Below the floor the mark goes and the two text rows stay; narrower still, the
+    hint row would wrap. Whatever was drawn, the container holds every row of it
+    and the hint is on screen."""
     app, _ = build_app()
     async with app.run_test(size=(width, 24)):
         widget = app.query_one(Banner)
@@ -855,15 +898,15 @@ async def test_the_banner_container_fits_every_line_it_drew(width: int) -> None:
 async def test_resizing_redraws_the_banner_and_keeps_the_footer_docked() -> None:
     app, _ = build_app()
     async with app.run_test(size=SIZE) as pilot:
-        assert app.query_one(Banner).drawn.lines[5].endswith("_")
+        assert app.query_one(Banner).drawn.lines[-1].endswith("-")
         await pilot.resize_terminal(60, 24)
         await pilot.pause()
         drawn = app.query_one(Banner).drawn
         assert drawn is not None
         assert (
             drawn.lines
-            == banner.render(
-                60, version=__version__, context=run_context(Config()), hint=HINT
+            == wordmark.render(
+                60, PLAIN, version=__version__, context=run_context(Config()), hint=HINT
             ).lines
         )
         footer = app.query_one(CoverageFooter)
@@ -894,11 +937,11 @@ async def test_up_brings_back_the_last_line() -> None:
     app, _ = build_app()
     async with app.run_test(size=SIZE) as pilot:
         await submit(pilot, "/help")
-        await submit(pilot, "/config")
+        await submit(pilot, "/config show")  # bare ``/config`` opens a panel that takes focus
         prompt = app.query_one(Prompt)
         await pilot.press("up")
-        assert prompt.value == "/config"
-        assert prompt.cursor_position == len("/config")
+        assert prompt.value == "/config show"
+        assert prompt.cursor_position == len("/config show")
         await pilot.press("up")
         assert prompt.value == "/help"
         await pilot.press("up")  # at the oldest: stays
@@ -923,13 +966,13 @@ async def test_an_edit_ends_the_walk() -> None:
     app, _ = build_app()
     async with app.run_test(size=SIZE) as pilot:
         await submit(pilot, "/help")
-        await submit(pilot, "/config")
+        await submit(pilot, "/config show")  # bare ``/config`` opens a panel that takes focus
         prompt = app.query_one(Prompt)
         await pilot.press("up")
         await pilot.press("x")
-        assert prompt.value == "/configx"
+        assert prompt.value == "/config showx"
         await pilot.press("up")  # a fresh walk: starts at the newest again
-        assert prompt.value == "/config"
+        assert prompt.value == "/config show"
 
 
 async def test_held_up_walks_back_even_when_keys_outrun_changed() -> None:
@@ -1761,15 +1804,17 @@ async def test_config_set_changes_what_the_rest_of_the_session_decides_by() -> N
 
 
 async def test_config_set_of_the_network_permission_redraws_the_banner() -> None:
-    """Line 3 says online/offline; a session that changed it must not still say online."""
+    """The version row says online/offline; a session that changed it must not still say online."""
     app, _ = build_app()
     async with app.run_test(size=SIZE) as pilot:
-        assert " online " in app.query_one(Banner).drawn.lines[3]
+        context = run_context(Config())
+        row = wordmark.rows(80, version=__version__, context=context, hint=HINT).version
+        assert " online " in app.query_one(Banner).drawn.lines[row]
         await submit(pilot, "/config set permissions.network deny")
         await lines_of(app, pilot)
         await until(
             pilot,
-            lambda: " offline " in _banner_lines(app)[3],
+            lambda: " offline " in _banner_lines(app)[row],
             "the banner to be redrawn offline",
         )
 
@@ -1907,7 +1952,10 @@ async def test_tab_on_a_target_moves_focus_instead() -> None:
         assert app.focused is not prompt
 
 
-async def test_a_history_step_ends_the_completion_cycle() -> None:
+async def test_up_after_a_completion_moves_the_selection_not_the_history() -> None:
+    """Once ``Tab`` has shown the cycle, ``up`` is the list's (wordmark design section
+    10); a history step can only happen once the list is gone, and it then starts a
+    fresh cycle over the recalled line."""
     app, _ = build_app()
     async with app.run_test(size=SIZE) as pilot:
         await submit(pilot, "/check one.pdf")
@@ -1916,6 +1964,11 @@ async def test_a_history_step_ends_the_completion_cycle() -> None:
         prompt.cursor_position = 7
         await pilot.press("tab")
         assert prompt.value == "/allow once"
+        await pilot.press("up")  # the last row, not the history
+        assert prompt.value == "/allow once"
+        assert prompt.selected == len(commands.ALLOW_ANSWERS) - 1
+        prompt.value = ""  # an edit: the cycle and the list go
+        await pilot.pause()
         await pilot.press("up")
         assert prompt.value == "/check one.pdf"
         await pilot.press("tab")  # a fresh cycle over the recalled line: nothing to complete
@@ -1947,6 +2000,378 @@ async def test_tab_on_a_slash_line_with_nothing_to_complete_keeps_focus() -> Non
         await pilot.press("tab")
         assert prompt.value == "/check paper.pdf"
         assert app.focused is prompt
+
+
+# --- slash suggestions (wordmark design section 10) ---------------------------------
+
+
+async def type_into(pilot: Any, text: str) -> None:
+    """Type ``text`` into the bar one key at a time, so ``Changed`` fires per keystroke."""
+    prompt = pilot.app.query_one(Prompt)
+    prompt.focus()
+    await pilot.press(*text)
+    await pilot.pause()
+
+
+def _completion(verb: str) -> str:
+    return f"/{verb} " if verb in commands.NEEDS_ARGUMENT else f"/{verb}"
+
+
+async def test_a_slash_lists_every_verb_in_order_with_the_first_selected() -> None:
+    app, _ = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        await type_into(pilot, "/")
+        prompt = app.query_one(Prompt)
+        suggestions = app.query_one(Suggestions)
+        assert suggestions.visible
+        assert prompt.value == "/"
+        assert prompt.candidates == tuple(_completion(verb) for verb in commands.VERBS)
+        assert prompt.selected == 0
+        assert len(suggestions.held) == len(commands.VERBS)
+        for row, verb in zip(suggestions.held, commands.VERBS, strict=True):
+            # ``plain`` marks the selected row and indents the others under it.
+            assert row.startswith("> ") if verb == commands.VERBS[0] else row.startswith("  ")
+            body = row[2:]
+            assert body.startswith(f"/{verb}")
+            assert commands.NEEDS_ARGUMENT.get(verb, "") in body
+            assert body.endswith(commands.DESCRIPTIONS[verb])
+        # Three columns: every completion, placeholder and description starts on the
+        # same column as the others of its kind.
+        columns = {
+            row.index(commands.DESCRIPTIONS[verb])
+            for row, verb in zip(suggestions.held, commands.VERBS, strict=True)
+        }
+        assert len(columns) == 1
+
+
+async def test_the_list_narrows_per_keystroke_and_goes_when_nothing_matches() -> None:
+    app, _ = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        suggestions = app.query_one(Suggestions)
+        await type_into(pilot, "/h")
+        assert suggestions.visible
+        assert [row[2:].split("  ")[0] for row in suggestions.held] == ["/help"]
+        await type_into(pilot, "e")
+        assert suggestions.visible
+        assert app.query_one(Prompt).candidates == ("/help",)
+        await pilot.press("backspace", "backspace")
+        await type_into(pilot, "x")
+        assert app.query_one(Prompt).value == "/x"
+        assert suggestions.visible is False
+
+
+async def test_a_verb_with_its_space_suggests_nothing_but_allow_and_cancel_do() -> None:
+    app, schedulers = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        suggestions = app.query_one(Suggestions)
+        await type_into(pilot, "/check ")
+        assert suggestions.visible is False
+        await pilot.press(*(["backspace"] * len("/check ")))
+        await type_into(pilot, "/allow ")
+        assert suggestions.visible
+        assert [row[2:].split("  ")[0] for row in suggestions.held] == [
+            f"/allow {answer}" for answer in commands.ALLOW_ANSWERS
+        ]
+        # An answer has no placeholder of its own; the description is the verb's.
+        assert all(row.endswith(commands.DESCRIPTIONS["allow"]) for row in suggestions.held)
+        assert all(commands.NEEDS_ARGUMENT["allow"] not in row for row in suggestions.held)
+        await pilot.press(*(["backspace"] * len("/allow ")))
+        await submit(pilot, "/check one.pdf")
+        assert schedulers[0].runs[0].state == "queued"
+        await type_into(pilot, "/cancel ")
+        assert suggestions.visible
+        assert [row[2:].split("  ")[0] for row in suggestions.held] == ["/cancel #1"]
+
+
+async def test_arrows_move_the_selection_and_tab_takes_the_selected_row() -> None:
+    app, _ = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        prompt = app.query_one(Prompt)
+        suggestions = app.query_one(Suggestions)
+        await type_into(pilot, "/")
+        await pilot.press("down")
+        assert prompt.value == "/"
+        assert prompt.selected == 1
+        assert suggestions.held[1].startswith("> ") and suggestions.held[0].startswith("  ")
+        await pilot.press("up")
+        assert prompt.selected == 0
+        await pilot.press("up")  # wraps to the last row
+        assert prompt.selected == len(commands.VERBS) - 1
+        await pilot.press("down", "down", "down")
+        chosen = prompt.candidates[prompt.selected]
+        assert chosen == _completion("fetch")
+        await pilot.press("tab")
+        assert prompt.value == chosen
+        # The cycle stays on show, with its siblings, so a further ``tab`` steps on.
+        assert suggestions.visible
+        assert prompt.selected == 2 and suggestions.held[2].startswith("> ")
+        await pilot.press("tab")
+        assert prompt.value == _completion("config")
+        await pilot.press("down")  # moves the selection, leaves the bar alone
+        assert prompt.value == _completion("config")
+        assert prompt.selected == 4
+        await pilot.press("tab")
+        assert prompt.value == _completion("cache")
+
+
+async def test_enter_runs_what_is_in_the_bar_and_the_list_goes() -> None:
+    app, _ = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        suggestions = app.query_one(Suggestions)
+        await type_into(pilot, "/help")
+        assert suggestions.visible
+        await pilot.press("enter")
+        await pilot.pause()
+        assert f"/check {commands.NEEDS_ARGUMENT['check']}" in _notes(app)
+        assert app.query_one(Prompt).value == ""
+        assert suggestions.visible is False
+
+
+async def test_the_selection_never_walks_the_history_and_a_recalled_line_shows_no_list() -> None:
+    app, _ = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "/help")
+        await submit(pilot, "/cache")  # bare ``/config`` opens a panel that takes focus
+        prompt = app.query_one(Prompt)
+        suggestions = app.query_one(Suggestions)
+        await type_into(pilot, "/")
+        await pilot.press("down")
+        assert prompt.value == "/"  # the list's, not the history's
+        await pilot.press("up")
+        assert prompt.value == "/"
+        await pilot.press("backspace")
+        assert suggestions.visible is False
+        # With the list hidden the keys are the walk again, and a recalled line does
+        # not open the list over itself: the next ``up`` walks on.
+        await pilot.press("up")
+        assert prompt.value == "/cache"
+        assert suggestions.visible is False
+        await pilot.press("up")
+        assert prompt.value == "/help"
+        await pilot.press("down", "down")
+        assert prompt.value == ""
+        # An edit of a recalled line is typing again: the list comes back.
+        await pilot.press("up")
+        await type_into(pilot, "x")
+        assert prompt.value == "/cachex"
+        assert suggestions.visible is False
+        await pilot.press("backspace", "backspace", "backspace")
+        assert prompt.value == "/cac"
+        assert suggestions.visible
+
+
+async def test_tab_on_a_recalled_slash_line_brings_the_list_back() -> None:
+    app, _ = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "/con")  # unknown, but any submitted line is one of history
+        prompt = app.query_one(Prompt)
+        suggestions = app.query_one(Suggestions)
+        await pilot.press("up")
+        assert prompt.value == "/con"
+        assert suggestions.visible is False  # a recalled line shows no list over itself
+        await pilot.press("tab")
+        # "con" completes to one candidate; ``tab`` both takes it and reopens the list.
+        assert prompt.value == "/config"
+        assert suggestions.visible
+        assert prompt.candidates == ("/config",)
+        assert prompt.selected == 0
+        assert suggestions.held[0].endswith(commands.DESCRIPTIONS["config"])
+
+
+async def test_the_list_never_covers_the_log_and_the_bottom_grows_by_its_rows() -> None:
+    app, _ = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        bottom = app.query_one("#bottom")
+        log = app.query_one(RunLog)
+        suggestions = app.query_one(Suggestions)
+        frame = app.query_one(PromptFrame)
+        footer = app.query_one(CoverageFooter)
+        assert bottom.region.height == 4
+        assert footer.region.height == 3 and frame.region.height == 1
+        log_height = log.region.height
+        await type_into(pilot, "/c")
+        await pilot.pause()
+        assert suggestions.visible
+        assert len(suggestions.held) == 4
+        assert suggestions.drawn == suggestions.held  # four candidates, nothing capped
+        assert bottom.region.height == 4 + len(suggestions.drawn)
+        assert suggestions.region.height == len(suggestions.drawn)
+        assert log.region.height == log_height - len(suggestions.drawn)
+        assert log.region.bottom <= suggestions.region.y
+        assert footer.region.bottom <= suggestions.region.y
+        assert suggestions.region.bottom <= frame.region.y
+        await pilot.press("backspace")
+        await pilot.pause()
+        # ``/`` alone lists every verb, and with the shortened ``/summarize``
+        # description (item 1) none of the ten rows wraps at eighty columns: at
+        # 80x24 they all fit, so there is nothing to cap and no indicator.
+        banner = app.query_one("#banner").region.height
+        assert len(suggestions.held) == len(commands.VERBS)
+        assert suggestions.window == (0, len(commands.VERBS))
+        assert suggestions.drawn == suggestions.held
+        assert suggestions.region.height == len(commands.VERBS)
+        assert bottom.region.height == 4 + len(commands.VERBS)
+        assert log.region.bottom == footer.region.y
+        assert footer.region.bottom == suggestions.region.y
+        assert suggestions.region.bottom == frame.region.y
+        assert not app.screen.show_vertical_scrollbar
+        assert bottom.region.width == SIZE[0]
+
+        # A shorter terminal is what forces the cap now (not a wrapped row): the
+        # banner, the footer (3) and the bar (1) plus one row of log leave fewer
+        # than ten lines at 80x20, so the window shows a run of rows and an
+        # ``... n more`` line -- itself counted against the cap -- fills the rest.
+        await pilot.resize_terminal(80, 20)
+        await pilot.pause()
+        limit = 20 - banner - footer.rows - frame.rows - 1
+        assert 0 < limit < len(commands.VERBS)
+        assert suggestions.visible
+        first, last = suggestions.window
+        assert (first, last) != (0, len(commands.VERBS))
+        assert first == 0  # the selection (row 0) is still at the top
+        assert len(suggestions.drawn) == limit
+        assert suggestions.drawn[:-1] == suggestions.held[first:last]
+        assert suggestions.drawn[-1] == f"... {len(commands.VERBS) - last} more"
+        assert bottom.region.height == 4 + limit
+        assert suggestions.region.height == limit
+        assert log.region.height == 1
+        assert log.region.bottom <= suggestions.region.y
+        assert footer.region.bottom <= suggestions.region.y
+        assert suggestions.region.bottom <= frame.region.y
+        assert not app.screen.show_vertical_scrollbar
+        assert bottom.region.width == 80
+
+        # The window slides with the selection: ``up`` wraps to ``/quit``, off the
+        # bottom of the first window, and the top gives way to an indicator instead.
+        await pilot.press("up")
+        await pilot.pause()
+        assert app.query_one(Prompt).selected == len(commands.VERBS) - 1
+        first, last = suggestions.window
+        assert first > 0 and last == len(commands.VERBS)
+        assert len(suggestions.drawn) == limit
+        assert suggestions.drawn[0] == f"... {first} more"
+        assert suggestions.drawn[1:] == suggestions.held[first:last]
+        assert suggestions.drawn[-1].endswith(commands.DESCRIPTIONS["quit"])
+        assert bottom.region.height == 4 + limit
+
+        # Taller again: the window and the indicator both give the rows back.
+        await pilot.resize_terminal(*SIZE)
+        await pilot.pause()
+        assert suggestions.window == (0, len(commands.VERBS))
+        assert suggestions.drawn == suggestions.held
+        assert bottom.region.height == 4 + len(commands.VERBS)
+        assert log.region.height == 1
+        assert not app.screen.show_vertical_scrollbar
+
+        await pilot.press("backspace")
+        await pilot.pause()
+        assert suggestions.visible is False
+        assert bottom.region.height == 4
+        assert log.region.height == log_height
+
+
+async def test_the_more_indicator_marks_only_the_rows_the_cap_hides() -> None:
+    app, _ = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        suggestions = app.query_one(Suggestions)
+        await type_into(pilot, "/")
+        # At SIZE (80x24) all ten rows fit, nothing is hidden: no indicator either end.
+        assert suggestions.window == (0, len(commands.VERBS))
+        assert suggestions.drawn == suggestions.held
+        assert not any(row.startswith("...") for row in suggestions.drawn)
+
+        # 80x20 is short enough that fewer than ten rows fit: the bottom indicator
+        # takes the last drawn line, muted, with the count of rows below the window.
+        await pilot.resize_terminal(80, 20)
+        await pilot.pause()
+        first, last = suggestions.window
+        assert first == 0
+        assert last < len(commands.VERBS)
+        assert suggestions.drawn[-1] == f"... {len(commands.VERBS) - last} more"
+        assert suggestions.drawn[0] != suggestions.drawn[-1]  # only the one end hides
+
+        # ``up`` wraps the selection to ``/quit``, off the bottom of that window:
+        # the window slides down and the *top* indicator takes the first drawn line.
+        await pilot.press("up")
+        await pilot.pause()
+        first, last = suggestions.window
+        assert first > 0
+        assert last == len(commands.VERBS)
+        assert suggestions.drawn[0] == f"... {first} more"
+        assert suggestions.drawn[-1].endswith(commands.DESCRIPTIONS["quit"])
+
+        # Back to SIZE, everything fits again and the indicator goes.
+        await pilot.resize_terminal(*SIZE)
+        await pilot.pause()
+        assert suggestions.window == (0, len(commands.VERBS))
+        assert not any(row.startswith("...") for row in suggestions.drawn)
+
+
+async def test_the_indicator_is_dropped_when_the_cap_leaves_room_for_only_the_row() -> None:
+    """At ``limit == 1`` there is room for the selected row and nothing else: an
+    ``... n more`` indicator would already overrun the cap on its own, so neither
+    end draws one, however many rows sit outside the window."""
+    app, _ = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        suggestions = app.query_one(Suggestions)
+        await type_into(pilot, "/")
+        await pilot.resize_terminal(80, 15)
+        await pilot.pause()
+        assert app._suggestion_lines(app.size) == 1
+        first, last = suggestions.window
+        assert last - first == 1
+        assert suggestions.drawn == (suggestions.held[first],)
+        assert not any(row.startswith("...") for row in suggestions.drawn)
+
+        # The selection can sit in the middle of the list, hidden on both sides:
+        # the row alone still shows, still with no indicator either end.
+        for _ in range(4):
+            await pilot.press("down")
+        await pilot.pause()
+        first, last = suggestions.window
+        assert first > 0
+        assert last < len(commands.VERBS)
+        assert last - first == 1
+        assert suggestions.drawn == (suggestions.held[first],)
+        assert not any(row.startswith("...") for row in suggestions.drawn)
+
+
+async def test_the_indicator_keeps_the_bottom_row_when_the_cap_leaves_room_for_one() -> None:
+    """At ``limit == 2`` there is room for the selected row and one indicator. With
+    rows hidden on both sides of the selection, only one indicator fits, and the
+    bottom one is the one that stays."""
+    app, _ = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        suggestions = app.query_one(Suggestions)
+        await type_into(pilot, "/")
+        await pilot.resize_terminal(80, 16)
+        await pilot.pause()
+        assert app._suggestion_lines(app.size) == 2
+
+        # Move the selection into the middle of the list: rows are hidden above
+        # and below it.
+        for _ in range(4):
+            await pilot.press("down")
+        await pilot.pause()
+        first, last = suggestions.window
+        assert first > 0
+        assert last < len(commands.VERBS)
+        assert last - first == 1
+        assert suggestions.drawn == (
+            suggestions.held[first],
+            f"... {len(commands.VERBS) - last} more",
+        )
+
+
+async def test_a_held_paste_never_opens_the_list() -> None:
+    app, _ = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        await paste(pilot, "/help\n/config")
+        prompt = app.query_one(Prompt)
+        assert prompt.held == "/help\n/config"
+        assert prompt.value.startswith("pasted")
+        assert HELD_SUMMARY.startswith("pasted")
+        assert app.query_one(Suggestions).visible is False
 
 
 # --- the log from the keyboard ------------------------------------------------------
@@ -2061,6 +2486,185 @@ async def test_typing_on_a_line_keeps_the_bar_draft() -> None:
         await pilot.press("p")
         assert app.focused is prompt
         assert prompt.value == "check pap"
+
+
+# --- typing reaches the bar (wordmark design section 11) ----------------------------
+
+
+async def test_a_click_on_the_log_background_keeps_the_bar_focused() -> None:
+    """The log is not focusable: a click on its empty background is not a departure."""
+    app, _ = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        prompt = app.query_one(Prompt)
+        await click(pilot, RunLog, offset=(10, 5))
+        await pilot.pause()
+        assert app.focused is prompt
+        await pilot.press("x")
+        assert prompt.value == "x"
+
+
+async def test_a_click_on_the_banner_keeps_the_bar_focused() -> None:
+    app, _ = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        prompt = app.query_one(Prompt)
+        await click(pilot, Banner)
+        await pilot.pause()
+        assert app.focused is prompt
+        await pilot.press("x")
+        assert prompt.value == "x"
+
+
+async def test_typing_after_clicking_a_finding_goes_to_the_bar() -> None:
+    """A click on a line still focuses it; the first printable key after that is
+    typing and takes focus back to the bar, except ``c``, which is the line's copy."""
+    copied: list[str] = []
+    app, schedulers = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        app.copy_to_clipboard = copied.append  # type: ignore[method-assign]
+        await submit(pilot, "/check draft.md")
+        schedulers[0].push(schedulers[0].runs[0], Emitted(a_verdict_finding()))
+        await pilot.pause()
+        line = app.query_one(FindingLine)
+        prompt = app.query_one(Prompt)
+        await click(pilot, FindingLine, offset=(2, 0))
+        await pilot.pause()
+        assert app.focused is line
+        await pilot.press("h")
+        assert app.focused is prompt
+        assert prompt.value == "h"
+        await click(pilot, FindingLine, offset=(2, 0))
+        await pilot.pause()
+        assert app.focused is line
+        await pilot.press("c")
+        await pilot.pause()
+        assert prompt.value == "h"
+        assert app.focused is line
+        assert copied == ["we observed a 4-8% improvement in throughput"]
+
+
+async def test_a_slash_after_clicking_a_finding_brings_the_list_up() -> None:
+    """The forwarded key goes through the bar's own path, so the suggestions follow
+    it (wordmark design section 10)."""
+    app, schedulers = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "/check draft.md")
+        schedulers[0].push(schedulers[0].runs[0], Emitted(a_verdict_finding()))
+        await pilot.pause()
+        await click(pilot, FindingLine, offset=(2, 0))
+        await pilot.pause()
+        assert app.focused is app.query_one(FindingLine)
+        await pilot.press("slash")
+        await pilot.pause()
+        prompt = app.query_one(Prompt)
+        assert app.focused is prompt
+        assert prompt.value == "/"
+        assert app.query_one(Suggestions).visible
+        assert len(app.query_one(Suggestions).held) == len(commands.VERBS)
+
+
+async def test_typing_on_a_permission_button_goes_to_the_bar() -> None:
+    """A printable key on a button is typing; ``enter`` has no printable character,
+    never reaches the forwarding, and is still the button's own."""
+    app, schedulers = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "/check draft.md")
+        run = schedulers[0].runs[0]
+        answer = ask_from_a_worker(app, run.id)
+        await until(pilot, lambda: app.query(PermissionPrompt), "the prompt")
+        button = app.query_one("#allow-once", Button)
+        prompt = app.query_one(Prompt)
+        button.focus()
+        await pilot.pause()
+        assert app.focused is button
+        await pilot.press("y")
+        assert app.focused is prompt
+        assert prompt.value == "y"
+        assert not answer.done()
+        button.focus()
+        await pilot.pause()
+        await pilot.press("enter")
+        assert await answered(pilot, answer) == "once"
+        assert prompt.value == "y"
+
+
+async def test_space_on_a_permission_button_is_typing_too() -> None:
+    """Textual's ``Button`` binds ``enter`` alone and has no key handler, so
+    ``space`` never pressed a button; it is a printable key and goes to the bar.
+    The binding is asserted so a Textual that starts binding ``space`` fails here
+    loudly: the app's rule then keeps it with the button, and this test flips."""
+    app, schedulers = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "/check draft.md")
+        run = schedulers[0].runs[0]
+        answer = ask_from_a_worker(app, run.id)
+        await until(pilot, lambda: app.query(PermissionPrompt), "the prompt")
+        button = app.query_one("#allow-once", Button)
+        prompt = app.query_one(Prompt)
+        assert set(button._bindings.key_to_bindings) == {"enter"}
+        button.focus()
+        await pilot.pause()
+        assert app.focused is button
+        await pilot.press("space")
+        assert app.focused is prompt
+        assert prompt.value == " "
+        assert not answer.done()
+        button.focus()
+        await pilot.pause()
+        await pilot.press("enter")
+        assert await answered(pilot, answer) == "once"
+
+
+async def test_a_tuple_bound_comma_separated_key_stays_with_its_widget() -> None:
+    """``_bound_keys`` walks ``BINDINGS`` through the public ``Binding.make_bindings``
+    route rather than a widget's private ``_bindings`` cache, so it must handle both
+    forms ``BINDINGS`` is allowed to hold: a bare ``(key, action, description)``
+    tuple, and a single entry whose key is a comma-separated list. Neither ``h`` nor
+    ``g`` should reach the bar; an unbound printable key still should."""
+
+    class _CommaBoundWidget(Static, can_focus=True):
+        BINDINGS: ClassVar[list[BindingType]] = [("h,g", "noop", "no-op")]
+
+        def action_noop(self) -> None:
+            pass
+
+    app, _ = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        prompt = app.query_one(Prompt)
+        widget = _CommaBoundWidget("custom")
+        await app.query_one(RunLog).mount(widget)
+        widget.focus()
+        await pilot.pause()
+        assert app.focused is widget
+
+        await pilot.press("h")
+        assert app.focused is widget
+        assert prompt.value == ""
+
+        await pilot.press("g")
+        assert app.focused is widget
+        assert prompt.value == ""
+
+        await pilot.press("x")
+        assert app.focused is prompt
+        assert prompt.value == "x"
+
+
+async def test_the_log_is_not_in_the_focus_chain() -> None:
+    """``tab`` from the bar lands on the first line, never on the log itself."""
+    app, schedulers = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "/check draft.md")
+        schedulers[0].push(schedulers[0].runs[0], Emitted(a_verdict_finding()))
+        await pilot.pause()
+        log = app.query_one(RunLog)
+        assert not log.can_focus
+        assert log not in app.screen.focus_chain
+        prompt = app.query_one(Prompt)
+        prompt.value = "paper.pdf"  # not a slash line: ``tab`` is Textual's focus-next
+        await pilot.press("tab")
+        assert app.focused is app.query_one(RunHeader)
+        await pilot.press("shift+tab")
+        assert app.focused is prompt
 
 
 # --- clearing and copying -----------------------------------------------------------
@@ -2296,3 +2900,506 @@ async def test_an_unknown_verb_note_is_ascii_in_plain_theme() -> None:
         notes = _notes(app)
     assert "/Check" in notes
     assert notes.isascii(), f"non-ASCII note in PLAIN theme: {notes!r}"
+
+
+# --- the config panel (wordmark design section 12) ----------------------------------
+
+
+@pytest.fixture
+def no_keys(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """No API key anywhere the panel looks: not in the environment and not in a
+    ``.env`` beside the working directory, which is ``tmp_path`` for the test. The
+    config dir's ``.env`` is already the isolated one."""
+    for name in ("GROQ_API_KEY", "GEMINI_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.chdir(tmp_path)
+
+
+def _shown(panel: ConfigPanel) -> list[str]:
+    """The panel's lines as drawn, top to bottom: a line inside a hidden container
+    (the body of a collapsed panel) is not on screen either."""
+    return [
+        line.render().plain
+        for line in panel.query(PanelLine)
+        if all(node.display for node in line.ancestors_with_self)
+    ]
+
+
+def _panel_text(panel: ConfigPanel) -> str:
+    return "\n".join(_shown(panel))
+
+
+def _panel_row(panel: ConfigPanel, name: str) -> str:
+    """The one row line that names ``name`` (``install_browser``, ``model``...)."""
+    return next(line for line in _shown(panel) if line[2:].startswith(f"{name} "))
+
+
+def _error_lines(app: ProofpathApp) -> str:
+    """The error lines mounted loose in the log, under a panel."""
+    return "\n".join(
+        line.render().plain for line in app.query(KvLine) if isinstance(line.parent, RunLog)
+    )
+
+
+async def open_panel(pilot: Any) -> ConfigPanel:
+    """``/config`` with nothing after it, and the panel it opens, focused."""
+    await submit(pilot, "/config")
+    await pilot.pause()
+    panel = pilot.app.query(ConfigPanel).last()  # the newest, below any collapsed one
+    await until(pilot, lambda: pilot.app.focused is panel, "the panel to take focus")
+    return panel
+
+
+async def written(pilot: Any, key: str, value: str) -> None:
+    """Pump until the note for ``key = value`` is in the log: the write is done."""
+    await until(
+        pilot,
+        lambda: f"{key} = {value}  ({config_path()})" in _notes(pilot.app),
+        f"the note for {key} = {value}",
+    )
+
+
+@pytest.mark.usefixtures("no_keys")
+async def test_config_opens_the_settings_panel_and_reads_the_file() -> None:
+    app, _ = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        panel = await open_panel(pilot)
+        assert isinstance(panel.parent, RunLog)
+        assert len(app.query(ConfigPanel)) == 1
+        assert not panel.collapsed and not panel.editing
+        text = _panel_text(panel)
+    lines = text.split("\n")
+    assert lines[0].startswith(" config   ")
+    assert str(config_path()) in lines[0]
+    assert "(not written yet, showing defaults)" in lines[0]
+    assert lines[1].startswith(" key      GROQ_API_KEY")
+    assert "not set" in lines[1] and "GROQ_API_KEY=" in lines[1]
+    for heading in ("permissions", "fetch", "judge", "contact"):
+        assert f" {heading}" in lines
+
+
+async def test_the_key_line_says_where_a_key_was_found_and_never_its_value(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, no_keys: None
+) -> None:
+    monkeypatch.setenv("GROQ_API_KEY", "secret-for-test")
+    app, _ = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        panel = await open_panel(pilot)
+        from_env = _panel_text(panel)
+        await pilot.press("escape")
+        monkeypatch.delenv("GROQ_API_KEY")
+        (tmp_path / ".env").write_text("GROQ_API_KEY=secret-for-test\n", encoding="utf-8")
+        panel = await open_panel(pilot)
+        from_file = _panel_text(panel)
+        await pilot.press("escape")
+        await pilot.pause()
+        collapsed = "\n".join(_panel_text(p) for p in app.query(ConfigPanel))
+    sep = PLAIN.glyphs.sep
+    assert f"GROQ_API_KEY {sep} found in the environment" in from_env
+    assert f"GROQ_API_KEY {sep} found in {tmp_path / '.env'}" in from_file
+    for text in (from_env, from_file, collapsed):
+        assert "secret-for-test" not in text
+
+
+@pytest.mark.usefixtures("no_keys")
+async def test_the_rows_come_in_the_configs_order_and_the_selection_stays_inside() -> None:
+    app, _ = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        panel = await open_panel(pilot)
+        assert [row.key for row in panel.rows] == [
+            "permissions.install_browser",
+            "permissions.network",
+            "fetch.respect_robots",
+            "judge.provider",
+            "judge.model",
+            "judge.base_url",
+            "judge.api_key_env",
+            "contact.email",
+        ]
+        assert [row.kind for row in panel.rows] == ["choice"] * 4 + ["text"] * 4
+        assert panel.selected == 0
+        assert _panel_row(panel, "install_browser").startswith("> install_browser")
+        await pilot.press(*["down"] * 8)
+        assert panel.selected == 7
+        assert _panel_row(panel, "email").startswith("> email")
+        assert _panel_row(panel, "install_browser").startswith("  install_browser")
+        await pilot.press(*["up"] * 9)
+        assert panel.selected == 0
+    # The file was only read: moving through the rows writes nothing.
+    assert not config_path().exists()
+
+
+@pytest.mark.usefixtures("no_keys")
+async def test_a_choice_row_writes_at_once_and_wraps() -> None:
+    app, _ = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        panel = await open_panel(pilot)
+        await pilot.press("right")
+        await written(pilot, "permissions.install_browser", "allow")
+        assert load_config().permissions.install_browser == "allow"
+        assert app._config.permissions.install_browser == "allow"
+        assert panel.value("permissions.install_browser") == "allow"
+        assert _panel_row(panel, "install_browser") == "> install_browser   ask   [allow]   deny"
+        await pilot.press("right", "right")
+        await written(pilot, "permissions.install_browser", "ask")
+        assert load_config().permissions.install_browser == "ask"  # deny, then wrapped
+        await pilot.press("left")
+        await written(pilot, "permissions.install_browser", "deny")
+        assert load_config().permissions.install_browser == "deny"
+        await pilot.press("enter")  # on a choice row, the same as ``right``
+        await until(
+            pilot,
+            lambda: load_config().permissions.install_browser == "ask",
+            "enter to cycle the row",
+        )
+        assert not panel.editing
+        # The note says what ``/config set`` would have said, once per write: five.
+        assert _notes(app).count("permissions.install_browser = ") == 5
+        assert str(config_path()) in _notes(app)
+
+
+@pytest.mark.usefixtures("no_keys")
+async def test_the_network_row_drives_the_banner() -> None:
+    app, _ = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        row = wordmark.rows(80, version=__version__, context=run_context(Config()), hint=HINT)
+        assert " online " in _banner_lines(app)[row.version]
+        await open_panel(pilot)
+        await pilot.press("down", "right")  # network: allow -> deny
+        await written(pilot, "permissions.network", "deny")
+        assert app._config.permissions.network == "deny"
+        await until(
+            pilot,
+            lambda: " offline " in _banner_lines(app)[row.version],
+            "the banner to be redrawn offline",
+        )
+        await pilot.press("right")
+        await written(pilot, "permissions.network", "ask")
+        assert app._config.permissions.network == "ask"
+        await until(
+            pilot,
+            lambda: run_context(app._config) in _banner_lines(app)[row.version],
+            "the banner to follow the config again",
+        )
+
+
+@pytest.mark.usefixtures("no_keys")
+async def test_a_bool_row_round_trips_through_the_file() -> None:
+    app, _ = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        panel = await open_panel(pilot)
+        await pilot.press("down", "down", "right")
+        await written(pilot, "fetch.respect_robots", "false")
+        assert load_config().fetch.respect_robots is False
+        assert panel.value("fetch.respect_robots") == "false"
+        assert _panel_row(panel, "respect_robots") == "> respect_robots    true   [false]"
+        await pilot.press("right")
+        await written(pilot, "fetch.respect_robots", "true")
+        assert load_config().fetch.respect_robots is True
+
+
+@pytest.mark.usefixtures("no_keys")
+async def test_a_provider_switch_writes_four_and_moves_the_key_line() -> None:
+    app, _ = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        panel = await open_panel(pilot)
+        assert panel.rows[3].values == ("gemini", "groq", "ollama")
+        await pilot.press("down", "down", "down", "left")  # groq -> gemini
+        await written(pilot, "judge.api_key_env", "GEMINI_API_KEY")
+        gemini = provider_defaults("gemini")
+        assert load_config().judge == gemini
+        notes = _notes(app)
+        for name in library.JUDGE_PRESET_FIELDS:
+            assert f"judge.{name} = {getattr(gemini, name)}  ({config_path()})" in notes
+        assert _panel_row(panel, "model").endswith(gemini.model)
+        assert _panel_row(panel, "base_url").endswith(gemini.base_url)
+        assert _panel_row(panel, "api_key_env").endswith("GEMINI_API_KEY")
+        assert " key      GEMINI_API_KEY" in _panel_text(panel)
+        assert "GROQ_API_KEY" not in _panel_text(panel)
+
+
+@pytest.mark.usefixtures("no_keys")
+async def test_a_provider_outside_the_known_choices_is_drawn_honestly() -> None:
+    """Hand-edited TOML can hold a ``judge.provider`` ``load_config`` never rejects
+    (it is typed as a plain ``str``, unlike the permission and bool fields): the row
+    must say so rather than silently show none of ``gemini``/``groq``/``ollama`` as
+    current."""
+    path = config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text('[judge]\nprovider = "openrouter"\n', encoding="utf-8")
+    app, _ = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        panel = await open_panel(pilot)
+        row = _panel_row(panel, "provider")
+        assert row == "  provider          gemini   groq   ollama   [openrouter]"
+        await pilot.press("down", "down", "down")  # install_browser -> ... -> provider
+        await pilot.press("right")  # cycles from the first choice, not from "nowhere"
+        await written(pilot, "judge.provider", "gemini")
+
+
+@pytest.mark.usefixtures("no_keys")
+async def test_a_provider_without_a_key_variable_says_none_is_needed() -> None:
+    app, _ = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        panel = await open_panel(pilot)
+        await pilot.press("down", "down", "down", "right")  # groq -> ollama
+        await written(pilot, "judge.provider", "ollama")
+        text = _panel_text(panel)
+    assert " key      not needed" in text
+    assert "not set" not in text
+
+
+@pytest.mark.usefixtures("no_keys")
+async def test_a_text_row_is_edited_in_place() -> None:
+    app, _ = build_app()
+    default = JudgeConfig().model
+    async with app.run_test(size=SIZE) as pilot:
+        panel = await open_panel(pilot)
+        await pilot.press("down", "down", "down", "down", "enter")
+        await pilot.pause()
+        assert panel.editing
+        edit = panel.query_one(Input)
+        assert edit.value == default
+        await until(pilot, lambda: app.focused is edit, "the edit to take focus")
+        await pilot.press("-", "x", "enter")
+        await written(pilot, "judge.model", f"{default}-x")
+        assert load_config().judge.model == f"{default}-x"
+        assert not panel.editing
+        assert not panel.query(Input)
+        assert _panel_row(panel, "model") == f"> model             {default}-x"
+        await until(pilot, lambda: app.focused is panel, "focus to come back to the panel")
+        # ``Esc`` cancels: nothing written, the row shows what it showed.
+        await pilot.press("enter")
+        await pilot.pause()
+        await until(pilot, lambda: app.focused is panel.query_one(Input), "the second edit")
+        await pilot.press("z", "z", "z", "escape")
+        await pilot.pause()
+        assert not panel.editing
+        assert load_config().judge.model == f"{default}-x"
+        assert _panel_row(panel, "model") == f"> model             {default}-x"
+        assert app.focused is panel
+        assert app.query_one(Prompt).value == ""  # nothing leaked into the bar
+
+
+@pytest.mark.usefixtures("no_keys")
+async def test_an_empty_text_row_shows_unset_and_its_note() -> None:
+    app, _ = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        panel = await open_panel(pilot)
+        assert _panel_row(panel, "email") == (
+            "  email             (unset) , optional, for the Crossref / OpenAlex polite pools"
+        )
+        await pilot.press(*["down"] * 7, "enter")
+        await pilot.pause()
+        await until(pilot, lambda: app.focused is panel.query_one(Input), "the edit")
+        assert panel.query_one(Input).value == ""
+        await pilot.press("a", "@", "b", ".", "c", "enter")
+        await written(pilot, "contact.email", "a@b.c")
+        assert load_config().contact.email == "a@b.c"
+        assert _panel_row(panel, "email").startswith("> email             a@b.c , optional")
+
+
+@pytest.mark.usefixtures("no_keys")
+async def test_backspace_resets_a_row_to_its_default() -> None:
+    app, _ = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        panel = await open_panel(pilot)
+        await pilot.press("right", "right")
+        await written(pilot, "permissions.install_browser", "deny")
+        await pilot.press("backspace")
+        await written(pilot, "permissions.install_browser", "ask")
+        assert load_config().permissions.install_browser == "ask"
+        assert panel.value("permissions.install_browser") == "ask"
+        await pilot.press("down", "down", "down", "left")
+        await written(pilot, "judge.provider", "gemini")
+        before = _notes(app).count("judge.")
+        await pilot.press("backspace")
+        await written(pilot, "judge.provider", "groq")
+        assert load_config().judge == JudgeConfig()
+        assert _notes(app).count("judge.") == before + 4
+
+
+async def test_a_failed_write_leaves_the_row_and_the_file_alone(
+    monkeypatch: pytest.MonkeyPatch, no_keys: None
+) -> None:
+    def boom(key: str, value: str, path: Path | None = None) -> tuple[tuple[str, str], ...]:
+        raise ConfigError("boom")
+
+    monkeypatch.setattr("proofpath.tui.widgets.config_panel.config_set", boom)
+    app, _ = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        panel = await open_panel(pilot)
+        await pilot.press("right")
+        await until(pilot, lambda: "boom" in _error_lines(app), "the error line")
+        assert _error_lines(app) == "  error: boom"
+        assert not config_path().exists()
+        assert panel.value("permissions.install_browser") == "ask"
+        assert _panel_row(panel, "install_browser") == "> install_browser   [ask]   allow   deny"
+        assert "permissions.install_browser = " not in _notes(app)
+        assert app.focused is panel and not panel.collapsed
+
+
+async def test_a_failed_reread_still_reports_what_was_written(
+    monkeypatch: pytest.MonkeyPatch, no_keys: None
+) -> None:
+    """``config_set`` can succeed while the re-read that follows it fails -- the row
+    must not be reported ``Failed`` over a file that did in fact change."""
+    real_config_view = library.config_view
+    calls = {"n": 0}
+
+    def flaky_config_view() -> library.ConfigView:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise ConfigError("reread-boom")
+        return real_config_view()
+
+    monkeypatch.setattr("proofpath.tui.widgets.config_panel.config_view", flaky_config_view)
+    app, _ = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        await open_panel(pilot)
+        await pilot.press("right")
+        await until(
+            pilot, lambda: "could not be read back" in _error_lines(app), "the re-read error line"
+        )
+        # The write landed on disk -- config_set already returned before the reread
+        # was even attempted -- so it is reported like any other successful write.
+        assert "permissions.install_browser = allow" in _notes(app)
+        assert load_config().permissions.install_browser == "allow"
+        assert "reread-boom" in _error_lines(app)
+
+
+@pytest.mark.usefixtures("no_keys")
+async def test_escape_collapses_the_panel_to_one_line_and_focuses_the_bar() -> None:
+    app, _ = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        panel = await open_panel(pilot)
+        await pilot.press("down", "right", "right")  # network: allow -> deny -> ask
+        await written(pilot, "permissions.network", "ask")
+        await pilot.press("escape")
+        await pilot.pause()
+        assert panel.collapsed
+        assert _panel_text(panel) == (
+            "  config  install_browser=ask  network=ask  respect_robots=true  judge=groq"
+        )
+        await until(pilot, lambda: app.focused is app.query_one(Prompt), "the bar to take focus")
+        # A collapsed panel is a record: the keys do nothing to it any more.
+        await pilot.press("escape")
+        assert app.query_one(Prompt).value == ""
+
+
+@pytest.mark.usefixtures("no_keys")
+async def test_typing_on_the_panel_goes_to_the_bar_and_collapses_it() -> None:
+    """Wordmark design section 11: a printable key is typing wherever focus is; the
+    panel sees the blur and folds."""
+    app, _ = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        panel = await open_panel(pilot)
+        await pilot.press("x")
+        await pilot.pause()
+        prompt = app.query_one(Prompt)
+        assert app.focused is prompt
+        assert prompt.value == "x"
+        assert panel.collapsed
+        assert _panel_text(panel).startswith("  config  ")
+
+
+@pytest.mark.usefixtures("no_keys")
+async def test_the_terminal_losing_focus_does_not_fold_an_open_panel() -> None:
+    """An ``AppBlur`` (the terminal window itself losing focus) delivers the same
+    ``Blur`` to whatever is focused as any other blur would, but nothing inside the
+    app moved focus -- the panel is still what would take input back. Only a real
+    blur to another widget (typing, a click) should fold it."""
+    app, _ = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        panel = await open_panel(pilot)
+        app.post_message(tevents.AppBlur())
+        await pilot.pause()
+        await pilot.pause()
+        assert not panel.collapsed
+        # Textual clears ``screen.focused`` for the duration of the blur and restores
+        # it on the matching ``AppFocus``, which is what "the panel is still what
+        # would take input back" comes down to.
+        app.post_message(tevents.AppFocus())
+        await pilot.pause()
+        await pilot.pause()
+        assert app.focused is panel
+
+
+@pytest.mark.usefixtures("no_keys")
+async def test_escape_on_a_collapsed_but_focused_panel_runs_the_apps_own_escape() -> None:
+    """A collapsed panel has no ``escape`` of its own (``action_close`` stands down
+    once folded); the app's priority ``escape`` must not keep standing aside for it
+    either, or ``Esc`` would do nothing until some other event moved focus away."""
+    app, _ = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        panel = await open_panel(pilot)
+        await pilot.press("escape")  # folds it, focuses the bar
+        await pilot.pause()
+        assert panel.collapsed
+        await submit(pilot, "/check")  # an argument-taking verb: enters awaiting mode
+        assert app.awaiting == "check"
+        panel.focus()  # reach a collapsed-but-focused panel however the code allows
+        await pilot.pause()
+        assert app.focused is panel
+        await pilot.press("escape")
+        await pilot.pause()
+        assert app.awaiting is None
+
+
+@pytest.mark.usefixtures("no_keys")
+async def test_config_again_opens_a_fresh_panel_and_show_still_prints_the_toml() -> None:
+    app, _ = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        first = await open_panel(pilot)
+        second = await open_panel(pilot)
+        assert first is not second
+        assert len(app.query(ConfigPanel)) == 2
+        assert first.collapsed and not second.collapsed
+        await submit(pilot, "/config show")
+        text = await lines_of(app, pilot)
+        assert "[permissions]" in text
+        assert len(app.query(ConfigPanel)) == 2
+
+
+@pytest.mark.usefixtures("no_keys")
+async def test_the_plain_legend_spells_the_arrows_in_ascii() -> None:
+    app, _ = build_app(theme=PLAIN)
+    async with app.run_test(size=SIZE) as pilot:
+        panel = await open_panel(pilot)
+        text = _panel_text(panel)
+    lines = text.split("\n")
+    assert lines[-1] == (
+        " up/down row   left/right change   enter edit text   backspace default   esc close"
+    )
+    # Everything but the paths is the theme's ASCII (the paths are the machine's).
+    for line in lines[2:]:
+        assert line.isascii(), f"non-ASCII panel line in PLAIN theme: {line!r}"
+
+
+@pytest.mark.usefixtures("no_keys")
+async def test_an_unreadable_config_opens_no_panel(tmp_path: Path) -> None:
+    app, _ = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        (tmp_path / "conf").mkdir(exist_ok=True)
+        (tmp_path / "conf" / "config.toml").write_text("this is not toml [[", encoding="utf-8")
+        await submit(pilot, "/config")
+        await pilot.pause()
+        assert not app.query(ConfigPanel)
+        assert _error_lines(app).startswith("  error: ")
+        assert app.is_running
+        assert app.focused is app.query_one(Prompt)
+
+
+@pytest.mark.usefixtures("no_keys")
+async def test_ctrl_l_clears_a_collapsed_panel_and_keeps_an_open_one() -> None:
+    """A collapsed panel is a record, like a finished block; an open one is in use."""
+    app, _ = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        await open_panel(pilot)
+        await pilot.press("escape")
+        await pilot.pause()
+        second = await open_panel(pilot)
+        await pilot.press("ctrl+l")
+        await pilot.pause()
+        assert list(app.query(ConfigPanel)) == [second]
+        assert not second.collapsed

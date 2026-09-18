@@ -1,5 +1,6 @@
-"""The wordmark in ``rich``: the six lines, the tone runs and the layout (wordmark
-design sections 3 and 4). Pure: no Textual, no clock."""
+"""The wordmark in both themes: the six lines, the gradient runs, the rule and the
+beside/under/narrow layouts (wordmark design sections 3, 4, 8 and 8.1). Pure: no
+Textual, no clock."""
 
 from __future__ import annotations
 
@@ -12,7 +13,7 @@ from proofpath.tui import banner, wordmark
 
 CONTEXT = "academic · online · coreml"
 HINT = "paste a file path, a URL, or a claim.            /help  /config  /quit"
-VERSION = "0.4.4"
+VERSION = "0.4.5"
 
 RICH = SimpleNamespace(name="rich")
 PLAIN = SimpleNamespace(name="plain")
@@ -25,21 +26,39 @@ ART = (
     "██║     ██╔═╝ ╚█████╔╝╚█████╔╝██║    ██║     ███████║ ██║  ██║ ██║",
     "╚═╝     ╚═╝    ╚════╝  ╚════╝ ╚═╝    ╚═╝     ╚═╝  ╚═╝ ╚═╝  ╚═╝ ╚═╝",
 )
-RICH_80 = (
-    *ART,
-    "proofpath v0.4.4                                    academic · online · coreml",
-    "paste a file path, a URL, or a claim.                    /help  /config  /quit",
-)
-RICH_100 = (
-    *ART,
-    "proofpath v0.4.4                                                        academic · online · coreml",  # noqa: E501
-    "paste a file path, a URL, or a claim.                                        /help  /config  /quit",  # noqa: E501
-)
 
 
 def render(width: int, theme: SimpleNamespace = RICH, **overrides: str) -> banner.Banner:
     kwargs = {"version": VERSION, "context": CONTEXT, "hint": HINT, **overrides}
     return wordmark.render(width, theme, **kwargs)
+
+
+UNDER_80 = (
+    *ART,
+    "proofpath v0.4.5                                    academic · online · coreml",
+    "paste a file path, a URL, or a claim.                    /help  /config  /quit",
+    "─" * 78,
+)
+
+
+def beside_row(art: str, left: str, right: str, width: int) -> str:
+    return banner.right_align(art.ljust(wordmark.BESIDE_COLUMN) + left, right, width)
+
+
+BESIDE_140 = (
+    ART[0],
+    ART[1],
+    beside_row(ART[2], "proofpath v0.4.5", CONTEXT, 140),
+    beside_row(ART[3], "paste a file path, a URL, or a claim.", "/help  /config  /quit", 140),
+    ART[4],
+    ART[5],
+    "─" * 138,
+)
+NARROW_60 = (
+    banner.right_align("proofpath v0.4.5", CONTEXT, 60),
+    banner.right_align("paste a file path, a URL, or a claim.", "/help  /config  /quit", 60),
+    "─" * 58,
+)
 
 
 # --- the art -----------------------------------------------------------------------------
@@ -68,108 +87,156 @@ def test_wordmark_is_the_spec_art() -> None:
     assert wordmark.WORDMARK == ART
 
 
-# --- tones -------------------------------------------------------------------------------
-
-
-def test_tones_run_light_over_blocks_and_dark_over_shadow() -> None:
-    assert wordmark.tones("██╔══██╗ █") == (
-        (0, 2, "light"),
-        (2, 5, "dark"),
-        (5, 7, "light"),
-        (7, 8, "dark"),
-        (9, 10, "light"),
-    )
-    assert wordmark.tones("") == ()
-    assert wordmark.tones("   ") == ()
-
-
-def test_tones_cover_every_inked_cell_and_nothing_else() -> None:
-    drawn = render(80)
-    for row, (line, runs) in enumerate(zip(drawn.lines, drawn.tones, strict=True)):
-        covered = {i for start, end, _ in runs for i in range(start, end)}
-        if row in (wordmark.VERSION_ROW, wordmark.HINT_ROW):
-            assert runs == (), row
-            continue
-        inked = {i for i, c in enumerate(line) if c != " "}
-        assert covered == inked, row
-        for start, end, tone in runs:
-            glyphs = set(line[start:end])
-            assert glyphs == {wordmark.BLOCK} if tone == "light" else glyphs <= set(wordmark.SHADOW)
-
-
 # --- layout ------------------------------------------------------------------------------
 
 
-def test_rich_80_is_the_golden_block() -> None:
-    assert render(80).lines == RICH_80
+def test_rich_80_is_the_under_layout_with_the_rule() -> None:
+    assert render(80).lines == UNDER_80
 
 
-def test_rich_100_is_the_golden_block() -> None:
-    assert render(100).lines == RICH_100
+def test_rich_140_is_the_beside_layout_with_the_rule() -> None:
+    assert render(140).lines == BESIDE_140
 
 
-@pytest.mark.parametrize("width", range(69, 201))
-def test_rich_is_eight_lines_and_the_wordmark_never_moves(width: int) -> None:
-    drawn = render(width)
-    assert len(drawn.lines) == 8
-    assert drawn.lines[:6] == wordmark.WORDMARK
-    assert drawn.lines[wordmark.HINT_ROW].endswith("/help  /config  /quit")
+def test_below_the_floor_there_is_no_mark_in_either_theme() -> None:
+    assert render(60).lines == NARROW_60
+    assert render(60, PLAIN).lines == tuple(
+        line.translate(wordmark.PLAIN_GLYPHS) for line in NARROW_60
+    )
+    assert render(68).lines[0].startswith("proofpath v")
+    assert render(69).lines[:6] == ART
 
 
-def test_rich_text_starts_at_column_zero_and_ends_at_the_margin() -> None:
-    drawn = render(80)
-    assert drawn.lines[wordmark.VERSION_ROW].startswith("proofpath v0.4.4")
-    assert drawn.lines[wordmark.HINT_ROW].startswith("paste a file path")
-    assert len(drawn.lines[wordmark.VERSION_ROW]) == 80 - banner.RIGHT_MARGIN
-    assert len(drawn.lines[wordmark.HINT_ROW]) == 80 - banner.RIGHT_MARGIN
-    assert wordmark.TEXT_COLUMN == 0
+def test_plain_is_the_same_mark_transliterated_to_ascii() -> None:
+    rich, plain = render(80), render(80, PLAIN)
+    assert plain.lines == tuple(line.translate(wordmark.PLAIN_GLYPHS) for line in rich.lines)
+    assert plain.tones == rich.tones
+    # The mark and the rule are seven-bit; the texts are the caller's. The app's
+    # ``run_context`` is ASCII whatever the theme, so the whole plain banner is.
+    for line in render(80, PLAIN, context="academic, online, coreml").lines:
+        assert line.isascii(), line
+    assert render(140, PLAIN).lines == tuple(
+        line.translate(wordmark.PLAIN_GLYPHS) for line in BESIDE_140
+    )
 
 
-def test_rich_hint_without_a_gap_is_written_whole() -> None:
-    drawn = render(80, hint="paste a file path")
-    assert drawn.lines[wordmark.HINT_ROW] == "paste a file path"
+def test_plain_glyph_table_is_the_spec_mapping() -> None:
+    assert "█╗╔╝╚═║─".translate(wordmark.PLAIN_GLYPHS) == "#++++-|-"
 
 
-def test_rich_long_version_is_never_truncated() -> None:
-    drawn = render(69, version="0.4.4-rc1+build.12345.deadbeefcafe")
-    line = drawn.lines[wordmark.VERSION_ROW]
-    assert line.startswith("proofpath v0.4.4-rc1+build.12345.deadbeefcafe")
-    assert line.endswith(" " + CONTEXT)
+def test_rows_switch_to_beside_exactly_where_the_texts_fit() -> None:
+    assert wordmark.rows(128, version=VERSION, context=CONTEXT, hint=HINT) == wordmark.Rows(
+        6, 7, 8, "under"
+    )
+    assert wordmark.rows(129, version=VERSION, context=CONTEXT, hint=HINT) == wordmark.Rows(
+        2, 3, 6, "beside"
+    )
+    # With the command list dropped the version row (43 columns) is the longer one,
+    # so the switch is at 68 + 43 + 2.
+    prompt_only = HINT.split("  ")[0]
+    assert wordmark.rows(112, version=VERSION, context=CONTEXT, hint=prompt_only).beside is False
+    assert wordmark.rows(113, version=VERSION, context=CONTEXT, hint=prompt_only).beside is True
+    assert wordmark.rows(68, version=VERSION, context=CONTEXT, hint=HINT) == wordmark.Rows(
+        0, 1, 2, "narrow"
+    )
 
 
-def test_rich_68_returns_the_plain_banner() -> None:
-    assert render(68) == banner.render(68, version=VERSION, context=CONTEXT, hint=HINT)
+@pytest.mark.parametrize("width", [40, 68, 69, 80, 128, 129, 140, 200])
+@pytest.mark.parametrize("theme", [RICH, PLAIN])
+def test_the_rule_is_the_last_row_and_reaches_the_margin(
+    width: int, theme: SimpleNamespace
+) -> None:
+    drawn = render(width, theme)
+    where = wordmark.rows(width, version=VERSION, context=CONTEXT, hint=HINT)
+    rule = wordmark.RULE if theme.name == "rich" else wordmark.RULE.translate(wordmark.PLAIN_GLYPHS)
+    assert where.rule == len(drawn.lines) - 1
+    assert drawn.lines[where.rule] == rule * (width - banner.RIGHT_MARGIN)
+    assert drawn.tones[where.rule] == ((0, width - banner.RIGHT_MARGIN, wordmark.SHADOW_TONE),)
+    assert drawn.lines[where.hint].endswith("/help  /config  /quit")
+    assert drawn.lines[where.version].endswith(CONTEXT)
+    assert len(drawn.lines) == (
+        3 if width < wordmark.RICH_WIDTH_FLOOR else 7 if where.beside else 9
+    )
 
 
-def test_rich_69_is_still_the_wordmark() -> None:
-    assert render(69).lines[:6] == wordmark.WORDMARK
-    assert wordmark.RICH_WIDTH_FLOOR == 69
+def test_text_rows_end_at_the_margin_and_are_never_truncated() -> None:
+    for width in (69, 80, 140):
+        where = wordmark.rows(width, version=VERSION, context=CONTEXT, hint=HINT)
+        drawn = render(width)
+        assert len(drawn.lines[where.version]) == width - banner.RIGHT_MARGIN
+        assert len(drawn.lines[where.hint]) == width - banner.RIGHT_MARGIN
+    long = render(69, version="0.4.5-rc1+build.12345.deadbeefcafe")
+    assert long.lines[6].startswith("proofpath v0.4.5-rc1+build.12345.deadbeefcafe")
+    assert long.lines[6].endswith(" " + CONTEXT)
 
 
-@pytest.mark.parametrize("width", [40, 68, 80, 100, 200])
-def test_plain_delegates_to_banner_at_every_width(width: int) -> None:
-    assert render(width, PLAIN) == banner.render(width, version=VERSION, context=CONTEXT, hint=HINT)
+def test_a_hint_without_a_gap_is_written_whole() -> None:
+    assert render(80, hint="paste a file path").lines[7] == "paste a file path"
+    assert (
+        render(140, hint="paste a file path").lines[3]
+        == ART[3].ljust(wordmark.BESIDE_COLUMN) + "paste a file path"
+    )
+
+
+# --- tones -------------------------------------------------------------------------------
+
+
+def test_tones_follow_the_column_band_for_blocks_and_shadow_for_the_rest() -> None:
+    for row, line in enumerate(wordmark.WORDMARK):
+        painted: dict[int, str] = {}
+        for start, end, tone in wordmark.tones(line):
+            painted.update(dict.fromkeys(range(start, end), tone))
+        for column, character in enumerate(line):
+            if character == wordmark.BLOCK:
+                expected = wordmark.GRADIENT_TONES[min(4, column * 5 // wordmark.MARK_WIDTH)]
+                assert painted[column] == expected, (row, column)
+            elif character in wordmark.SHADOW:
+                assert painted[column] == wordmark.SHADOW_TONE, (row, column)
+            else:
+                assert column not in painted, (row, column)
+
+
+def test_band_splits_any_width_into_five_left_light_right_dark() -> None:
+    """The same arithmetic serves the mark (over its 66 columns) and the bar's frame
+    (over the terminal's): the left end is always ``g0``, the right always ``g4``."""
+    assert wordmark.band(0, 10) == "g0" and wordmark.band(9, 10) == "g4"
+    assert [wordmark.band(c, 5) for c in range(5)] == list(wordmark.GRADIENT_TONES)
+    assert wordmark.band(65, 66) == "g4" and wordmark.band(0, 66) == "g0"
+    assert wordmark.band(0, 1) == "g0"  # a one-column frame is not a division by zero
+    assert wordmark.band(0, 0) == "g0"  # nor is a frame that has no width yet
+
+
+def test_a_block_run_splits_where_the_band_changes() -> None:
+    assert wordmark.tones(wordmark.BLOCK * 66) == (
+        (0, 14, "g0"),
+        (14, 27, "g1"),
+        (27, 40, "g2"),
+        (40, 53, "g3"),
+        (53, 66, "g4"),
+    )
+    assert wordmark.tones("╔" * 30) == ((0, 30, "shadow"),)
+    assert wordmark.tones("") == ()
+
+
+def test_the_text_beside_or_under_the_mark_carries_no_run() -> None:
+    for width in (80, 140):
+        drawn = render(width)
+        where = wordmark.rows(width, version=VERSION, context=CONTEXT, hint=HINT)
+        for row in (where.version, where.hint):
+            assert all(end <= wordmark.MARK_WIDTH for _, end, _ in drawn.tones[row]), (width, row)
 
 
 def test_real_theme_objects_are_accepted() -> None:
     from proofpath.tui.theme import PLAIN as PLAIN_THEME
     from proofpath.tui.theme import RICH as RICH_THEME
 
-    assert render(80, RICH_THEME).lines == RICH_80
-    assert render(80, PLAIN_THEME) == banner.render(80, version=VERSION, context=CONTEXT, hint=HINT)
+    assert render(80, RICH_THEME).lines == UNDER_80
+    assert render(80, PLAIN_THEME).lines == tuple(
+        line.translate(wordmark.PLAIN_GLYPHS) for line in UNDER_80
+    )
 
 
-# --- hint_row ------------------------------------------------------------------------------
-
-
-def test_hint_row_matches_the_floor_render_gives_way_at() -> None:
-    assert wordmark.hint_row(68) == banner.HINT_LINE
-    assert wordmark.hint_row(69) == wordmark.HINT_ROW
-
-
-@pytest.mark.parametrize("width", [40, 68, 69, 80, 100, 200])
-def test_hint_row_points_at_the_row_render_actually_put_the_hint_on(width: int) -> None:
-    assert render(width).lines[wordmark.hint_row(width)].endswith("/help  /config  /quit")
+# --- purity ------------------------------------------------------------------------------
 
 
 def test_module_is_pure_and_imports_no_textual() -> None:

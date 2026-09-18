@@ -71,6 +71,15 @@ class Glyphs:
     sep: str
     #: Textual border style name for a run's panel.
     box: Literal["round", "none"]
+    #: The fill between a panel title's command and its state word, in the border's
+    #: own colour (TUI v2 design section 4). Only a panelled run draws a title.
+    title_fill: str
+    #: The bar's frame (wordmark design section 9): top-left, top-right, bottom-left,
+    #: bottom-right, the horizontal rule and the vertical edge. Drawn by hand, not as
+    #: a CSS border, because a border wears one colour and the frame wears five.
+    #: ``plain`` has no frame and never draws these; the tuple exists so that no
+    #: widget spells a glyph itself.
+    frame: tuple[str, str, str, str, str, str]
 
 
 @dataclass(frozen=True)
@@ -83,8 +92,8 @@ class Theme:
     tones: Mapping[str, str]
     #: The five run accents, rotating. Never red, yellow or green: those mean things.
     accents: tuple[str, ...]
-    #: The banner's two tones, keyed ``dark`` and ``light`` (``banner.Tone``), as Rich
-    #: styles. The banner's only colours.
+    #: The banner's tones, keyed by :data:`BANNER_TONES` (``banner.Tone`` names), as
+    #: Rich styles. The banner's only colours.
     banner: Mapping[str, str]
     #: State words as badges (coloured background) or as coloured words.
     badge: bool
@@ -129,10 +138,25 @@ class Theme:
         return self.accents[index % len(self.accents)]
 
 
+#: Every tone the wordmark banner paints with: the five gradient bands left to right,
+#: the shadow-and-rule tone, and the two the site palette names (``light`` is
+#: ``--crimson``, ``dark`` ``--crimson-deep``), kept for anything that still asks.
+BANNER_TONES: tuple[str, ...] = ("g0", "g1", "g2", "g3", "g4", "shadow", "light", "dark")
+
 _RICH_RED = "#ef4444"
-#: The wordmark and the plain raven: the landing page's ``--crimson-deep`` and
-#: ``--crimson``.
-_RICH_BANNER: Mapping[str, str] = {"dark": "#8f0f2b", "light": "#c4173a"}
+#: The wordmark's crimsons (wordmark design §8): the gradient runs light to dark
+#: through ``g2`` = ``--crimson`` to ``g4`` = ``--crimson-deep``, and the shadow glyphs
+#: and the rule are one step darker still.
+_RICH_BANNER: Mapping[str, str] = {
+    "g0": "#e0455f",
+    "g1": "#d02f4c",
+    "g2": "#c4173a",
+    "g3": "#a91330",
+    "g4": "#8f0f2b",
+    "shadow": "#6b0a20",
+    "light": "#c4173a",
+    "dark": "#8f0f2b",
+}
 _RICH_COLOURS: Mapping[str, str] = {
     "green": "#22c55e",
     "yellow": "#f59e0b",
@@ -176,6 +200,8 @@ RICH = Theme(
         prompt="›",  # noqa: RUF001 - the design names this glyph; not a ">"
         sep="·",
         box="round",
+        title_fill="─",
+        frame=("╭", "╮", "╰", "╯", "─", "│"),
     ),
     tones=_RICH_TONES,
     accents=_RICH_ACCENTS,
@@ -206,11 +232,14 @@ PLAIN = Theme(
         prompt=">",
         sep=",",
         box="none",
+        title_fill="-",
+        frame=("+", "+", "+", "+", "-", "|"),
     ),
     # The ANSI names map to themselves: PLAIN is exactly what ``ui.py`` prints today.
     tones={name: name for name in MEANING_TONES.values()},
     accents=ui.ACCENTS,
-    banner={"dark": ui.PET_COLOUR, "light": ui.PET_COLOUR},
+    # The plain mark is one colour: every tone is the ``ui`` red.
+    banner=dict.fromkeys(BANNER_TONES, ui.PET_COLOUR),
     badge=False,
     unicode=False,
     colours={name: name for name in MEANING_TONES.values()},

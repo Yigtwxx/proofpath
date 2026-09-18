@@ -29,10 +29,12 @@ proofpath
 ╚═╝     ╚═╝    ╚════╝  ╚════╝ ╚═╝    ╚═╝     ╚═╝  ╚═╝ ╚═╝  ╚═╝ ╚═╝
 proofpath v0.4.5                                                        academic · online · coreml
 paste a file path, a URL, or a claim.                                        /help  /config  /quit
+──────────────────────────────────────────────────────────────────────────────────────────────────
 ```
 
-The `rich` theme opens with the wordmark in the two crimsons; the `plain` theme opens
-with the raven — the same bird as on the website — in ASCII.
+Both themes open with the wordmark: `rich` in block glyphs through five crimson bands,
+`plain` in ASCII. Under it, or beside it on a wide terminal, the version and the hint; a
+rule closes the banner.
 
 Bare `proofpath` opens the terminal UI ([a recorded session in both themes](docs/eval/2026-09-15-tui-v2-live.md),
 with SVG screenshots of a real run on v0.4.1, before the wordmark, in [`rich`](docs/eval/tui-raven-rich.svg) and
@@ -49,9 +51,11 @@ Paste a path, a URL or a claim and it runs — a post of several lines pastes wh
 bar holds it behind a one-line summary, `Enter` checks it, `Esc` drops it. Every
 one-shot verb is a slash command (`/check`, `/resolve`, `/fetch`, `/config`, `/cache`),
 runs can be started while others are in flight and stopped with `/cancel #n` — a
-stopped run keeps what it had decided. Click (or press
-`enter` on) a finding to read the whole quoted passage; `⧉` copies it; a finding's
-reference is a link to its source. When a publisher blocks the plain fetch, the
+stopped run keeps what it had decided. Type `/` and every command is listed above the
+bar with what it wants; `Tab` completes, `↑`/`↓` pick. `/config` opens the settings as
+rows you change with the arrow keys. Click (or press `enter` on) a finding to read the
+whole quoted passage; `⧉` copies it; a finding's reference is a link to its source.
+When a publisher blocks the plain fetch, the
 permission question is asked **inline, under the stage that hit the wall**, with
 `[allow once] [always] [no] [never]` — or, from the bar, `/allow once`, `/allow always`,
 `/allow no`, `/allow never`.
@@ -65,12 +69,15 @@ sentence are identical, only the drawing changes. `PROOFPATH_THEME=rich|plain` f
 either, for screenshots and bug reports.
 
 ```
-       __
-      (o >
-    _/ /
-   /  /       proofpath v0.4.5                                          academic . online . coreml
-  /__/        paste a file path, a URL, or a claim.                          /help  /config  /quit
- ____||___________________________________________________________________________________________
+######+                        #####+######+               ##+
+##+--##+                      ##+---+##+--##+         ##+  ##|
+######++##+##+ #####+  #####+ #####+ ######++ #####+ #####+######+
+##+---+ ####++##+--##+##+--##+##+--+ ##+---+ ##+--##++##+-+##+-##+
+##|     ##+-+ +#####+++#####++##|    ##|     #######| ##|  ##| ##|
++-+     +-+    +----+  +----+ +-+    +-+     +-+  +-+ +-+  +-+ +-+
+proofpath v0.4.5                                                        academic . online . coreml
+paste a file path, a URL, or a claim.                                        /help  /config  /quit
+--------------------------------------------------------------------------------------------------
 ```
 
 The same engine behind a pipe or in CI:

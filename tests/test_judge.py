@@ -957,3 +957,10 @@ def test_a_summary_starts_from_a_clean_state_after_an_unavailable_review() -> No
     assert not reviewer.unavailable and reviewer.detail == ""
     assert route.call_count == 2
     reviewer.close()
+
+
+def test_known_providers_are_the_provider_table_sorted() -> None:
+    """The settings panel's provider row cycles over exactly what ``provider_defaults``
+    accepts, in the order its own error message lists them."""
+    assert judge.known_providers() == ("gemini", "groq", "ollama")
+    assert judge.known_providers() == tuple(sorted(judge._PROVIDERS))

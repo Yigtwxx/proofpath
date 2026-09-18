@@ -6,6 +6,42 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- **TUI: slash suggestions.** Typing `/` lists every command above the bar with what
+  it wants and what it does; the list narrows per keystroke (`/h` → `/help`), `Tab`
+  completes the selected row, `↑`/`↓` move the selection while the list shows,
+  `Enter` runs what is in the bar. On a short terminal the list windows around the
+  selection and says `… n more`
+  (`docs/superpowers/specs/2026-09-18-wordmark-banner-design.md` §10).
+- **TUI: `/config` is a settings panel.** Arrow keys move between the settings,
+  `←`/`→` change a choice (`permissions.install_browser`, `permissions.network`,
+  `fetch.respect_robots`, `judge.provider`), `Enter` edits a text setting in place,
+  `Backspace` restores its default, `Esc` closes; every change is written at once and
+  reported under the panel; the `key` line says where the judge's API key was found
+  and never shows it. `/config show|path|set|check` are unchanged
+  (`docs/superpowers/specs/2026-09-18-wordmark-banner-design.md` §12).
+
+### Changed
+- **TUI: the wordmark everywhere.** The `plain` theme draws the same `ProofPath` mark
+  in ASCII and the raven is gone from the terminal; `rich` runs it through five
+  crimson bands left to right with the shadow one tone darker; a full-width rule
+  closes the banner in both themes; at 129 columns and up the version and hint rows
+  sit beside the mark, narrower terminals keep them under it, and below 69 columns
+  only the two rows and the rule are drawn
+  (`docs/superpowers/specs/2026-09-18-wordmark-banner-design.md` §8).
+- **TUI: the bar's frame runs the same gradient.** The rounded frame around the input
+  is drawn in the wordmark's five crimson bands, light at the left, dark at the
+  right; the caret keeps the next run's accent
+  (`docs/superpowers/specs/2026-09-18-wordmark-banner-design.md` §9).
+
+### Fixed
+- **TUI: typing always reaches the bar.** A click on the log's background, the banner
+  or a panel no longer takes the keyboard away; a printable key typed while a finding
+  line or a permission button is focused goes to the bar
+  (`docs/superpowers/specs/2026-09-18-wordmark-banner-design.md` §11).
+- **Tests: the cache CLI test no longer expires with the calendar.** Its "fresh" entry
+  was dated 2026-09-11 and crossed the 7-day TTL on its own.
+
 ## [0.4.5] - 2026-09-18
 
 The bar takes a whole post, and the rich theme opens with the wordmark.

@@ -564,12 +564,15 @@ Built with `textual`. Accepts a file path, a URL, or raw pasted text. Streams
 progress, is cancellable mid-run, and writes a report on completion.
 
 ```
-       __
-      (o >
-    _/ /
-   /  /       proofpath v0.1.0                        academic . offline . mps
-  /__/        paste a file path, a URL, or a claim.      /help  /config  /quit
- ____||_______________________________________________________________________
+######+                        #####+######+               ##+
+##+--##+                      ##+---+##+--##+         ##+  ##|
+######++##+##+ #####+  #####+ #####+ ######++ #####+ #####+######+
+##+---+ ####++##+--##+##+--##+##+--+ ##+---+ ##+--##++##+-+##+-##+
+##|     ##+-+ +#####+++#####++##|    ##|     #######| ##|  ##| ##|
++-+     +-+    +----+  +----+ +-+    +-+     +-+  +-+ +-+  +-+ +-+
+proofpath v0.1.0                                      academic . offline . mps
+paste a file path, a URL, or a claim.                    /help  /config  /quit
+------------------------------------------------------------------------------
 
 › ~/Desktop/paper.pdf
 
@@ -608,8 +611,8 @@ progress, is cancellable mid-run, and writes a report on completion.
 › _
 ```
 
-In `rich` the banner is the `ProofPath` wordmark of
-`2026-09-18-wordmark-banner-design.md`; the block above is the `plain` banner.
+Both themes open with the `ProofPath` wordmark of
+`2026-09-18-wordmark-banner-design.md`; the block above is the `plain` form.
 **The ferret (decided 2026-09-11).** The banner at the top is the tool's pet, in the
 manner of Claude Code's welcome header: shown once at launch, pinned above the log,
 never repeated. A ferret because English *ferrets out* the facts, and because its
@@ -690,6 +693,10 @@ Design rules:
   the history file, whose entries are one line each. The run is labelled
   `/check pasted text`. A one-line paste is text in the bar, as before.
   Spec: `2026-09-17-multiline-paste-design.md`.
+- **Slash suggestions, a settings panel, and the bar always has the keyboard
+  (2026-09-18).** Typing `/` lists the commands above the bar; `/config` is a panel
+  of settings edited with the arrow keys; a click anywhere leaves typing with the
+  bar. Spec: `2026-09-18-wordmark-banner-design.md` §10–§12.
 - **Several runs per session (decided 2026-09-11).** Every submitted `/check` becomes
   its own block in the log at once, numbered and coloured from a rotating palette
   (`#1`, `#2`, `#3` … each with a distinct accent; the block header, its command line

@@ -17,16 +17,18 @@ worker thread block on a question the event loop is drawing.
 The mirrored verbs (spec section 13.3) hold no more logic than the rest: ``/resolve``,
 ``/fetch``, ``/config`` and ``/cache`` call :mod:`proofpath.commands`, the same
 functions ``cli.py`` calls, on a worker thread, and :mod:`proofpath.tui.verbs` only
-turns what comes back into lines. The widgets themselves live in
-:mod:`proofpath.tui.widgets`; this module composes them, wires the scheduler to them
-and reads the slash commands.
+turns what comes back into lines. ``/config`` on its own is the one exception: it
+opens the settings panel of :mod:`proofpath.tui.widgets.config_panel`, which writes
+through the same ``config_set`` the verb calls (wordmark design section 12). The
+widgets themselves live in :mod:`proofpath.tui.widgets`; this module composes them,
+wires the scheduler to them and reads the slash commands.
 
 Colour comes from :mod:`proofpath.ui` through one :class:`~proofpath.tui.theme.Theme`
 and nowhere else. ``run()`` detects the theme from the terminal (design section 2);
 a caller that builds the app itself -- a test -- gets ``PLAIN`` unless it says
 otherwise, so what a test sees never depends on the terminal it runs in. Widget
 content is built as ``rich.Text`` in the theme's styles; the few places a colour
-becomes a Textual style (a border, the awaiting bar's tint) go through
+becomes a Textual style (a run panel's border, the awaiting bar's tint) go through
 ``widgets.textual_colour``.
 """
 
@@ -42,11 +44,14 @@ from rich.text import Text
 from textual import events as tevents
 from textual.app import App, ComposeResult
 from textual.binding import Binding, BindingType
-from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.containers import Vertical, VerticalScroll
+from textual.geometry import Size
+from textual.widget import AwaitMount, Widget
 from textual.widgets import Button, Input, Static
 
 from proofpath import __version__, device, ui
 from proofpath.browser import Answer
+from proofpath.commands import config_view
 from proofpath.config import Config, ConfigError, load_config
 from proofpath.events import Event
 from proofpath.judge import Judge, JudgeClient, JudgeError, resolve_api_key
@@ -62,18 +67,20 @@ from proofpath.tui.widgets import (
     ANSWER_LABELS,
     Banner,
     CommandBlock,
+    ConfigPanel,
     CoverageFooter,
     FindingLine,
     KvLine,
     NoteLine,
     PermissionPrompt,
     Prompt,
+    PromptFrame,
     RunBlock,
     RunHeader,
     StageLine,
+    Suggestions,
     accent_for,
     panelled,
-    textual_colour,
 )
 from proofpath.verify import Engine
 
@@ -127,6 +134,9 @@ def key_help(arrows: str, shift_arrows: str, sep: str) -> tuple[str, str]:
 AWAITING_VERBS = commands.AWAITING_VERBS
 #: The run states the banner is told about (raven design section 2).
 BUSY_STATES = frozenset({"running", "verifying"})
+#: What the log keeps when the suggestion list takes its rows (wordmark design
+#: section 10): one row, so even a short terminal shows there is a log under the list.
+MIN_LOG_ROWS = 1
 
 
 def run_context(config: Config) -> str:
@@ -141,6 +151,29 @@ def _device_name() -> str:
         return device.onnx_device_name()
     except Exception:  # pragma: no cover - onnxruntime is a hard dependency
         return "cpu"
+
+
+def _bound_keys(widget: Widget) -> frozenset[str]:
+    """Every key ``widget``'s class binds, read through the public ``BINDINGS`` API.
+
+    Textual's live, per-instance binding map (``Widget._bindings``) is a private
+    attribute, and building one from scratch is what ``DOMNode._merge_bindings``
+    already does -- also privately. This walks ``type(widget).__mro__`` the same
+    way, reads each class's own ``BINDINGS`` class variable (a mix of ``Binding``
+    objects and ``(key, action)``/``(key, action, description)`` tuples), and
+    normalises it with ``Binding.make_bindings``, the public classmethod that both
+    turns tuples into ``Binding`` instances and expands a comma-separated key
+    (``"ctrl+c,super+c"``) into one ``Binding`` per key. Only the resulting keys
+    are kept; nothing here reaches into a private Textual attribute.
+    """
+    keys: set[str] = set()
+    for klass in type(widget).__mro__:
+        raw_bindings = klass.__dict__.get("BINDINGS")
+        if not raw_bindings:
+            continue
+        for binding in Binding.make_bindings(raw_bindings):
+            keys.update(key.strip() for key in binding.key.split(","))
+    return frozenset(keys)
 
 
 class SchedulerLike(Protocol):
@@ -171,6 +204,12 @@ EngineFactory = RunsEngineFactory
 class RunLog(VerticalScroll):
     """The scrolling log: one :class:`RunBlock` per run, newest last."""
 
+    # Keyboard scrolling is the app's own priority bindings (``shift+up/down``,
+    # ``pageup/pagedown``, ``ctrl+home/end``) and never needed the log's focus. A
+    # focusable log would take focus on a click on its empty background and swallow
+    # the typing that follows (wordmark design section 11).
+    can_focus = False
+
 
 # --- the application ----------------------------------------------------------------
 
@@ -182,24 +221,44 @@ class ProofpathApp(App[None]):
     Screen { background: $surface; }
     /* No padding: the banner draws itself against the full terminal width. */
     #banner { dock: top; height: auto; padding: 0; }
-    #bottom { dock: bottom; height: 4; }
+    /* As tall as its rows: the footer and the frame keep fixed heights, and the
+       suggestion list between them is hidden until a ``/`` is typed, so the dock is
+       four rows until the list adds its own and the log gives them up (wordmark
+       design section 10). */
+    #bottom { dock: bottom; height: auto; }
     #footer { height: 3; padding: 0 1; }
+    #suggestions { height: auto; padding: 0 1; display: none; }
+    /* The bar is one flat row: its frame's rows and edges exist but are hidden, so
+       the same composition serves every theme and width (wordmark design section 9). */
+    #prompt-frame { height: 1; margin: 0; }
     #prompt-row { height: 1; padding: 0 1; }
+    #frame-top, #frame-bottom, #edge-left, #edge-right { display: none; }
+    #frame-top, #frame-bottom { height: 1; }
+    #edge-left, #edge-right { width: 2; }
     #caret { width: 2; }
-    Prompt { border: none; height: 1; padding: 0; background: $surface; }
+    /* ``1fr``, not Textual's ``100%``: the bar takes what the caret and the edges
+       leave, so its last column is on screen and the right edge is not pushed off it. */
+    Prompt { border: none; height: 1; padding: 0; width: 1fr; background: $surface; }
     RunLog { height: 1fr; padding: 0 1; scrollbar-size-vertical: 1; }
     .run-block { height: auto; margin-bottom: 1; }
     .stages, .findings { height: auto; }
-    /* RICH (design section 4): the footer gains the coverage bar's row, the prompt a
-       rounded border, and a run's panel keeps two columns between border and text.
-       The border colours are the run's accent and are set where the run is known. */
-    #bottom.rich { height: 7; }
+    /* RICH (design section 4): the footer gains the coverage bar's row, the prompt its
+       drawn frame -- three rows, in the wordmark's gradient, where the bar's padding
+       becomes the frame's edges -- and a run's panel keeps two columns between border
+       and text. A panel's border colour is the run's accent and is set where the run
+       is known. */
     #bottom.rich #footer { height: 4; }
-    #bottom.rich #prompt-row { height: 3; margin: 0 1; padding: 0 1; border: round $surface; }
+    #bottom.rich #prompt-frame { height: 3; margin: 0 1; }
+    #bottom.rich #prompt-row { padding: 0; }
+    #bottom.rich #frame-top, #bottom.rich #frame-bottom,
+    #bottom.rich #edge-left, #bottom.rich #edge-right { display: block; }
     .run-block.rich { padding: 0 1; }
-    /* Below the panel floor the borders go (design section 4) and the rows come back. */
-    #bottom.rich.narrow { height: 5; }
-    #bottom.rich.narrow #prompt-row { height: 1; margin: 0; border: none; }
+    /* Below the panel floor the borders and the frame go (design section 4) and the
+       rows come back. */
+    #bottom.rich.narrow #prompt-frame { height: 1; margin: 0; }
+    #bottom.rich.narrow #prompt-row { padding: 0 1; }
+    #bottom.rich.narrow #frame-top, #bottom.rich.narrow #frame-bottom,
+    #bottom.rich.narrow #edge-left, #bottom.rich.narrow #edge-right { display: none; }
     .run-block.rich.narrow { padding: 0; }
     /* The permission prompt is part of the log, not something drawn over it: no
        border, no panel, and buttons one row high, so the block keeps reading as a
@@ -211,6 +270,13 @@ class ProofpathApp(App[None]):
         background: $surface; text-style: none;
     }
     .permission .answered { height: 1; }
+    /* A text row under edit: its name, then the bar's kind of input on the same row,
+       flat like the bar itself, so the row reads as the row it replaces. */
+    .config-panel .edit { height: 1; }
+    .config-panel .edit PanelLine { width: auto; }
+    .config-panel .edit Input {
+        width: 1fr; height: 1; border: none; padding: 0; background: $surface;
+    }
     Line:focus { text-style: underline; }
     """
 
@@ -273,13 +339,16 @@ class ProofpathApp(App[None]):
         self.pending: dict[int, Future[Answer]] = {}
         self._command_blocks: dict[int, CommandBlock] = {}
         self._owner = 0  # the negative half of the id space, for ``/fetch``
-        #: Zero-based index of the run whose accent the prompt wears.
-        self._prompt_accent = 0
         #: Set the moment ``_quit`` starts. A question asked after that is answered
         #: ``no`` without ever being drawn: the app is on its way out, and a worker
         #: thread parked on a prompt nobody will see is a thread ``close()`` cannot
         #: join (rule 5 -- and the safe answer installs nothing).
         self._quitting = False
+        #: What the list above the bar was last drawn with (wordmark design section
+        #: 10), so a keystroke that fires both a ``Changed`` and a
+        #: ``SuggestionsChanged`` -- ``Tab`` does -- redraws it once, not twice.
+        #: ``None`` while the list is hidden.
+        self._suggestions_shown: tuple[tuple[str, ...], int, int] | None = None
 
     def _default_engine(self, run: Run) -> Engine:
         """The run's engine, with the section 7.1 question pointed at its own block.
@@ -334,7 +403,7 @@ class ProofpathApp(App[None]):
 
         return ask
 
-    def _open_prompt(
+    async def _open_prompt(
         self, owner: int, host: str, status: int | None, answer: Future[Answer]
     ) -> None:
         """Mount the question where it happened. Loop thread only."""
@@ -350,9 +419,14 @@ class ProofpathApp(App[None]):
             self._blocks.get(owner) if owner > 0 else self._command_blocks.get(owner)
         )
         if home is None:  # pragma: no cover - the block is mounted before the engine is
-            self.query_one(RunLog).mount(widget)
+            mounted: AwaitMount | None = self.query_one(RunLog).mount(widget)
         else:
-            home.ask(widget)
+            mounted = home.ask(widget)
+        # The question is a dozen rows; scrolled before its mount is done, the log
+        # stops at its old end and the buttons sit below the fold on a 24-row
+        # terminal (nine of them are the banner). So the mount is waited for first.
+        if mounted is not None:
+            await mounted
         self._scroll_log()
 
     def _settle_prompt(self, owner: int, answer: Answer) -> bool:
@@ -433,15 +507,15 @@ class ProofpathApp(App[None]):
         # prompt share a single dock and split it between them.
         with Vertical(id="bottom", classes=self._theme.name):
             yield CoverageFooter(self._out, self._theme)
-            with Horizontal(id="prompt-row"):
-                yield Static(self._theme.glyphs.prompt, id="caret")
-                yield Prompt(
-                    placeholder=DEFAULT_PLACEHOLDER,
-                    id="prompt",
-                    history=self._history,
-                    complete=self._completions,
-                    sep=self._theme.glyphs.sep,
-                )
+            yield Suggestions(theme=self._theme, coloured=self._out.color)
+            yield PromptFrame(
+                theme=self._theme,
+                coloured=self._out.color,
+                placeholder=DEFAULT_PLACEHOLDER,
+                history=self._history,
+                complete=self._completions,
+                sep=self._theme.glyphs.sep,
+            )
         yield RunLog(id="log")
 
     def on_mount(self) -> None:
@@ -450,42 +524,123 @@ class ProofpathApp(App[None]):
         )
         self._history.load()
         self._accent_prompt(0)
+        self._fit_bottom()
         self.query_one(Prompt).focus()
+
+    def on_key(self, event: tevents.Key) -> None:
+        """A printable key anywhere is typing, and typing belongs to the bar.
+
+        Wordmark design section 11: whatever a click left focused -- a line, a
+        permission button, nothing at all -- the first printable key goes to the bar
+        and brings focus with it. Two kinds of key never get forwarded. A key with
+        no printable character (``enter``, the arrows, ``tab``) is not typing and
+        returns at the first check: that is why a button's ``enter`` still presses
+        it. A key the focused widget binds itself is that widget's, whatever it is:
+        ``c`` on a focused line is the line's copy (spec section 13.1), and the same
+        rule would keep ``space`` with a button if Textual bound it -- it does not
+        (``Button.BINDINGS`` is ``enter`` alone, and ``Button`` has no key handler),
+        so ``space`` on a button is typing like any other printable key. The lookup
+        is the widget's own ``BindingsMap``, not the screen's, so a key the app
+        binds is still typing when a line has focus. The key is stopped and posted
+        to the bar afresh rather than inserted: focus is set on the screen directly
+        -- ``Widget.focus`` defers, and the key would overtake the ``Focus`` -- and
+        the key is posted after it, so the bar types it the way it types every other
+        one.
+        """
+        focused = self.focused
+        prompt = self.query_one(Prompt)
+        if focused is prompt or not event.is_printable or event.character is None:
+            return
+        if focused is not None and event.key in _bound_keys(focused):
+            return
+        event.stop()
+        event.prevent_default()
+        self.screen.set_focus(prompt)
+        prompt.post_message(tevents.Key(event.key, event.character))
 
     def on_resize(self, event: tevents.Resize) -> None:
         # The event's size, not ``self.size``: the app's own is a step behind here.
         self._fit_bottom(event.size.width)
+        if self.query_one(Suggestions).visible:
+            self._refresh_suggestions(event.size)
 
     def _fit_bottom(self, width: int | None = None) -> None:
-        """The prompt's border, and the rows it costs, go below the panel floor.
+        """The prompt's frame, and the rows it costs, go below the panel floor.
 
-        The border is set here and nowhere else, inline, because its colour is the
-        current run's accent and a stylesheet cannot know that; the class only
-        moves the heights.
+        The class is all it takes: the stylesheet only decides whether the frame's
+        rows and edges show and how tall the container is. Their colours are
+        ``FrameEdge.render``'s, the wordmark's bands, so nothing is set inline here.
         """
         wide = panelled(self._theme, self.size.width if width is None else width)
         self.query_one("#bottom").set_class(not wide and self._theme.name == "rich", "narrow")
-        row = self.query_one("#prompt-row")
-        if wide:
-            # Without colour the box is drawn in the terminal's default: still a
-            # box, where a border in the background colour would be three empty rows.
-            accent = self._theme.accent(self._prompt_accent) if self._out.color else ""
-            row.styles.border = (self._theme.glyphs.box, textual_colour(accent))
-        else:
-            row.styles.border = None
 
     def _accent_prompt(self, index: int) -> None:
-        """The prompt in the current run's accent: its caret, and in RICH its border.
+        """The prompt's caret, and the list's selected row, in the current run's accent.
 
-        ``index`` is the run's zero-based position, so the bar always matches the
+        ``index`` is the run's zero-based position, so the caret always matches the
         panel above it and, before any run, wears the accent the first one will.
+        The frame around the bar does not follow it (wordmark design section 9).
         """
-        self._prompt_accent = index
         if self._out.color:
             accent = self._theme.accent(index)
             caret = Text(self._theme.glyphs.prompt, style=accent)
             self.query_one("#caret", Static).update(caret)
-        self._fit_bottom()
+            self.query_one(Suggestions).set_accent(accent)
+
+    # --- the list above the bar (wordmark design section 10) ------------------------
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        # Every keystroke, paste and recall: the bar has already told the edit from
+        # its own replacements by the time the message reaches the app.
+        self._refresh_suggestions()
+
+    def on_prompt_suggestions_changed(self, event: Prompt.SuggestionsChanged) -> None:
+        self._refresh_suggestions()
+
+    def _refresh_suggestions(self, size: Size | None = None) -> None:
+        """Draw the bar's cycle above it, or take the list away.
+
+        The bar knows what it may become (``complete``, with the live runs the app
+        handed it) and which candidate is selected; the app only decides whether
+        that is worth a list: a ``/`` line with at least one candidate is, anything
+        else -- an empty bar, a claim, a path, a held paste's summary -- is not.
+        ``size`` is the screen's when a resize is announcing one the app has not
+        taken yet.
+
+        ``Tab`` fires both a ``Changed`` (the bar's text moved) and a
+        ``SuggestionsChanged`` (the cycle moved) for the one keystroke, and each
+        reaches here on its own -- so this only redraws when what would be drawn
+        has actually moved, rather than showing the same list twice.
+        """
+        prompt = self.query_one(Prompt)
+        suggestions = self.query_one(Suggestions)
+        if prompt.suggesting:
+            candidates, selected = prompt.candidates, prompt.selected
+            limit = self._suggestion_lines(self.size if size is None else size)
+            shown = (candidates, selected, limit)
+            if shown == self._suggestions_shown:
+                return
+            self._suggestions_shown = shown
+            suggestions.show(candidates, selected, limit=limit)
+        else:
+            if self._suggestions_shown is None:
+                return
+            self._suggestions_shown = None
+            suggestions.hide()
+
+    def _suggestion_lines(self, size: Size) -> int:
+        """How many lines the list may take on a screen of ``size``: what is left.
+
+        The banner, the footer, the bar's frame and one row of log come first. The
+        list is transient and the log gives way to it, but a list that pushed the
+        docks past the screen would scroll the screen itself and draw the bar over
+        the banner. Counted from the size, not from regions: on a resize the regions
+        are still the old layout's, and the banner's height moves with the width.
+        """
+        rows = self.query_one(Banner).get_content_height(size, size, size.width)
+        rows += self.query_one(CoverageFooter).rows
+        rows += self.query_one(PromptFrame).rows
+        return max(size.height - rows - MIN_LOG_ROWS, 1)
 
     # --- the scheduler's two callbacks ----------------------------------------------
 
@@ -572,11 +727,20 @@ class ProofpathApp(App[None]):
             # ``_command_blocks`` holds a mirrored verb only while its worker is out.
             if command_block not in self._command_blocks.values():
                 command_block.remove()
+        for panel in list(self.query(ConfigPanel)):
+            # A collapsed panel is a record, like a finished block; an open one is in use.
+            if panel.collapsed:
+                panel.remove()
         for note in list(self.query(NoteLine)):
             # A block's own notes (stage lines, a summary) have the block as parent
             # and go with it; only the loose ones are the log's to clear.
             if isinstance(note.parent, RunLog):
                 note.remove()
+        for line in list(self.query(KvLine)):
+            # The same for a panel's error line: loose in the log, and the panel's own
+            # record does not carry it.
+            if isinstance(line.parent, RunLog):
+                line.remove()
         # A selection on a widget that just left the screen would otherwise stay in
         # ``screen.selections`` and read back as ``""``: not ``None``, so ``ctrl+c``
         # would copy nothing and never quit.
@@ -631,6 +795,8 @@ class ProofpathApp(App[None]):
             self._summarize()
         elif command.verb == "quit":
             await self._quit()
+        elif command.verb == "config" and not command.arg:
+            await self._open_config_panel()
         elif command.verb in MIRRORED:
             self._mirror(command)
 
@@ -682,6 +848,63 @@ class ProofpathApp(App[None]):
             # the config it was launched with (``permissions.network`` is on the banner).
             self._reload_config()
         self._scroll_log()
+
+    # --- the settings panel (wordmark design section 12) -----------------------------
+
+    async def _open_config_panel(self) -> None:
+        """``/config`` alone: the settings as rows in the log, focused.
+
+        The file is read here, once, and an unreadable one is the error line the
+        mirrored verb prints rather than a panel of defaults over a file that says
+        something else. The panel wears the accent the caret wears -- the run on
+        screen, or the first one's before any run -- like the panel above it.
+        """
+        try:
+            view = config_view()
+        except ConfigError as exc:
+            self.query_one(RunLog).mount(KvLine(error_line(self._out, str(exc))))
+            self._scroll_log()
+            return
+        runs = self._scheduler.runs if self._scheduler is not None else ()
+        accent = self._theme.accent(max(len(runs) - 1, 0))
+        panel = ConfigPanel(view, accent, self._out, self._theme)
+        # Waited for: focus can only land on a widget that is in the DOM.
+        await self.query_one(RunLog).mount(panel)
+        self._scroll_log()
+        panel.focus()
+
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        """The app's priority ``escape`` stands aside while an *open* panel has focus.
+
+        Priority bindings run from the app down, so the panel's own ``escape`` -- fold,
+        or cancel an open edit -- would never be reached; the bar's awaiting mode and
+        the screen's selection, which the app's ``escape`` is for, are not in play
+        while the panel or its edit holds focus. A *collapsed* panel has no ``escape``
+        of its own (``action_close`` returns at once when ``collapsed``), so once it
+        has folded the app's own ``escape`` must run again -- otherwise a collapsed
+        panel left focused (nothing else has claimed focus yet) leaves ``Esc`` dead
+        until some other event moves focus away from it.
+        """
+        if action == "leave_awaiting" and self.focused is not None:
+            return not any(
+                isinstance(node, ConfigPanel) and not node.collapsed
+                for node in self.focused.ancestors_with_self
+            )
+        return True
+
+    def on_config_panel_written(self, event: ConfigPanel.Written) -> None:
+        """The file changed: the session decides by it from now on (the banner's
+        ``online``/``offline`` follows), and the log says what ``/config set`` would."""
+        self._reload_config()
+        for key, value in event.pairs:
+            self._note(f"{key} = {value}  ({event.path})", dim=False)
+
+    def on_config_panel_failed(self, event: ConfigPanel.Failed) -> None:
+        self.query_one(RunLog).mount(KvLine(error_line(self._out, event.message)))
+        self._scroll_log()
+
+    def on_config_panel_closed(self, event: ConfigPanel.Closed) -> None:
+        self.query_one(Prompt).focus()
 
     # --- the summary ------------------------------------------------------------------
 
@@ -813,15 +1036,17 @@ class ProofpathApp(App[None]):
         return commands.complete(text, run_ids=live)
 
     def _help(self) -> None:
-        """Every verb with what it wants, so the list is also the syntax; then the keys."""
+        """Every verb with what it wants and what it does, so the list is also the
+        syntax (``commands.DESCRIPTIONS``, spec section 13.1); then the keys."""
+        sep = f" {self._theme.glyphs.sep} "
         for verb in commands.VERBS:
             placeholder = commands.NEEDS_ARGUMENT.get(verb, "")
-            self._note(f"/{verb} {placeholder}".rstrip(), dim=False)
+            line = f"/{verb} {placeholder}".rstrip()
+            self._note(f"{line}{sep}{commands.DESCRIPTIONS[verb]}", dim=False)
         self._note("a line that is not a command is checked as a target")
         rich = self._theme.name == "rich"
         arrows = "↑ ↓" if rich else "up/down"
         shift_arrows = "↑↓" if rich else "up/down"
-        sep = f" {self._theme.glyphs.sep} "
         for line in key_help(arrows, shift_arrows, sep):
             self._note(line)
 
@@ -933,6 +1158,7 @@ __all__ = [
     "HINT",
     "Banner",
     "CommandBlock",
+    "ConfigPanel",
     "CoverageFooter",
     "FindingLine",
     "KvLine",
@@ -944,6 +1170,7 @@ __all__ = [
     "RunHeader",
     "RunLog",
     "StageLine",
+    "Suggestions",
     "accent_for",
     "run",
     "run_context",

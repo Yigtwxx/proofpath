@@ -13,7 +13,9 @@ from proofpath.models import Label, Passage, Verdict
 from proofpath.resolve import Candidate, ResolveResult, State
 
 runner = CliRunner()
-NOW = datetime(2026, 9, 11, tzinfo=timezone.utc)
+#: Real time, not a fixed date: the CLI expires by the clock, so a fixed "fresh" entry
+#: would itself expire a week after it was written into this file.
+NOW = datetime.now(timezone.utc)
 RESOLVED = ResolveResult(
     State.RESOLVED,
     Candidate("10.1/x", "Array programming with NumPy", "Harris", 2020, "Nature", "crossref"),
