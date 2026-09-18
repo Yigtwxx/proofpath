@@ -213,7 +213,17 @@ async def click(pilot: Any, target: Any, offset: tuple[int, int] = (0, 0)) -> No
     says so at once instead of looking like a hung worker.
     """
     await until(pilot, lambda: _laid_out(pilot.app, target, offset), f"{target} to be laid out")
+    # A region can be current while the scroll that brings it on screen is not:
+    # ``Pilot.click`` then answers ``False`` because another widget was under the
+    # cell. Seen on the slow Windows 3.10 runner only, once the banner grew to nine
+    # rows and pushed the permission buttons below the fold. Pump and press again
+    # for a while before calling it a miss.
+    deadline = time.monotonic() + 5.0
     landed = await pilot.click(target, offset=offset)
+    while not landed and time.monotonic() < deadline:
+        await pilot.pause()
+        await asyncio.sleep(0.05)
+        landed = await pilot.click(target, offset=offset)
     assert landed, f"the click at {offset} never reached {target}"
 
 
