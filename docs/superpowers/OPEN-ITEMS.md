@@ -525,3 +525,22 @@ A bare address on any host that is not a platform is read as the document itself
 | 16.5 | `find_bibliography` knows five headings | a page (or paper) whose list sits under "Sources", "Notes", "Footnotes" or "Citations" is not seen to print one; a page then cites by its links and says so (`MARKERS_SET_ASIDE`), a paper reports its markers unresolved. Widening `_BIBLIOGRAPHY_HEADING` needs the eval sets re-run, so it is not done here |
 | 16.4 | A page's self-link rule ignores the query | `_page_key` drops `?utm_source=` and `?page=2` alike, so a page that keys its articles by query (`?id=123`) would drop a link to a sibling article as a link to itself; no such page has been seen |
 | 16.3 | Scheme-less links in pasted text are not references | `resolve._HTTP_URL` wants `http(s)://`; `nature.com/articles/…` in a pasted paragraph is verified against nothing |
+
+## 17. Source-less claims — 2026-09-18
+
+A bare claim pasted with no address, bibliography or marker now ends with a `PARSE
+ERROR` saying the text links or cites no source and what to paste instead (v0.4.6+,
+`04341ea`). It does not end with anything checked, because nothing can be: the tool
+verifies the sources *behind* a claim and goes looking for none.
+
+The case that prompted it: a tweet. X cannot be read (§3 non-goal), so the user is
+told to paste the text — and a tweet that links nothing then has nothing to verify
+against. "Paste the text" is only an answer for a tweet that links its source.
+
+### New open items
+
+| # | Item | Note |
+|---|---|---|
+| 17.1 | **Evidence search for a source-less claim** (decided 2026-09-18: this is the fix, path B) | An opt-in stage for a document that cites nothing: query a web search provider with the user's own key (Tavily / Brave / SearXNG; consent per §7.1, never on by default), take the top N pages and run them through the existing fetch → retrieval → entailment path. The report must carry a **distinct state** for such a source — `found by proofpath, not cited by the author` — on every finding and in coverage; rules 1–2 stay: passage or no verdict, unreachable stays unreachable. **Gate:** AVeriTeC (§15.1) measures exactly this scenario at 0.270 vs a 0.708 majority baseline, so the stage ships only once a web-claim eval is above baseline, or it ships flagged experimental with that number printed in the report. Not the judge: a judge answering with no source is the truth oracle §3 forbids |
+| 17.2 | README:280 and the `check --url` X message overstate "paste the text" | both should say a tweet with no link cannot be checked, until 17.1 lands |
+| 17.3 | The "cites nothing" finding fires for a whole document, never per paragraph | a long pasted post where only some paragraphs link is fine today (it has references); a `.txt` mixing cited and uncited claims reports nothing about the uncited ones — that is the existing per-claim coverage's job, but worth checking it says so |
