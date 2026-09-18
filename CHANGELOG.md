@@ -6,6 +6,11 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.6] - 2026-09-18
+
+The terminal looks like the product: the wordmark in both themes, a settings
+panel, and commands that show themselves as you type.
+
 ### Added
 - **TUI: slash suggestions.** Typing `/` lists every command above the bar with what
   it wants and what it does; the list narrows per keystroke (`/h` → `/help`), `Tab`
