@@ -1,0 +1,82 @@
+---
+/* What it reads, at a glance: three piles in pencil boxes — reads it, needs one thing
+   from you, cannot read and says so — each source a small drawing and a line. */
+import { readColumns } from '../data/reads';
+import SketchBox from './sketch/SketchBox.astro';
+import SketchIcon from './sketch/SketchIcon.astro';
+---
+
+<div class="reads">
+    {readColumns.map((column) => (
+        <SketchBox as="section" padding="md" tone={column.tone} draw class="reads__column">
+            <h3 class:list={['reads__title', `tone-${column.tone}`]}>{column.title}</h3>
+            <p class="marginalia reads__lede">{column.lede}</p>
+            <ul class="reads__items">
+                {column.items.map((item) => (
+                    <li class="reads__item">
+                        <SketchIcon name={item.icon} tone={column.tone} draw />
+                        <span class="reads__text">
+                            <span class="reads__name">{item.name}</span>
+                            <span class="reads__note">{item.note}</span>
+                        </span>
+                    </li>
+                ))}
+            </ul>
+        </SketchBox>
+    ))}
+</div>
+
+<style>
+    .reads {
+        display: grid;
+        gap: var(--space-5);
+    }
+    @media (min-width: 64rem) {
+        .reads {
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: var(--space-6);
+            align-items: start;
+        }
+    }
+    .reads__title {
+        font-size: var(--step-2);
+        font-weight: 500;
+        margin: 0;
+        font-variation-settings: 'opsz' 48;
+    }
+    .reads__title.tone-crimson {
+        color: var(--crimson);
+    }
+    .reads__title.tone-slate {
+        color: var(--slate);
+    }
+    .reads__lede {
+        margin: var(--space-1) 0 var(--space-5);
+        --pen: var(--ink-mute);
+    }
+    .reads__items {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+        display: grid;
+        gap: var(--space-5);
+    }
+    .reads__item {
+        display: flex;
+        gap: var(--space-4);
+        align-items: flex-start;
+    }
+    .reads__text {
+        display: grid;
+        gap: var(--space-1);
+        min-width: 0;
+    }
+    .reads__name {
+        font-weight: 600;
+        color: var(--ink);
+    }
+    .reads__note {
+        font-size: var(--step--1);
+        color: var(--ink-soft);
+    }
+</style>

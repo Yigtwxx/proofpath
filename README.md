@@ -102,6 +102,24 @@ proofpath asks once before downloading one — about 280 MB, into its own enviro
 and the shared browser cache, never system-wide — and remembers the answer.
 `proofpath config set permissions.install_browser never` stops it asking at all.
 
+## What it reads
+
+| | Source | You need |
+|---|---|---|
+| ✅ | Your files: PDF, Word (`.docx`), Markdown, `.txt` | nothing |
+| ✅ | Papers: DOI, arXiv, books | nothing |
+| ✅ | Web pages: news, blogs, Wikipedia, any page | nothing |
+| ✅ | Posts: Bluesky, Hacker News, Lobste.rs, Mastodon, Lemmy | nothing |
+| 🔑 | Reddit | a free Reddit app of your own |
+| 🔑 | LLM second opinion (`--judge`, `--summarize`) | a free Groq key, or Ollama with no key |
+| 🔑 | Sites that block robots | your OK for a 280 MB browser, asked first |
+| ❌ | Scanned PDFs | no OCR yet |
+| ❌ | Old formats: `.doc`, `.odt`, `.rtf` | save as `.docx` or PDF |
+| ❌ | Paywalls | reported as unread |
+| ❌ | X / Twitter | paste the text instead |
+
+✅ reads it · 🔑 needs one thing from you · ❌ cannot read it, and says so in the report.
+
 ## Honesty
 
 **Most verdicts are "not enough information", and that is the honest answer.** On

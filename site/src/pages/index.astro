@@ -9,6 +9,7 @@ import Rules from '../components/Rules.astro';
 import Ci from '../components/Ci.astro';
 import Footer from '../components/Footer.astro';
 import InstallBox from '../components/InstallBox.astro';
+import Reads from '../components/Reads.astro';
 import Posts from '../components/Posts.astro';
 import Measured from '../components/Measured.astro';
 import Judge from '../components/Judge.astro';
@@ -77,6 +78,15 @@ const description =
             {levels.map((level) => (
                 <Chapter level={level} />
             ))}
+        </Section>
+
+        <Section
+            id="reads"
+            ruled
+            title="What it reads."
+            margin="Most of it needs no key at all. What cannot be read is said out loud, never skipped."
+        >
+            <Reads />
         </Section>
 
         <Section
