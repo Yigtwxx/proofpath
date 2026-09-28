@@ -69,7 +69,10 @@ function settle(svg: Element, drawMs: number): void {
         if (pending <= 0) done();
     };
     svg.addEventListener('transitionend', onEnd);
-    window.setTimeout(done, drawMs + SETTLE_SLACK_MS);
+    // A drawing with its own pace says so in `data-draw-ms` (SketchBox), so the
+    // fallback never cuts it short -- and no style has to be read to find out.
+    const own = Number((svg as SVGElement).dataset.drawMs);
+    window.setTimeout(done, (own || drawMs) + SETTLE_SLACK_MS);
 }
 
 export function initStrokeDraw(root: ParentNode = document): void {

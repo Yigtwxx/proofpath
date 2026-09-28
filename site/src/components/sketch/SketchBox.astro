@@ -21,6 +21,9 @@ const {
     class: className,
     ...rest
 } = Astro.props;
+// A frame is drawn slower than a small stroke: a box-sized line at the shared pace
+// read as a flash rather than a hand going round the box.
+const DRAW_MS = 1400;
 ---
 
 <Tag
@@ -34,6 +37,8 @@ const {
         aria-hidden="true"
         focusable="false"
         data-draw={draw ? '' : undefined}
+        data-draw-ms={draw ? DRAW_MS : undefined}
+        style={draw ? `--draw-duration: ${DRAW_MS}ms` : undefined}
     >
         <rect class="sketch-box__fill" x="1" y="1" width="98" height="98"></rect>
         <path class="sketch-box__line" d="M2 2.5 L98 1.8 L98.4 98 L1.6 98.4 Z"></path>
