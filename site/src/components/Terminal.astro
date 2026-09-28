@@ -2,20 +2,13 @@
 /* The scripted run: a dark panel in the TUI's own colours, on the paper page.
    The full transcript is in the markup for screen readers and for no-JS. */
 import {
-    RAVEN_CELL_HEIGHT,
-    RAVEN_CELL_WIDTH,
-    RAVEN_COLUMNS,
-    RAVEN_DARK,
-    RAVEN_GROUND_PIXEL_ROW,
-    RAVEN_GROUND_ROW,
-    RAVEN_HINT_ROW,
-    RAVEN_LIGHT,
-    RAVEN_ROWS,
-    RAVEN_TEXT_COLUMN,
-    RAVEN_VERSION_ROW,
+    WORDMARK_BANDS,
+    WORDMARK_BLOCK,
+    WORDMARK_COLUMNS,
+    WORDMARK_SHADOW,
     banner,
     frames,
-    raven,
+    wordmark,
 } from '../data/demo';
 
 // Final state for the static transcript: last frame per id, in first-seen order.
@@ -27,39 +20,63 @@ const finalLines = (() => {
     return Array.from(map.values());
 })();
 
-// The bird as dots: one path per tone, one circle per pixel, on a viewBox of
-// fifteen cells by eight rows. The SVG is stretched onto that many text cells, so
-// a pixel is 0.3em by 0.375em, as it would be in the terminal.
-const DOT_RADIUS = 0.34;
-const viewWidth = RAVEN_COLUMNS * RAVEN_CELL_WIDTH;
-const viewHeight = RAVEN_ROWS * RAVEN_CELL_HEIGHT;
-const dots = (tone: string): string => {
-    const r = DOT_RADIUS;
-    const parts: string[] = [];
-    raven.forEach((row, y) => {
-        Array.from(row).forEach((pixel, x) => {
-            if (pixel !== tone) return;
-            const cx = x + 0.5;
-            const cy = y + 0.5;
-            parts.push(`M${cx - r} ${cy}a${r} ${r} 0 1 0 ${2 * r} 0a${r} ${r} 0 1 0 ${-2 * r} 0`);
-        });
-    });
-    return parts.join('');
+// The mark as shapes: a cell is one unit wide and two tall, as in a terminal. Each
+// run of blocks in one gradient band is one rectangle (a hair taller than its row,
+// so rows do not show a seam); the shadow glyphs are double lines, stroked.
+const CELL_HEIGHT = 2;
+const SEAM = 0.04;
+const viewWidth = WORDMARK_COLUMNS;
+const viewHeight = wordmark.length * CELL_HEIGHT;
+const bandOf = (x: number): number =>
+    Math.min(WORDMARK_BANDS.length - 1, Math.floor((x * WORDMARK_BANDS.length) / WORDMARK_COLUMNS));
+const blocks: string[] = WORDMARK_BANDS.map(() => '');
+wordmark.forEach((line, row) => {
+    const cells = Array.from(line);
+    let x = 0;
+    while (x < cells.length) {
+        if (cells[x] !== WORDMARK_BLOCK) {
+            x += 1;
+            continue;
+        }
+        const band = bandOf(x);
+        let end = x;
+        while (end < cells.length && cells[end] === WORDMARK_BLOCK && bandOf(end) === band)
+            end += 1;
+        blocks[band] += `M${x} ${row * CELL_HEIGHT}h${end - x}v${CELL_HEIGHT + SEAM}h${x - end}z`;
+        x = end;
+    }
+});
+// Double lines sit this far either side of a cell's centre.
+const DX = 0.2;
+const DY = 0.26;
+const shadowCell = (glyph: string, x: number, y: number): string => {
+    const cx = x + 0.5;
+    const cy = y + CELL_HEIGHT / 2;
+    const r = x + 1;
+    const bottom = y + CELL_HEIGHT;
+    switch (glyph) {
+        case '═':
+            return `M${x} ${cy - DY}H${r}M${x} ${cy + DY}H${r}`;
+        case '║':
+            return `M${cx - DX} ${y}V${bottom}M${cx + DX} ${y}V${bottom}`;
+        case '╗':
+            return `M${x} ${cy - DY}H${cx + DX}V${bottom}M${x} ${cy + DY}H${cx - DX}V${bottom}`;
+        case '╔':
+            return `M${r} ${cy - DY}H${cx - DX}V${bottom}M${r} ${cy + DY}H${cx + DX}V${bottom}`;
+        case '╝':
+            return `M${x} ${cy + DY}H${cx + DX}V${y}M${x} ${cy - DY}H${cx - DX}V${y}`;
+        case '╚':
+            return `M${r} ${cy + DY}H${cx - DX}V${y}M${r} ${cy - DY}H${cx + DX}V${y}`;
+        default:
+            return '';
+    }
 };
-const darkPath = dots(RAVEN_DARK);
-const lightPath = dots(RAVEN_LIGHT);
-// Grid placement for the stylesheet: rows and columns are one-based.
-const grid = {
-    ravenCols: RAVEN_COLUMNS,
-    gapCols: RAVEN_TEXT_COLUMN - RAVEN_COLUMNS,
-    rows: RAVEN_ROWS,
-    versionRow: RAVEN_VERSION_ROW + 1,
-    hintRow: RAVEN_HINT_ROW + 1,
-    groundRow: RAVEN_GROUND_ROW + 1,
-    groundPixelRow: RAVEN_GROUND_PIXEL_ROW,
-    cellWidth: RAVEN_CELL_WIDTH,
-    cellHeight: RAVEN_CELL_HEIGHT,
-};
+const shadow = wordmark
+    .flatMap((line, row) =>
+        Array.from(line).map((glyph, x) => shadowCell(glyph, x, row * CELL_HEIGHT)),
+    )
+    .join('');
+const tones = { shadow: WORDMARK_SHADOW, columns: WORDMARK_COLUMNS };
 ---
 
 <div class="tui" data-tui>
@@ -75,30 +92,31 @@ const grid = {
         </button>
     </div>
     <div class="tui__banner" aria-hidden="true">
-        <svg
-            class="tui__raven"
-            viewBox={`0 0 ${viewWidth} ${viewHeight}`}
-            preserveAspectRatio="none"
-            focusable="false"
-        >
-            <path d={darkPath} data-pet="dark"></path>
-            <path d={lightPath} data-pet="light"></path>
-        </svg>
-        <div class="tui__banner-line tui__banner-line--version">
-            <span>{banner.version}</span>
-            <span class="tui__right">{banner.context}</span>
+        <div class="tui__head">
+            <svg class="tui__mark" viewBox={`0 0 ${viewWidth} ${viewHeight}`} focusable="false">
+                {blocks.map((d, i) => (
+                    <path d={d} fill={WORDMARK_BANDS[i]} />
+                ))}
+                <path class="tui__mark-shadow" d={shadow} />
+            </svg>
+            <div class="tui__texts">
+                <div class="tui__banner-line">
+                    <span>{banner.version}</span>
+                    <span class="tui__right">{banner.context}</span>
+                </div>
+                <div class="tui__banner-line">
+                    <span>{banner.hint}</span>
+                    <span class="tui__right">{banner.commands}</span>
+                </div>
+            </div>
         </div>
-        <div class="tui__banner-line tui__banner-line--hint">
-            <span>{banner.hint}</span>
-            <span class="tui__right">{banner.commands}</span>
-        </div>
-        <div class="tui__ground"></div>
+        <div class="tui__rule"></div>
     </div>
     <div class="tui__out" data-tui-out aria-hidden="true"></div>
     <pre class="visually-hidden">{finalLines.map((f) => f.spans.map((s) => s.text).join('')).join('\n')}</pre>
 </div>
 
-<style define:vars={grid}>
+<style define:vars={tones}>
     .tui {
         max-width: 100%;
         min-width: 0;
@@ -147,36 +165,40 @@ const grid = {
         color: var(--tui-fg);
         border-color: var(--tui-fg);
     }
+    /* The TUI's layout rule, by the panel's width in text cells: the two text lines
+       sit beside the mark when both fit to its right, under it otherwise. */
     .tui__banner {
-        --tui-line: 1.5em;
-        display: grid;
-        grid-template-columns: calc(var(--ravenCols) * 1ch) calc(var(--gapCols) * 1ch) minmax(
-                0,
-                1fr
-            );
-        grid-template-rows: repeat(var(--rows), var(--tui-line));
+        container-type: inline-size;
         padding: 1em 1.2em 0;
         white-space: pre;
-        line-height: var(--tui-line);
     }
-    .tui__raven {
-        grid-column: 1;
-        grid-row: 1 / span var(--rows);
-        width: 100%;
-        height: 100%;
+    .tui__head {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr);
+        row-gap: 0.6em;
+    }
+    .tui__mark {
         display: block;
-        overflow: visible;
+        width: min(100%, calc(var(--columns) * 1ch));
+        height: auto;
     }
-    /* The bird's two tones are the TUI's `rich` pet colours, which are the site's
-       crimsons; the ground is the light one. */
-    .tui__raven [data-pet='dark'] {
-        fill: var(--crimson-deep);
+    .tui__mark-shadow {
+        fill: none;
+        stroke: var(--shadow);
+        stroke-width: 0.2;
+        stroke-linejoin: miter;
     }
-    .tui__raven [data-pet='light'] {
-        fill: var(--crimson);
+    .tui__texts {
+        min-width: 0;
+    }
+    @container (min-width: 128ch) {
+        .tui__head {
+            grid-template-columns: calc(var(--columns) * 1ch) minmax(0, 1fr);
+            column-gap: 2ch;
+            align-items: center;
+        }
     }
     .tui__banner-line {
-        grid-column: 3;
         display: flex;
         min-width: 0;
     }
@@ -187,26 +209,17 @@ const grid = {
         overflow: hidden;
         text-overflow: ellipsis;
     }
-    .tui__banner-line--version {
-        grid-row: var(--versionRow);
-    }
-    .tui__banner-line--hint {
-        grid-row: var(--hintRow);
-    }
     .tui__right {
         flex: none;
         margin-left: auto;
         padding-left: 1em;
         text-align: right;
     }
-    /* One dot per pixel column, on the ground's pixel row, to the panel's edge. */
-    .tui__ground {
-        grid-column: 2 / 4;
-        grid-row: var(--groundRow);
-        height: calc(var(--tui-line) / var(--cellHeight));
-        margin-top: calc(var(--tui-line) * var(--groundPixelRow) / var(--cellHeight));
-        background: radial-gradient(circle, var(--crimson) 0 34%, transparent 40%) 0 0 /
-            calc(1ch / var(--cellWidth)) calc(var(--tui-line) / var(--cellHeight)) repeat-x;
+    /* The full-width rule that closes the banner, in the shadow's tone. */
+    .tui__rule {
+        height: 1px;
+        margin-top: 0.75em;
+        background: var(--shadow);
     }
     .tui__out {
         padding: 0.6em 1.2em 0;

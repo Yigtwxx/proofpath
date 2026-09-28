@@ -23,62 +23,27 @@ export interface Frame {
 }
 
 /**
- * The `rich` raven: `proofpath.tui.pet.BITMAP` verbatim — 29 x 30 pixels, `#` dark,
- * `+` light, `.` empty. The TUI draws it in Braille cells (two by four pixels each);
- * the page draws the same pixels as dots in an SVG, because Braille glyphs come out
- * uneven in whatever fallback font a browser has. Row 29 is the feet; the ground
- * continues to the right.
+ * The `rich` banner: `proofpath.tui.wordmark.WORDMARK` verbatim — six lines, 66
+ * columns, `█` for the letters and `╗╔═╝║╚` for their shadow. The page draws the
+ * same cells in an SVG rather than as text, because block and box-drawing glyphs
+ * leave gaps between lines in a browser font.
  */
-export const RAVEN_DARK = '#';
-export const RAVEN_LIGHT = '+';
-export const raven: readonly string[] = [
-    '................#####........',
-    '...............#######.......',
-    '..............########.......',
-    '..............####..###+.....',
-    '..............#########+++...',
-    '..............########+++++..',
-    '..............+#######++++...',
-    '.............++++####...++...',
-    '............+++++####........',
-    '............++++++###........',
-    '...........+++++++###........',
-    '...........+++++++###........',
-    '..........++++++++###........',
-    '..........++++++++###........',
-    '.........+++++++++###........',
-    '.........++++++++####........',
-    '........+++++++++###.........',
-    '........++++++++####.........',
-    '.......+++++++++###..........',
-    '.......++++++++####..........',
-    '......++++++++####...........',
-    '......+++++++####............',
-    '.....++++++#####.............',
-    '....++++++#####..............',
-    '...+++++#####+###............',
-    '..++++######..+.#............',
-    '.########+++..#.#............',
-    '########..++..#.#............',
-    '#####.....++..#.#............',
-    '##.##.....+++##+##+++++++++++',
+export const WORDMARK_BLOCK = '█';
+export const wordmark: readonly string[] = [
+    '██████╗                        █████╗██████╗               ██╗',
+    '██╔══██╗                      ██╔═══╝██╔══██╗         ██╗  ██║',
+    '██████╔╝██╗██╗ █████╗  █████╗ █████╗ ██████╔╝ █████╗ █████╗██████╗',
+    '██╔═══╝ ████╔╝██╔══██╗██╔══██╗██╔══╝ ██╔═══╝ ██╔══██╗╚██╔═╝██╔═██╗',
+    '██║     ██╔═╝ ╚█████╔╝╚█████╔╝██║    ██║     ███████║ ██║  ██║ ██║',
+    '╚═╝     ╚═╝    ╚════╝  ╚════╝ ╚═╝    ╚═╝     ╚═╝  ╚═╝ ╚═╝  ╚═╝ ╚═╝',
 ];
+export const WORDMARK_COLUMNS = Math.max(...wordmark.map((line) => line.length));
+/** The TUI's five gradient bands, left to right, over the mark's own width. */
+export const WORDMARK_BANDS = ['#e0455f', '#d02f4c', '#c4173a', '#a91330', '#8f0f2b'] as const;
+/** The shadow glyphs and the rule under the banner. */
+export const WORDMARK_SHADOW = '#6b0a20';
 
-/** A Braille cell is two pixels wide and four tall; the bird is fifteen cells. */
-export const RAVEN_CELL_WIDTH = 2;
-export const RAVEN_CELL_HEIGHT = 4;
-export const RAVEN_COLUMNS = 15;
-export const RAVEN_ROWS = 8;
-/** Where the version and hint lines start, clear of the bird (`pet.TEXT_COLUMN`). */
-export const RAVEN_TEXT_COLUMN = 18;
-/** The rows the version line, the hint line and the ground sit on. */
-export const RAVEN_VERSION_ROW = 3;
-export const RAVEN_HINT_ROW = 4;
-export const RAVEN_GROUND_ROW = 7;
-/** The ground is `pet.GROUND` (dots 2 and 5): the second pixel row of its cell. */
-export const RAVEN_GROUND_PIXEL_ROW = 1;
-
-/** The two text lines beside the bird, as the TUI shows them at start. */
+/** The two text lines beside or under the mark, as the TUI shows them at start. */
 export const banner = {
     version: `proofpath v${version}`,
     context: 'academic . online . coreml',
@@ -116,7 +81,11 @@ export const frames: Frame[] = [
         ],
     },
     { wait: 250, id: 's1', spans: stage('⏺', 'Parsing', '', '', '') },
-    { wait: 450, id: 's1', spans: stage('✓', 'Parsing', '1 pages · 7 refs', 'text', '0.0s') },
+    {
+        wait: 450,
+        id: 's1',
+        spans: stage('✓', 'Parsing', '1 pages · 7 refs', 'text', '0.0s'),
+    },
     { wait: 150, id: 's2', spans: stage('⏺', 'Claims', '', '', '') },
     {
         wait: 450,
@@ -236,5 +205,8 @@ export const frames: Frame[] = [
         ],
     },
     { wait: 200, spans: [{ text: '7 refs: 1 ghost, 2 unsupported, 4 ok', tone: 'plain' }] },
-    { wait: 150, spans: [{ text: 'no report written · 0 API calls · 0.8s', tone: 'dim' }] },
+    {
+        wait: 150,
+        spans: [{ text: 'no report written · 0 API calls · 0.8s', tone: 'dim' }],
+    },
 ];
