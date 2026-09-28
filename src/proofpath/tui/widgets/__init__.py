@@ -13,6 +13,7 @@ from proofpath.tui.widgets.banner import Banner
 from proofpath.tui.widgets.config_panel import ConfigPanel
 from proofpath.tui.widgets.finding import FindingLine, FindingsRule, Line
 from proofpath.tui.widgets.footer import CoverageFooter
+from proofpath.tui.widgets.judge_notice import JudgeNotice
 from proofpath.tui.widgets.prompt import (
     ANSWER_ID,
     ANSWER_LABELS,
@@ -44,6 +45,7 @@ __all__ = [
     "FindingLine",
     "FindingsRule",
     "FrameEdge",
+    "JudgeNotice",
     "KvLine",
     "Line",
     "NoteLine",

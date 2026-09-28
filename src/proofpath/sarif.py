@@ -79,6 +79,8 @@ RULE_DESCRIPTIONS: dict[Kind, str] = {
     Kind.UNRESOLVED_MARKER: "the citation marker points at no bibliography entry",
     Kind.PARSE_ERROR: "part of the document could not be parsed",
     Kind.PROVIDER_UNAVAILABLE: "a bibliographic provider could not be consulted",
+    Kind.EVIDENCE_FOUND: "a page proofpath found, not one the author cited, supports the claim",
+    Kind.NO_EVIDENCE: "the evidence search found no page that supports or contradicts the claim",
 }
 
 
@@ -235,6 +237,23 @@ def _run_properties(report: Report) -> dict[str, Any]:
         },
         "models": dict(report.models),
         "apiCalls": report.api_calls,
+        # Answers the local fallback judge gave, and the notice of the switch (spec
+        # section 11): a log read on its own still says who gave the second opinion.
+        "localCalls": 0 if report.judge_cost is None else report.judge_cost.local_calls,
+        "judgeNotice": report.judge_notice,
         "elapsed": report.elapsed,
         "cancelled": report.cancelled,
+        "evidenceSearch": None
+        if report.search is None
+        else {
+            "experimental": True,
+            "by": report.search.by,
+            "queriesBy": report.search.queries_by,
+            "sentences": report.search.sentences,
+            "eligible": report.search.eligible,
+            "searched": report.search.searched,
+            "pagesFound": report.search.pages_found,
+            "pagesRead": report.search.pages_read,
+            "notices": list(report.search.notices),
+        },
     }

@@ -30,6 +30,7 @@ from proofpath.report import (
     Finding,
     Kind,
     Report,
+    SearchSummary,
     judge_detail,
 )
 from proofpath.sarif import (
@@ -406,3 +407,19 @@ def test_a_judged_finding_still_validates_and_keeps_its_local_verdict(
     result = results_by_kind(payload)[Kind.NOT_SUPPORTED.value]
     assert result["level"] == "error"
     assert PASSAGE.text in result["message"]["text"]
+
+
+# --- evidence search (OPEN-ITEMS 17.1a) -------------------------------------------
+
+
+def test_every_kind_has_a_rule_description() -> None:
+    assert set(RULE_DESCRIPTIONS) == set(Kind)
+
+
+def test_a_search_run_states_its_search_in_the_run_properties() -> None:
+    report = dataclasses.replace(
+        report_with(), search=SearchSummary("tavily", "sentence", 2, 2, 2, 3, 1)
+    )
+    props = to_sarif(report, artifact="draft.md")["runs"][0]["properties"]
+    assert props["evidenceSearch"]["pagesRead"] == 1
+    assert props["evidenceSearch"]["experimental"] is True

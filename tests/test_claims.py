@@ -13,9 +13,11 @@ from proofpath import ingest
 from proofpath.claims import (
     AUTHOR_YEAR,
     NUMERIC,
+    checkworthy,
     expand,
     extract,
     find_markers,
+    is_checkworthy,
     pair,
     pair_links,
     strip_links,
@@ -848,3 +850,61 @@ def test_a_bracketed_number_in_a_link_citing_documents_prose_is_not_a_citation()
 
     assert [claim.cited_refs for claim in result.claims] == [(1,), (1,)]
     assert result.unresolved == ()
+
+
+# --- `is_checkworthy` and `checkworthy` -----------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("ChatGPT was shut down yesterday.", True),  # a name with an inner capital
+        ("The unemployment rate fell to 3.9% in 2023.", True),  # a figure
+        ("Istanbul is the largest city in Turkey.", True),  # a name past the first word
+        ('He said "we will never raise taxes" on stage.', True),  # a quotation
+        ("I think this is really bad for everyone.", False),  # opinion, nothing to find
+        ("Did Tesla really sell 2 million cars?", False),  # a question
+        ("It rose.", False),  # too short to state anything searchable
+        ("#Breaking #Tesla #News #Crash #Today", False),  # hashtags label, they state nothing
+        ("İstanbul büyük bir şehirdir bugün.", True),  # Turkish, name first
+        ("Ankara Türkiye'nin başkentidir.", True),  # Turkish, apostrophe-joined suffix
+        ("Bu çok kötü bir haber.", False),  # Turkish opinion, "Bu" is a common opener
+        ("OpenAI battı.", False),  # a name, but only two words  # noqa: RUF001
+    ],
+)
+def test_is_checkworthy(text: str, expected: bool) -> None:
+    assert is_checkworthy(text) is expected
+
+
+def test_checkworthy_keeps_document_order_up_to_the_cap_and_counts_the_rest() -> None:
+    doc = ingest.from_text(
+        "NASA landed on the Moon in 1969. I love this so much honestly. "
+        "Paris is the capital of France. The rate was 4% in 2020 overall.",
+        name="pasted text",
+        kind="text",
+    )
+    found = checkworthy(doc, limit=2)
+
+    assert [claim.text for claim in found.claims] == [
+        "NASA landed on the Moon in 1969.",
+        "Paris is the capital of France.",
+    ]
+    assert found.eligible == 3
+    assert found.sentences == 4
+    assert all(claim.cited_refs == () and claim.marker is None for claim in found.claims)
+
+
+def test_a_text_with_nothing_checkworthy_is_searched_sentence_by_sentence() -> None:
+    found = checkworthy(ingest.from_text("OpenAI battı", name="pasted text", kind="text"), limit=5)  # noqa: RUF001
+    assert [claim.text for claim in found.claims] == ["OpenAI battı"]  # noqa: RUF001
+    assert (found.eligible, found.sentences) == (1, 1)
+
+
+def test_the_fallback_still_respects_the_cap() -> None:
+    body = " ".join(
+        f"I really feel sad number {word}."
+        for word in ["one", "two", "three", "four", "five", "six"]
+    )
+    found = checkworthy(ingest.from_text(body, name="pasted text", kind="text"), limit=5)
+    assert len(found.claims) == 5
+    assert found.eligible == found.sentences == 6

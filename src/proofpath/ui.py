@@ -30,6 +30,7 @@ from proofpath.report import (
     Diagnostic,
     Footer,
     Level,
+    calls_text,
     no_bibliography,
     reason_label,
 )
@@ -59,7 +60,14 @@ PET_COLOUR = "red"
 # so this is what the TUI's inline prompt paints its buttons with -- named here
 # because no other module names a colour.
 PROMPT_COLOUR = "yellow"
-GREEN = ("ok", "RESOLVED", "SUPPORTED", "fulltext", "not retracted")
+GREEN = (
+    "ok",
+    "RESOLVED",
+    "SUPPORTED",
+    "fulltext",
+    "not retracted",
+    "SUPPORTED (found by proofpath)",
+)
 YELLOW_PREFIXES = (
     "UNVERIFIED",
     "LOW CONFIDENCE",
@@ -71,6 +79,9 @@ YELLOW_PREFIXES = (
     "UNRESOLVED MARKER",
     # A retraction check nobody answered: caution, not "not retracted" (rule 2).
     "unavailable",
+    # The evidence search found nothing that decides the claim (OPEN-ITEMS 17.1a):
+    # caution, like every other UNVERIFIED-shaped state, never red (rule 2).
+    "NO EVIDENCE FOUND",
 )
 RED = ("GHOST REFERENCE", "REFUTED", "RETRACTED", "FAILED", "NOT SUPPORTED", "PARSE ERROR")
 DIM = ("NEI", "none", "—", "cancelled")
@@ -342,15 +353,24 @@ def footer(ui: Ui, item: Footer) -> None:
         reasons=item.reasons,
     )
     skipped(ui, item.browser_skipped)
+    # The evidence-search block (OPEN-ITEMS 17.1a): never suppressed, because a run
+    # that searched must not read like a run that checked cited sources (rule 6).
+    for line in item.search:
+        kv(ui, "search", line)
     if item.note:
         hint(ui, item.note)
     written = f"{item.written} written" if item.written else "no report written"
-    ui.out.print(f"{written}  ·  {item.api_calls} API calls  ·  {item.elapsed:.1f}s")
+    calls = calls_text(item.api_calls, item.local_calls)
+    ui.out.print(f"{written}  ·  {calls}  ·  {item.elapsed:.1f}s")
     if item.judge_tokens is not None:
         # Its own line, and never suppressed: what the optional judge spent is part
         # of what the run cost, and a free tier is metered in tokens, not in calls.
         prompt, completion = item.judge_tokens
         kv(ui, "judge", f"{prompt:,} prompt · {completion:,} completion tokens")
+    if item.judge_notice:
+        # Who gave the second opinion changed mid-run (spec section 11); the line
+        # that said so live went to stderr, and this one stays with the report.
+        kv(ui, "judge", item.judge_notice)
 
 
 def error(ui: Ui, text: str) -> None:

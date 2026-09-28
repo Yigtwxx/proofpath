@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import threading
 
 import httpx
@@ -266,3 +267,25 @@ def test_concurrent_callers_are_spaced_one_interval_apart() -> None:
     for thread in threads:
         thread.join(timeout=5.0)
     assert sorted(waits) == [0.0, pytest.approx(pl.MIN_INTERVAL[host], abs=0.05)]
+
+
+@respx.mock
+def test_post_sends_a_json_body_and_keeps_headers_out_of_the_url() -> None:
+    route = respx.post("https://api.test/search").mock(
+        return_value=httpx.Response(200, json={"results": []})
+    )
+    client = pl.PoliteClient(throttle=pl.HostThrottle())
+    response = client.post(
+        "https://api.test/search",
+        json_body={"query": "a claim", "max_results": 3},
+        headers={"Authorization": "Bearer secret"},
+    )
+    assert response.status_code == 200
+    sent = route.calls.last.request
+    assert json.loads(sent.content) == {"query": "a claim", "max_results": 3}
+    assert sent.headers["Authorization"] == "Bearer secret"
+    assert "secret" not in str(sent.url)
+
+
+def test_tavily_has_a_polite_interval() -> None:
+    assert pl.MIN_INTERVAL["api.tavily.com"] == 0.5

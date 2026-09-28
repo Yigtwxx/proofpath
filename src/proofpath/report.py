@@ -50,6 +50,25 @@ WEAK_UNVERIFIED = 0.25
 # Prefix shared by every state in the UNVERIFIED family (spec section 15).
 UNVERIFIED_PREFIX = "UNVERIFIED"
 
+# Evidence search (OPEN-ITEMS 17.1a). The provenance note every finding about a found
+# page carries, so no renderer can show one as a source the author cited.
+FOUND_BY_PROOFPATH = "FOUND BY PROOFPATH (not cited by the author)"
+SEARCH_UNAVAILABLE = f"{UNVERIFIED_PREFIX} (search unavailable)"
+# A claim in another language that no judge translated: the models read English only,
+# so it is not searched, and it is not called NEI either (OPEN-ITEMS 17.1a).
+LANGUAGE_UNSUPPORTED = f"{UNVERIFIED_PREFIX} (language not supported)"
+# The §17.1 gate: printed on every run that searched until the eval beats the
+# majority baseline. Updated by hand from docs/eval/*-averitec-search.md.
+AVERITEC_SEARCH_SCORE = "not measured yet"
+AVERITEC_BASELINE = "0.708"
+
+
+def search_experimental() -> str:
+    return (
+        f"evidence search is experimental — AVeriTeC search-mode {AVERITEC_SEARCH_SCORE} "
+        f"vs {AVERITEC_BASELINE} majority baseline"
+    )
+
 
 def no_bibliography(markers: int) -> str:
     """What a run says when it found citations but no reference list to check them
@@ -75,6 +94,8 @@ class Kind(str, Enum):
     UNRESOLVED_MARKER = "unresolved-marker"
     PARSE_ERROR = "parse-error"
     PROVIDER_UNAVAILABLE = "provider-unavailable"
+    EVIDENCE_FOUND = "evidence-found"  # a page the search found supports the claim
+    NO_EVIDENCE = "no-evidence-found"  # the search found nothing that decides the claim
 
 
 Level = Literal["error", "warning", "note"]
@@ -94,10 +115,12 @@ LEVELS: dict[Kind, Level] = {
     Kind.UNRESOLVED_MARKER: "warning",
     Kind.PARSE_ERROR: "warning",
     Kind.PROVIDER_UNAVAILABLE: "warning",
+    Kind.NO_EVIDENCE: "warning",
     Kind.NEI: "note",
     Kind.ABSTRACT_ONLY: "note",
     Kind.PARAGRAPH_SCOPED: "note",
     Kind.UNSUPPORTED_STYLE: "note",
+    Kind.EVIDENCE_FOUND: "note",
 }
 
 # The state word a renderer colours (spec section 13.3), quoted from section 15 and
@@ -122,11 +145,14 @@ STATE_WORDS: dict[Kind, str] = {
     Kind.UNRESOLVED_MARKER: "UNRESOLVED MARKER",
     Kind.PARSE_ERROR: "PARSE ERROR",
     Kind.PROVIDER_UNAVAILABLE: Outcome.UNAVAILABLE.value,
+    Kind.EVIDENCE_FOUND: "SUPPORTED (found by proofpath)",
+    Kind.NO_EVIDENCE: "NO EVIDENCE FOUND (searched)",
 }
 
 # The kinds that claim the document says something the source does not. They are the
 # only ones that assert, so they are the only ones that owe a passage (rule 1).
-_ASSERTING = frozenset({Kind.NOT_SUPPORTED, Kind.NUMERIC_MISMATCH})
+# EVIDENCE_FOUND asserts support, and support needs its passage just as much (rule 1).
+_ASSERTING = frozenset({Kind.NOT_SUPPORTED, Kind.NUMERIC_MISMATCH, Kind.EVIDENCE_FOUND})
 
 TextKind = Literal["fulltext", "abstract", "none"]
 
@@ -268,6 +294,20 @@ class Coverage:
 
 
 @dataclass(frozen=True)
+class SearchSummary:
+    """What the evidence search did: the block beneath the coverage block (rule 6)."""
+
+    by: str  # the searcher: "tavily" | "searxng"
+    queries_by: str  # "sentence", or the judge that wrote them
+    sentences: int  # sentences with a word in them
+    eligible: int  # of those, check-worthy
+    searched: int  # of those, actually searched
+    pages_found: int
+    pages_read: int  # full text or abstract
+    notices: tuple[str, ...] = ()  # the LLM fallback, said once
+
+
+@dataclass(frozen=True)
 class Stage:
     """One pipeline stage as the report shows it, with the provider that produced it."""
 
@@ -308,6 +348,12 @@ class Report:
     # What the optional judge spent, or ``None`` on a run that never asked one. A
     # run states its own cost for the same reason it states its own coverage.
     judge_cost: JudgeCost | None = None
+    # Set only on a run that searched (OPEN-ITEMS 17.1a).
+    search: SearchSummary | None = None
+    # The notice of a judge that switched to its local fallback (spec section 11), or
+    # ``None``. A run that changed who gives its second opinion says so in the report,
+    # not only in a line that scrolled past while it ran.
+    judge_notice: str | None = None
 
     def exit_code(self) -> int:
         """0 when the run is clean, 1 when it has findings. 2 is never returned here.
@@ -581,6 +627,13 @@ class Footer:
     # whole and are shortened where they are printed, so a caller can still tell one
     # from another -- the terminal needs to know which one is a missing credential.
     reasons: tuple[tuple[str, int], ...] = ()
+    # ``search_lines``: empty unless the run searched.
+    search: tuple[str, ...] = ()
+    # Of the judge's answers, those the local fallback gave; beside ``api_calls``,
+    # which counts provider requests only (spec section 11).
+    local_calls: int = 0
+    # ``Report.judge_notice``: the run switched to a local judge.
+    judge_notice: str | None = None
 
 
 def render_diagnostics(report: Report) -> list[Diagnostic]:
@@ -630,7 +683,20 @@ def render_footer(report: Report, *, written: str | None = None) -> Footer:
         browser_skipped=report.coverage.browser_skipped,
         judge_tokens=_judge_tokens(report),
         reasons=coverage_reasons(report.coverage),
+        search=search_lines(report),
+        local_calls=0 if report.judge_cost is None else report.judge_cost.local_calls,
+        judge_notice=report.judge_notice,
     )
+
+
+def calls_text(api_calls: int, local_calls: int = 0) -> str:
+    """``"3 API calls"``, or ``"3 API calls + 5 local"`` once a local judge answered.
+
+    One spelling for the terminal and the TUI footer, so a run that spent nothing on
+    the provider but still asked a local model never reads as a run that asked nobody.
+    """
+    text = f"{api_calls} API calls"
+    return f"{text} + {local_calls} local" if local_calls else text
 
 
 def _judge_tokens(report: Report) -> tuple[int, int] | None:
@@ -655,6 +721,11 @@ def render_markdown(report: Report, *, written_at: datetime | None = None) -> st
         lines.append(f"- tiers: {report.tier_note}")
     lines.append(f"- elapsed: {report.elapsed:.1f}s")
     lines.append(f"- api calls: {report.api_calls}")
+    local = 0 if report.judge_cost is None else report.judge_cost.local_calls
+    if local:
+        lines.append(f"- local calls: {local}")
+    if report.judge_notice:
+        lines.append(f"- judge fallback: {report.judge_notice}")
     for what in (JUDGE, SUMMARY):
         unavailable = _unavailable_header(report, what)
         if unavailable is not None:
@@ -666,6 +737,7 @@ def render_markdown(report: Report, *, written_at: datetime | None = None) -> st
     lines.extend(_markdown_checked(report))
     lines.extend(_markdown_sources(report))
     lines.extend(_markdown_coverage(report))
+    lines.extend(_markdown_search(report))
     if report.summary:
         # Labelled, and attributed, every time it is printed (spec section 11.1): a
         # paragraph a model wrote must never be mistaken for the report's own findings.
@@ -999,6 +1071,29 @@ def _markdown_coverage(report: Report) -> list[str]:
             ]
         )
     return lines
+
+
+def search_lines(report: Report) -> tuple[str, ...]:
+    """The evidence-search block, one line each, for every surface to print as is."""
+    item = report.search
+    if item is None:
+        return ()
+    return (
+        search_experimental(),
+        f"evidence search by {item.by}, queries by {item.queries_by}",
+        f"claims searched {item.searched} of {item.eligible} check-worthy "
+        f"({item.sentences} sentences)",
+        f"claims not searched {item.sentences - item.searched}",
+        f"pages found / read {item.pages_found} / {item.pages_read}",
+        *item.notices,
+    )
+
+
+def _markdown_search(report: Report) -> list[str]:
+    lines = search_lines(report)
+    if not lines:
+        return []
+    return ["## Evidence search", "", *(f"- {line}" for line in lines), ""]
 
 
 def _one_line(text: str) -> str:

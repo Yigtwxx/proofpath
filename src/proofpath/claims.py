@@ -395,6 +395,89 @@ def strip_links(text: str) -> str:
     return _BEFORE_PUNCTUATION.sub("", " ".join(text.split()))
 
 
+# What makes a sentence worth searching for (OPEN-ITEMS 17.1a): long enough to state
+# something, not a question, and carrying something a page could confirm -- a figure,
+# a name, or a quotation. Opinion ("I think this is bad") has nothing to find. Three
+# words, not more: Turkish says "Ankara Türkiye'nin başkentidir" in three.
+CHECKWORTHY_MIN_WORDS = 3
+# A word keeps its apostrophe suffix: "Türkiye'nin" is one word, not two.
+_WORDS = re.compile(r"\w+(?:['’]\w+)*")  # noqa: RUF001 - a real apostrophe, not a typo
+# Hashtags and handles label a post; they state nothing and name no one.
+_TAGS = re.compile(r"(?<!\w)[#@]\w+")
+_FIGURE = re.compile(r"\d")
+_QUOTED = re.compile(r"[\"“”«»]")
+# Words that open a sentence without naming anything, so their capital says nothing.
+# Any other capitalised first word is read as a name: "İstanbul", "OpenAI".
+_OPENERS = frozenset(
+    {
+        # English
+        "the", "a", "an", "it", "its", "this", "that", "these", "those", "he", "she",
+        "they", "we", "i", "you", "there", "here", "in", "on", "at", "for", "but",
+        "and", "so", "if", "when", "as", "my", "our", "their", "his", "her", "what",
+        "why", "how",
+        # Turkish
+        "bu", "şu", "o", "bir", "ben", "sen", "biz", "siz", "onlar", "ve", "ama",
+        "çünkü", "eğer", "hiç", "ne", "neden", "nasıl",  # noqa: RUF001 - real Turkish letters
+    }
+)  # fmt: skip
+
+
+@dataclass(frozen=True)
+class Checkworthy:
+    """The sentences a search will be run for, and what the cap left out."""
+
+    claims: tuple[Claim, ...]  # in document order, at most the cap
+    eligible: int  # check-worthy sentences before the cap; every sentence when none was
+    sentences: int  # every sentence with a word in it: the coverage denominator
+
+
+def is_checkworthy(text: str) -> bool:
+    stripped = _TAGS.sub(" ", text).strip()
+    if stripped.endswith("?"):
+        return False
+    words = _WORDS.findall(stripped)
+    if len(words) < CHECKWORTHY_MIN_WORDS:
+        return False
+    if _FIGURE.search(stripped) or _QUOTED.search(stripped):
+        return True
+    first = words[0]
+    if first[:1].isupper() and first.casefold() not in _OPENERS:
+        return True
+    return any(word[:1].isupper() for word in words[1:]) or any(
+        any(char.isupper() for char in word[1:]) for word in words
+    )
+
+
+def checkworthy(doc: Document, *, limit: int) -> Checkworthy:
+    """Claims for a document that cites nothing, to be searched for.
+
+    They cite no reference yet. The Searching stage points each at the pages it finds,
+    and a claim it finds nothing for keeps an empty ``cited_refs`` and is reported
+    as NO EVIDENCE FOUND, never dropped (product rule 6). When no sentence looks
+    check-worthy, every sentence is taken instead: a one-line post is exactly the
+    claim the reader wants checked.
+    """
+    every: list[Claim] = []
+    worthy: list[Claim] = []
+    for paragraph in doc.paragraphs:
+        for position, sentence in enumerate(paragraph.sentences):
+            text = strip_links(sentence.text)
+            if not _WORD.search(text):
+                continue
+            claim = Claim(
+                text=text,
+                locator=sentence.locator,
+                cited_refs=(),
+                paragraph=paragraph.index,
+                sentence=position,
+            )
+            every.append(claim)
+            if is_checkworthy(text):
+                worthy.append(claim)
+    chosen = worthy or every
+    return Checkworthy(claims=tuple(chosen[:limit]), eligible=len(chosen), sentences=len(every))
+
+
 def pair_numeric(
     doc: Document, markers: Sequence[CitationMarker]
 ) -> tuple[list[Claim], list[CitationMarker]]:

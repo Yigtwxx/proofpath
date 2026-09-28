@@ -28,7 +28,7 @@ def test_config_prints_path_and_every_section_as_toml(config_dir: Path) -> None:
     assert result.exit_code == 0, result.output
     assert str(config_dir / "config.toml") in result.stdout
     assert "not written yet" in result.stdout
-    for section in ("[permissions]", "[fetch]", "[contact]", "[judge]"):
+    for section in ("[permissions]", "[fetch]", "[contact]", "[judge]", "[search]"):
         assert section in result.stdout
     assert 'install_browser = "ask"' in result.stdout
     assert "GROQ_API_KEY" in result.stdout

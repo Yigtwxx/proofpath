@@ -6,7 +6,14 @@ from rich.text import Text
 from textual.widgets import Static
 
 from proofpath import ui
-from proofpath.report import BROWSER_SKIPPED_REASON, Footer, Report, no_bibliography, render_footer
+from proofpath.report import (
+    BROWSER_SKIPPED_REASON,
+    Footer,
+    Report,
+    calls_text,
+    no_bibliography,
+    render_footer,
+)
 from proofpath.tui.theme import Theme
 from proofpath.tui.widgets._shared import DEFAULT_WIDTH, _elide
 
@@ -73,7 +80,8 @@ class CoverageFooter(Static):
                 INDENT, _elide(item.counts, width - len(coverage) - 8), "      ", coverage
             )
         written = f"{item.written} written" if item.written else "no report written"
-        cost = f"{written}  ·  {item.api_calls} API calls  ·  {item.elapsed:.1f}s"
+        calls = calls_text(item.api_calls, item.local_calls)
+        cost = f"{written}  ·  {calls}  ·  {item.elapsed:.1f}s"
         line.append("\n" + INDENT + _elide(cost, width - 4))
         # Every caveat the run owes the reader, on one line and never dropped: a
         # low-coverage run must not look like a clean one, and the one place that
@@ -160,6 +168,13 @@ def _hints(item: Footer) -> list[str]:
             f"{item.browser_skipped} source(s) {BROWSER_SKIPPED_REASON}"
             f" — /config set {ui.BROWSER_SETTING}"
         )
+    # The docked footer has one hints row: the experimental banner and the searched
+    # line go there, and the full block is in the run's report.
+    hints.extend(item.search[:3])
+    if item.judge_notice:
+        # The notice above the prompt goes when the next run starts; the footer is
+        # this run's record, so it keeps saying who gave the second opinion.
+        hints.append(item.judge_notice)
     if item.note:
         hints.append(item.note)
     return hints

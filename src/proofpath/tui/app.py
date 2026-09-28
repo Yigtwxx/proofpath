@@ -38,6 +38,7 @@ import asyncio
 import os
 from collections.abc import Callable
 from concurrent.futures import Future
+from contextlib import suppress
 from typing import ClassVar, Protocol
 
 from rich.text import Text
@@ -45,7 +46,9 @@ from textual import events as tevents
 from textual.app import App, ComposeResult
 from textual.binding import Binding, BindingType
 from textual.containers import Vertical, VerticalScroll
+from textual.css.query import NoMatches
 from textual.geometry import Size
+from textual.message import Message
 from textual.widget import AwaitMount, Widget
 from textual.widgets import Button, Input, Static
 
@@ -53,8 +56,8 @@ from proofpath import __version__, device, ui
 from proofpath.browser import Answer
 from proofpath.commands import config_view
 from proofpath.config import Config, ConfigError, load_config
-from proofpath.events import Event
-from proofpath.judge import Judge, JudgeClient, JudgeError, resolve_api_key
+from proofpath.events import Event, Note
+from proofpath.judge import Judge, JudgeError, build_client, resolve_api_key
 from proofpath.report import Report, render_markdown, summary_silence
 from proofpath.tui import commands
 from proofpath.tui.history import History
@@ -70,6 +73,7 @@ from proofpath.tui.widgets import (
     ConfigPanel,
     CoverageFooter,
     FindingLine,
+    JudgeNotice,
     KvLine,
     NoteLine,
     PermissionPrompt,
@@ -228,6 +232,10 @@ class ProofpathApp(App[None]):
     #bottom { dock: bottom; height: auto; }
     #footer { height: 3; padding: 0 1; }
     #suggestions { height: auto; padding: 0 1; display: none; }
+    /* The judge's switch to a local model (spec section 11): one row, right-aligned,
+       directly above the bar. Hidden by ``display: none`` in the widget, so an
+       unused notice costs the dock no row. */
+    #judge-notice { height: 1; padding: 0 1; text-align: right; }
     /* The bar is one flat row: its frame's rows and edges exist but are hidden, so
        the same composition serves every theme and width (wordmark design section 9). */
     #prompt-frame { height: 1; margin: 0; }
@@ -379,7 +387,29 @@ class ProofpathApp(App[None]):
         key = resolve_api_key(settings.api_key_env)
         if settings.api_key_env and key is None:
             raise JudgeError(NO_JUDGE_NOTE)
-        return Judge(JudgeClient(settings, key))
+        # A fresh client per summary: each one tries the configured provider first.
+        return Judge(build_client(settings, key, on_switch=self._judge_switched))
+
+    class JudgeSwitched(Message):
+        """The summary's judge switched to its local model (spec section 11)."""
+
+        def __init__(self, text: str) -> None:
+            super().__init__()
+            self.text = text
+
+    def _judge_switched(self, text: str) -> None:
+        """The summary's judge switched to its local model; say so above the bar.
+
+        Called on the summary's worker thread, before the model is loaded. It only
+        posts a message -- ``post_message`` is thread-safe and never waits -- so the
+        worker is not held, and the widget is touched on the loop alone.
+        """
+        self.post_message(self.JudgeSwitched(text))
+
+    def on_proofpath_app_judge_switched(self, message: JudgeSwitched) -> None:
+        # A message that lands while the app is shutting down finds no widget.
+        with suppress(NoMatches):
+            self.query_one(JudgeNotice).show(message.text)
 
     # --- the section 7.1 prompt, inline ---------------------------------------------
 
@@ -508,6 +538,7 @@ class ProofpathApp(App[None]):
         with Vertical(id="bottom", classes=self._theme.name):
             yield CoverageFooter(self._out, self._theme)
             yield Suggestions(theme=self._theme, coloured=self._out.color)
+            yield JudgeNotice(self._theme, coloured=self._out.color)
             yield PromptFrame(
                 theme=self._theme,
                 coloured=self._out.color,
@@ -639,12 +670,17 @@ class ProofpathApp(App[None]):
         """
         rows = self.query_one(Banner).get_content_height(size, size, size.width)
         rows += self.query_one(CoverageFooter).rows
+        rows += self.query_one(JudgeNotice).rows
         rows += self.query_one(PromptFrame).rows
         return max(size.height - rows - MIN_LOG_ROWS, 1)
 
     # --- the scheduler's two callbacks ----------------------------------------------
 
     def _on_event(self, run: Run, event: Event) -> None:
+        if isinstance(event, Note) and event.notice:
+            # Before the block lookup: a run whose block ``ctrl+l`` cleared still
+            # switched, and the row above the bar is the one place that says so.
+            self.query_one(JudgeNotice).show(event.text)
         block = self._blocks.get(run.id)
         if block is None:
             # A run whose block never got built still said something; dropping it
@@ -666,6 +702,9 @@ class ProofpathApp(App[None]):
             self._watch_eyes(run)
             return
         if block is None:
+            # A new run starts on the configured judge (Amendment B 9), so the last
+            # run's switch notice is no longer true of what happens next.
+            self.query_one(JudgeNotice).hide()
             block = RunBlock(run, self._out, self._theme)
             self._blocks[run.id] = block
             self.query_one(RunLog).mount(block)
@@ -1161,6 +1200,7 @@ __all__ = [
     "ConfigPanel",
     "CoverageFooter",
     "FindingLine",
+    "JudgeNotice",
     "KvLine",
     "NoteLine",
     "PermissionPrompt",

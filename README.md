@@ -348,7 +348,8 @@ one per citation.
 **Providers.** Default is Groq `openai/gpt-oss-120b` (free without a card, no training
 on submitted data). `proofpath config set judge.provider gemini` switches to Gemini —
 note that Google trains on free-tier prompts outside the EEA/UK/CH, and proofpath prints
-that warning once per run. `judge.provider ollama` runs fully offline. Gemini and Ollama are
+that warning once per run. `judge.provider ollama` runs fully offline on `qwen3.5:9b`,
+which must already be installed (proofpath never pulls a model). Gemini and Ollama are
 fixture-tested and were not exercised live in v0.3.0. All three speak
 the OpenAI `chat/completions` shape. The key comes from `GROQ_API_KEY` / `GEMINI_API_KEY`
 in the environment or a `.env` file, never from config, and is never printed.

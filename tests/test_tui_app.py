@@ -46,6 +46,7 @@ from proofpath.tui.app import (
     CommandBlock,
     CoverageFooter,
     FindingLine,
+    JudgeNotice,
     KvLine,
     NoteLine,
     PermissionPrompt,
@@ -1300,6 +1301,35 @@ def test_the_footer_hint_for_skipped_sources_names_the_setting() -> None:
     hint = next(line for line in _hints(item) if line.startswith("2 source(s)"))
     assert hint == f"2 source(s) {BROWSER_SKIPPED_REASON} — /config set {ui.BROWSER_SETTING}"
     assert ui.BROWSER_SETTING == "permissions.install_browser ask"
+
+
+def test_the_footer_hints_show_the_first_three_search_lines() -> None:
+    """The docked caveat row carries only the experimental banner and the searched
+    counts (the first three of ``search_lines``); the full evidence-search block is
+    in the written report, not the fixed-height docked footer."""
+    from proofpath.report import SearchSummary, render_footer, search_experimental
+    from proofpath.tui.widgets.footer import _hints
+
+    plain = a_report()
+    summary = SearchSummary(
+        by="tavily",
+        queries_by="sentence",
+        sentences=5,
+        eligible=3,
+        searched=1,
+        pages_found=2,
+        pages_read=1,
+    )
+    item = render_footer(replace(plain, search=summary))
+    hints = _hints(item)
+    # ``search_lines`` has five lines here (plus the banner); only the first three
+    # reach the docked footer, so this is an exact match, not a subset check.
+    assert hints == [
+        search_experimental(),
+        "evidence search by tavily, queries by sentence",
+        "claims searched 1 of 3 check-worthy (5 sentences)",
+    ]
+    assert not any("pages found" in line or "not searched" in line for line in hints)
 
 
 def test_the_fetch_block_skipped_line_names_the_setting() -> None:
@@ -3019,21 +3049,40 @@ async def test_the_rows_come_in_the_configs_order_and_the_selection_stays_inside
         assert [row.key for row in panel.rows] == [
             "permissions.install_browser",
             "permissions.network",
+            "permissions.web_search",
             "fetch.respect_robots",
             "judge.provider",
             "judge.model",
             "judge.base_url",
             "judge.api_key_env",
+            "judge.fallback",
+            "search.provider",
+            "search.base_url",
+            "search.api_key_env",
             "contact.email",
         ]
-        assert [row.kind for row in panel.rows] == ["choice"] * 4 + ["text"] * 4
+        assert [row.kind for row in panel.rows] == [
+            "choice",
+            "choice",
+            "choice",
+            "choice",
+            "choice",
+            "text",
+            "text",
+            "text",
+            "text",
+            "choice",
+            "text",
+            "text",
+            "text",
+        ]
         assert panel.selected == 0
         assert _panel_row(panel, "install_browser").startswith("> install_browser")
-        await pilot.press(*["down"] * 8)
-        assert panel.selected == 7
+        await pilot.press(*["down"] * 12)
+        assert panel.selected == 12
         assert _panel_row(panel, "email").startswith("> email")
         assert _panel_row(panel, "install_browser").startswith("  install_browser")
-        await pilot.press(*["up"] * 9)
+        await pilot.press(*["up"] * 13)
         assert panel.selected == 0
     # The file was only read: moving through the rows writes nothing.
     assert not config_path().exists()
@@ -3098,7 +3147,7 @@ async def test_a_bool_row_round_trips_through_the_file() -> None:
     app, _ = build_app()
     async with app.run_test(size=SIZE) as pilot:
         panel = await open_panel(pilot)
-        await pilot.press("down", "down", "right")
+        await pilot.press("down", "down", "down", "right")
         await written(pilot, "fetch.respect_robots", "false")
         assert load_config().fetch.respect_robots is False
         assert panel.value("fetch.respect_robots") == "false"
@@ -3113,8 +3162,8 @@ async def test_a_provider_switch_writes_four_and_moves_the_key_line() -> None:
     app, _ = build_app()
     async with app.run_test(size=SIZE) as pilot:
         panel = await open_panel(pilot)
-        assert panel.rows[3].values == ("gemini", "groq", "ollama")
-        await pilot.press("down", "down", "down", "left")  # groq -> gemini
+        assert panel.rows[4].values == ("gemini", "groq", "ollama")
+        await pilot.press("down", "down", "down", "down", "left")  # groq -> gemini
         await written(pilot, "judge.api_key_env", "GEMINI_API_KEY")
         gemini = provider_defaults("gemini")
         assert load_config().judge == gemini
@@ -3142,7 +3191,7 @@ async def test_a_provider_outside_the_known_choices_is_drawn_honestly() -> None:
         panel = await open_panel(pilot)
         row = _panel_row(panel, "provider")
         assert row == "  provider          gemini   groq   ollama   [openrouter]"
-        await pilot.press("down", "down", "down")  # install_browser -> ... -> provider
+        await pilot.press("down", "down", "down", "down")  # install_browser -> ... -> provider
         await pilot.press("right")  # cycles from the first choice, not from "nowhere"
         await written(pilot, "judge.provider", "gemini")
 
@@ -3152,7 +3201,7 @@ async def test_a_provider_without_a_key_variable_says_none_is_needed() -> None:
     app, _ = build_app()
     async with app.run_test(size=SIZE) as pilot:
         panel = await open_panel(pilot)
-        await pilot.press("down", "down", "down", "right")  # groq -> ollama
+        await pilot.press("down", "down", "down", "down", "right")  # groq -> ollama
         await written(pilot, "judge.provider", "ollama")
         text = _panel_text(panel)
     assert " key      not needed" in text
@@ -3165,7 +3214,7 @@ async def test_a_text_row_is_edited_in_place() -> None:
     default = JudgeConfig().model
     async with app.run_test(size=SIZE) as pilot:
         panel = await open_panel(pilot)
-        await pilot.press("down", "down", "down", "down", "enter")
+        await pilot.press("down", "down", "down", "down", "down", "enter")
         await pilot.pause()
         assert panel.editing
         edit = panel.query_one(Input)
@@ -3199,7 +3248,7 @@ async def test_an_empty_text_row_shows_unset_and_its_note() -> None:
         assert _panel_row(panel, "email") == (
             "  email             (unset) , optional, for the Crossref / OpenAlex polite pools"
         )
-        await pilot.press(*["down"] * 7, "enter")
+        await pilot.press(*["down"] * 12, "enter")
         await pilot.pause()
         await until(pilot, lambda: app.focused is panel.query_one(Input), "the edit")
         assert panel.query_one(Input).value == ""
@@ -3220,7 +3269,7 @@ async def test_backspace_resets_a_row_to_its_default() -> None:
         await written(pilot, "permissions.install_browser", "ask")
         assert load_config().permissions.install_browser == "ask"
         assert panel.value("permissions.install_browser") == "ask"
-        await pilot.press("down", "down", "down", "left")
+        await pilot.press("down", "down", "down", "down", "left")
         await written(pilot, "judge.provider", "gemini")
         before = _notes(app).count("judge.")
         await pilot.press("backspace")
@@ -3289,7 +3338,8 @@ async def test_escape_collapses_the_panel_to_one_line_and_focuses_the_bar() -> N
         await pilot.pause()
         assert panel.collapsed
         assert _panel_text(panel) == (
-            "  config  install_browser=ask  network=ask  respect_robots=true  judge=groq"
+            "  config  install_browser=ask  network=ask  respect_robots=true"
+            "  judge=groq  search=off"
         )
         await until(pilot, lambda: app.focused is app.query_one(Prompt), "the bar to take focus")
         # A collapsed panel is a record: the keys do nothing to it any more.
@@ -3413,3 +3463,200 @@ async def test_ctrl_l_clears_a_collapsed_panel_and_keeps_an_open_one() -> None:
         await pilot.pause()
         assert list(app.query(ConfigPanel)) == [second]
         assert not second.collapsed
+
+
+# --- the local fallback judge's notice (spec section 11, Task 11) --------------------
+
+SWITCHED = "Groq limit reached — judging with local ollama qwen3.5:9b"
+
+
+def _bottom_order(app: ProofpathApp) -> list[str]:
+    return [child.id or type(child).__name__ for child in app.query_one("#bottom").children]
+
+
+async def test_the_judge_notice_sits_right_aligned_directly_above_the_prompt() -> None:
+    app, schedulers = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        notice = app.query_one(JudgeNotice)
+        frame = app.query_one(PromptFrame)
+        footer = app.query_one(CoverageFooter)
+        # Hidden with ``display: none``, never an empty line: no row is spent on it.
+        assert not notice.display
+        assert notice.region.height == 0
+        assert footer.region.bottom == frame.region.y
+        order = _bottom_order(app)
+        assert order.index("judge-notice") == order.index("prompt-frame") - 1
+
+        scheduler = schedulers[0]
+        await submit(pilot, "/check draft.md")
+        run = scheduler.runs[0]
+        scheduler.push(run, Note(SWITCHED, notice=True))
+        await pilot.pause()
+
+        assert notice.display
+        assert notice.region.height == 1
+        assert notice.region.bottom == frame.region.y  # directly above the bar
+        assert notice.styles.text_align == "right"
+        assert notice.region.width == app.query_one("#bottom").region.width
+        assert notice.text == SWITCHED
+        # The footer keeps its fixed height and sits above the notice (rule 6).
+        assert footer.region.height == 3
+        assert footer.region.bottom == notice.region.y
+        # It is still a note of the run, too, where the run's other lines are.
+        assert SWITCHED in _notes(app)
+
+        scheduler.move(run, "done", report=a_report())
+        await pilot.pause()
+        assert notice.display  # it stays until the next run starts
+
+        await submit(pilot, "/check other.md")
+        await pilot.pause()
+        assert not notice.display
+        assert notice.region.height == 0
+        assert footer.region.bottom == frame.region.y
+
+
+async def test_an_ordinary_note_never_shows_the_judge_notice() -> None:
+    app, schedulers = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "/check draft.md")
+        schedulers[0].push(schedulers[0].runs[0], Note("judgement not cached: OSError"))
+        await pilot.pause()
+        assert not app.query_one(JudgeNotice).display
+
+
+async def test_the_rich_footer_keeps_its_height_under_the_notice() -> None:
+    app, schedulers = build_app(theme=RICH)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await submit(pilot, "/check draft.md")
+        schedulers[0].push(schedulers[0].runs[0], Note(SWITCHED, notice=True))
+        await pilot.pause()
+        footer = app.query_one(CoverageFooter)
+        notice = app.query_one(JudgeNotice)
+        assert footer.region.height == 4
+        assert notice.region.height == 1
+        assert notice.region.bottom <= app.query_one(PromptFrame).region.y
+
+
+async def test_each_run_tries_the_api_first_and_the_old_notice_is_cleared() -> None:
+    """Amendment B 9, end to end on the real scheduler and the real pipeline halves.
+
+    Run 1's Groq answers 429 and the run switches to the local model; run 2's Groq
+    answers, so run 2 stays on Groq and shows no notice. Every endpoint is a respx
+    route: nothing leaves the process.
+    """
+    import httpx
+    import respx
+
+    from proofpath import judge as judge_mod
+    from proofpath.secrets import ApiKey
+    from tests.test_verify_search import CLAIM, StubSearcher, searching
+
+    queries = '{"items": [{"id": 0, "english": "x", "queries": ["ChatGPT shut down March 2025"]}]}'
+
+    def ok(model: str) -> httpx.Response:
+        return httpx.Response(
+            200, json={"model": model, "choices": [{"message": {"content": queries}}]}
+        )
+
+    engines: list[Engine] = []
+
+    def engine_factory(run: Run) -> Engine:
+        built = searching(StubSearcher())
+        built.judge = judge_mod.Judge(
+            judge_mod.build_client(JudgeConfig(), ApiKey("gsk_tui_test", source="test"))
+        )
+        built._closers.append(built.judge.close)
+        engines.append(built)
+        return built
+
+    with respx.mock(assert_all_called=False) as mock:
+        groq = mock.post("https://api.groq.com/openai/v1/chat/completions").mock(
+            side_effect=[httpx.Response(429), ok("openai/gpt-oss-120b")]
+        )
+        mock.get("http://localhost:11434/api/tags").mock(
+            return_value=httpx.Response(200, json={"models": [{"name": "qwen3.5:9b"}]})
+        )
+        mock.post("http://localhost:11434/api/generate").mock(
+            return_value=httpx.Response(200, json={"done": True})
+        )
+        local = mock.post("http://localhost:11434/v1/chat/completions").mock(
+            return_value=ok("qwen3.5:9b")
+        )
+        app = ProofpathApp(
+            Config(), ui.build(force_terminal=True), engine_factory=engine_factory, theme=PLAIN
+        )
+        async with app.run_test(size=SIZE) as pilot:
+            notice = app.query_one(JudgeNotice)
+            await submit(pilot, CLAIM)
+            first = lambda: app._scheduler.runs[0]  # noqa: E731 - read after it exists
+            await until(pilot, lambda: first().state in ("done", "failed"), "run 1")
+            assert first().state == "done", first().error
+            assert first().report is not None and first().report.judge_notice == SWITCHED
+            assert notice.display and notice.text == SWITCHED
+
+            await submit(pilot, CLAIM)
+            second = lambda: app._scheduler.runs[1]  # noqa: E731
+            assert not notice.display  # cleared the moment run 2 started
+            await until(pilot, lambda: second().state in ("done", "failed"), "run 2")
+            assert second().state == "done", second().error
+            assert second().report is not None and second().report.judge_notice is None
+            assert not notice.display
+            await pilot.press("ctrl+c")
+
+    assert groq.call_count == 2  # each run asked Groq first
+    assert local.call_count == 1  # and only run 1 needed the local model
+    assert len(engines) == 2
+
+
+async def test_summarize_shows_the_switch_notice_and_still_writes_the_summary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fix round 1 C: ``/summarize`` through the app's own judge, on its worker
+    thread. Groq answers 429, the local model writes the paragraph, and the notice
+    reaches the row above the bar through the loop, never from the worker."""
+    import httpx
+    import respx
+
+    from proofpath.judge import Judge
+
+    monkeypatch.setenv("GROQ_API_KEY", "gsk_summarize_test_not_real")
+    made: list[Judge] = []
+    app: ProofpathApp | None = None
+
+    def factory() -> Judge:
+        assert app is not None
+        made.append(app._default_judge())  # the real builder, with the real hook
+        return made[-1]
+
+    paragraph = "Two sources say something else."
+    with respx.mock(assert_all_called=False) as mock:
+        groq = mock.post("https://api.groq.com/openai/v1/chat/completions").mock(
+            return_value=httpx.Response(429)
+        )
+        mock.get("http://localhost:11434/api/tags").mock(
+            return_value=httpx.Response(200, json={"models": [{"name": "qwen3.5:9b"}]})
+        )
+        mock.post("http://localhost:11434/api/generate").mock(
+            return_value=httpx.Response(200, json={})
+        )
+        local = mock.post("http://localhost:11434/v1/chat/completions").mock(
+            return_value=httpx.Response(
+                200,
+                json={"model": "qwen3.5:9b", "choices": [{"message": {"content": paragraph}}]},
+            )
+        )
+        app, schedulers = build_app(judge_factory=factory)
+        async with app.run_test(size=SIZE) as pilot:
+            await finished_run(pilot, schedulers[0])
+            await submit(pilot, "/summarize")
+            await until(pilot, lambda: paragraph in _kv_text(app), "the local summary")
+            notice = app.query_one(JudgeNotice)
+            await until(pilot, lambda: notice.display, "the notice")
+            assert notice.text == SWITCHED
+            text = _kv_text(app)
+
+    assert f"(model-written, ollama qwen3.5:9b) {paragraph}" in text
+    assert groq.call_count == 1
+    assert local.call_count == 1
+    assert "gsk_summarize_test_not_real" not in text

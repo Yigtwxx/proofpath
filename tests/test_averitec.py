@@ -25,6 +25,7 @@ ROWS: list[dict[str, Any]] = [
         "claim": "first claim",
         "label": "Supported",
         "justification": "because the sources say so",
+        "fact_checking_article": "https://factcheck.test/claim-1",
         "questions": [
             {
                 "question": "where was it published",
@@ -77,6 +78,18 @@ def test_evidence_urls_are_deduplicated_in_order_of_first_appearance(tmp_path: P
     claims = averitec.load(path, expected_sha256=digest)
     assert claims[0].source_urls == ("https://a.example/one", "https://b.example/two")
     assert claims[1].source_urls == ("https://c.example/three",)
+
+
+def test_fact_check_url_is_read_from_the_fact_checking_article_key(tmp_path: Path) -> None:
+    path, digest = _write_dataset(tmp_path)
+    claims = averitec.load(path, expected_sha256=digest)
+    assert claims[0].fact_check_url == "https://factcheck.test/claim-1"
+
+
+def test_a_row_without_a_fact_checking_article_loads_as_empty(tmp_path: Path) -> None:
+    path, digest = _write_dataset(tmp_path)
+    claims = averitec.load(path, expected_sha256=digest)
+    assert claims[1].fact_check_url == ""
 
 
 def test_limit_takes_the_first_n_claims(tmp_path: Path) -> None:

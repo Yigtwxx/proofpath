@@ -110,3 +110,55 @@ def test_set_value_rejects_unknown_key_and_bad_value(config_dir: Path) -> None:
         cfg.set_value("nope.key", "x")
     with pytest.raises(cfg.ConfigError, match="network"):
         cfg.set_value("permissions.network", "sometimes")
+
+
+# --- search (OPEN-ITEMS 17.1a) -----------------------------------------------------
+
+
+def test_search_is_off_by_default_and_web_search_is_allowed() -> None:
+    config = cfg.Config()
+    assert config.search == cfg.SearchConfig()
+    assert config.search.provider == "off"
+    assert config.search.api_key_env == "TAVILY_API_KEY"
+    assert (config.search.max_claims, config.search.results_per_claim) == (5, 3)
+    assert config.permissions.web_search == "allow"
+
+
+def test_the_search_section_loads_from_toml(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text(
+        '[search]\nprovider = "searxng"\nbase_url = "http://localhost:8888"\nmax_claims = 2\n',
+        encoding="utf-8",
+    )
+    config = cfg.load_config(path)
+    assert config.search.provider == "searxng"
+    assert config.search.base_url == "http://localhost:8888"
+    assert config.search.max_claims == 2
+
+
+@pytest.mark.parametrize(
+    "body",
+    ['provider = "bing"', "max_claims = 0", "max_claims = true", 'max_claims = "5"'],
+)
+def test_bad_search_values_are_refused_by_name(tmp_path: Path, body: str) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text(f"[search]\n{body}\n", encoding="utf-8")
+    with pytest.raises(cfg.ConfigError, match=r"search\."):
+        cfg.load_config(path)
+
+
+def test_set_value_parses_an_integer_and_round_trips_it(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    updated = cfg.set_value("search.max_claims", "3", path)
+    assert updated.search.max_claims == 3
+    assert "max_claims = 3" in path.read_text(encoding="utf-8")
+    assert cfg.load_config(path).search.max_claims == 3
+    with pytest.raises(cfg.ConfigError, match="positive integer"):
+        cfg.set_value("search.max_claims", "many", path)
+
+
+def test_set_value_takes_a_search_provider(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    assert cfg.set_value("search.provider", "tavily", path).search.provider == "tavily"
+    with pytest.raises(cfg.ConfigError, match=r"search\.provider"):
+        cfg.set_value("search.provider", "bing", path)

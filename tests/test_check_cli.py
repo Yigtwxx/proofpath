@@ -226,6 +226,26 @@ def write(tmp_path: Path, body: str, entries: Sequence[str] = (REAL,)) -> Path:
     return path
 
 
+# --- --no-search ----------------------------------------------------------------------
+
+
+def test_no_search_is_passed_to_the_engine(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    seen = install(monkeypatch)
+    path = write(tmp_path, "Transformers improved translation quality [1].")
+    runner.invoke(app, ["check", "--no-search", str(path)])
+    assert seen["search"] is False
+
+
+def test_search_is_on_unless_told_otherwise(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen = install(monkeypatch)
+    runner.invoke(
+        app, ["check", str(write(tmp_path, "Transformers improved translation quality [1]."))]
+    )
+    assert seen["search"] is True
+
+
 # --- the clean and the troubled run --------------------------------------------------
 
 

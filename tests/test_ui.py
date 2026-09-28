@@ -685,6 +685,29 @@ def test_footer_names_the_judge_tokens_on_their_own_line() -> None:
     ]
 
 
+def test_footer_prints_the_search_lines_after_search() -> None:
+    instance, out, _ = _build()
+    ui.footer(
+        instance,
+        Footer(
+            counts="4 refs: 4 ok",
+            coverage=(100, 0, 0),
+            api_calls=0,
+            elapsed=1.0,
+            written=None,
+            weak=False,
+            cancelled=False,
+            search=(
+                "evidence search is experimental — …",
+                "claims not searched 2",
+            ),
+        ),
+    )
+    lines = out.getvalue().splitlines()
+    assert "search     evidence search is experimental — …" in lines
+    assert "search     claims not searched 2" in lines
+
+
 def test_footer_says_nothing_about_a_judge_that_never_ran() -> None:
     instance, out, _ = _build()
     ui.footer(

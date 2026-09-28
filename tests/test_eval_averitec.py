@@ -15,6 +15,9 @@ from types import ModuleType, SimpleNamespace
 
 import pytest
 
+from proofpath.eval import averitec
+from proofpath.search import SearchHit
+
 SCRIPT_PATH = Path(__file__).resolve().parents[1] / "scripts" / "eval_averitec.py"
 
 
@@ -35,6 +38,7 @@ Row = eval_averitec.Row
 score = eval_averitec.score
 render_report = eval_averitec.render_report
 state_for = eval_averitec.state_for
+search_urls = eval_averitec.search_urls
 NOT_A_URL = eval_averitec.NOT_A_URL
 NO_SOURCE = eval_averitec.NO_SOURCE
 
@@ -248,6 +252,64 @@ def test_a_run_with_no_sources_still_renders_a_coverage_section() -> None:
 
 def test_the_report_ends_with_a_newline() -> None:
     assert render_report(score(ROWS), date="2026-09-15", limit=100).endswith("\n")
+
+
+# --- search_urls -----------------------------------------------------------
+
+
+def test_search_urls_never_hand_back_the_fact_check_itself() -> None:
+    class Stub:
+        name = "stub"
+
+        def search(self, query: str, max_results: int) -> list[SearchHit]:
+            return [
+                SearchHit("https://factcheck.test/claim-1", "", 1),
+                SearchHit("https://factcheck.test/other", "", 2),
+                SearchHit("https://news.test/a", "", 3),
+            ]
+
+    claim = averitec.Claim(
+        id=0, text="A claim.", label="Refuted", source_urls=(),
+        fact_check_url="https://factcheck.test/claim-1",
+    )  # fmt: skip
+    assert search_urls(Stub(), claim, 3) == ("https://news.test/a",)
+
+
+def test_search_urls_exclude_the_checker_across_subdomains() -> None:
+    class Stub:
+        name = "stub"
+
+        def search(self, query: str, max_results: int) -> list[SearchHit]:
+            return [
+                SearchHit("https://www.afp.com/en/story", "", 1),
+                SearchHit("https://factcheck.afp.com/other", "", 2),
+                SearchHit("https://news.afp.com.evil.test/a", "", 3),
+                SearchHit("https://notafp.com/b", "", 4),
+            ]
+
+    claim = averitec.Claim(
+        id=0, text="A claim.", label="Refuted", source_urls=(),
+        fact_check_url="https://factcheck.afp.com/claim-1",
+    )  # fmt: skip
+    assert search_urls(Stub(), claim, 3) == (
+        "https://news.afp.com.evil.test/a",
+        "https://notafp.com/b",
+    )
+
+
+def test_search_urls_ask_for_enough_hits_to_fill_the_limit() -> None:
+    asked: list[int] = []
+
+    class Stub:
+        name = "stub"
+
+        def search(self, query: str, max_results: int) -> list[SearchHit]:
+            asked.append(max_results)
+            return []
+
+    claim = averitec.Claim(id=0, text="A claim.", label="Refuted", source_urls=())
+    search_urls(Stub(), claim, 3)
+    assert asked == [9]
 
 
 # --- main ----------------------------------------------------------------

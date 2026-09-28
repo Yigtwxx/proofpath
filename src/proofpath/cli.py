@@ -527,6 +527,13 @@ def check(
     no_cache: Annotated[
         bool, typer.Option("--no-cache", help="Neither read nor fill the local cache.")
     ] = False,
+    no_search: Annotated[
+        bool,
+        typer.Option(
+            "--no-search",
+            help="Do not search the web for evidence when the text cites no source.",
+        ),
+    ] = False,
     out_path: Annotated[
         Path | None,
         typer.Option(
@@ -559,6 +566,10 @@ def check(
         # order. ``Progress`` has no bar in v0.1 — the TUI (Phase 8) draws one.
         if isinstance(event, events.StageEnd):
             ui.stage_row(human, event.name, event.by, event.summary, event.elapsed)
+        elif isinstance(event, events.Note) and event.notice:
+            # The judge switched to its local fallback: said at once, on stderr, and
+            # never dropped, not even under ``-q`` (spec section 11).
+            ui.kv(out, "judge", event.text, err=True)
         elif isinstance(event, events.Note):
             ui.note(human, event.text)
 
@@ -574,6 +585,7 @@ def check(
                 # ``--summarize`` on its own is one call over the finished report and
                 # nothing else; the escalation stage is what ``--judge`` buys.
                 escalate=judge,
+                search=not no_search,
             ) as engine,
             _interruptible(cancel),
         ):
@@ -667,7 +679,9 @@ def _build_judge(out: ui.Ui, config: cfg.Config, *, asked_by: str = "") -> judge
         # Said once, before anything is sent, and on stderr so --format json keeps
         # one document on stdout (spec section 11).
         ui.hint(out, judge_mod.GEMINI_DATA_USE, err=True)
-    return judge_mod.Judge(judge_mod.JudgeClient(config.judge, key))
+    # Built per invocation, so every ``check`` starts on the configured provider and
+    # only this run can switch to the local fallback (Amendment B 9).
+    return judge_mod.Judge(judge_mod.build_client(config.judge, key))
 
 
 def _flush_streams() -> None:

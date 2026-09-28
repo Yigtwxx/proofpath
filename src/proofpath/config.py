@@ -10,7 +10,7 @@ from __future__ import annotations
 import sys
 from dataclasses import dataclass, field, fields
 from pathlib import Path
-from typing import Any, Literal, get_args
+from typing import Any, Literal, get_args, get_origin
 
 from proofpath.paths import config_path
 
@@ -34,6 +34,10 @@ class Permissions:
     # Step 3 of the fetch ladder: ~280 MB browser engine. Never installed silently.
     install_browser: Permission = "ask"
     network: Permission = "allow"
+    # Evidence search for a text that cites nothing (OPEN-ITEMS 17.1a). Only matters
+    # once ``search.provider`` is set: configuring a provider is the consent. The
+    # search never prompts, so ``ask`` is read as ``deny`` (rule 4).
+    web_search: Permission = "allow"
 
 
 @dataclass(frozen=True)
@@ -45,6 +49,10 @@ class FetchConfig:
 class Contact:
     # Optional address for the Crossref / OpenAlex polite pools. Never hardcoded.
     email: str = ""
+
+
+#: The local fallback judge (spec section 11): Groq, then this, and nothing else.
+LOCAL_JUDGE_MODEL = "qwen3.5:9b"
 
 
 @dataclass(frozen=True)
@@ -59,6 +67,28 @@ class JudgeConfig:
     model: str = "openai/gpt-oss-120b"
     base_url: str = "https://api.groq.com/openai/v1"
     api_key_env: str = "GROQ_API_KEY"
+    # When the provider stops answering (spec section 11) the run switches to this
+    # Ollama model: qwen3.5:9b by default (the user's choice, backed by a TR->EN
+    # translation benchmark on 2026-09-28), ``off`` never switches, and another name
+    # is the user's own override. It must already be installed; nothing is pulled.
+    fallback: str = LOCAL_JUDGE_MODEL
+
+
+SearchProvider = Literal["off", "tavily", "searxng"]
+SEARCH_PROVIDERS: tuple[str, ...] = get_args(SearchProvider)
+
+
+@dataclass(frozen=True)
+class SearchConfig:
+    """Evidence search for a text that cites nothing (OPEN-ITEMS 17.1a). Off until a
+    provider is named. The key is never stored here: ``api_key_env`` names the
+    variable that holds it, exactly as ``JudgeConfig`` does."""
+
+    provider: SearchProvider = "off"
+    api_key_env: str = "TAVILY_API_KEY"
+    base_url: str = ""  # SearXNG only: the user's own instance
+    max_claims: int = 5
+    results_per_claim: int = 3
 
 
 @dataclass(frozen=True)
@@ -67,6 +97,7 @@ class Config:
     fetch: FetchConfig = field(default_factory=FetchConfig)
     contact: Contact = field(default_factory=Contact)
     judge: JudgeConfig = field(default_factory=JudgeConfig)
+    search: SearchConfig = field(default_factory=SearchConfig)
 
 
 _SECTIONS: dict[str, type] = {
@@ -74,6 +105,7 @@ _SECTIONS: dict[str, type] = {
     "fetch": FetchConfig,
     "contact": Contact,
     "judge": JudgeConfig,
+    "search": SearchConfig,
 }
 
 
@@ -119,6 +151,16 @@ def _coerce(section: str, key: str, value: Any, expected: Any, path: Path) -> An
         if isinstance(value, str):
             return value
         raise ConfigError(f"{path}: {where} must be a string, got {value!r}")
+    if get_origin(expected) is Literal:
+        choices = get_args(expected)
+        if isinstance(value, str) and value in choices:
+            return value
+        raise ConfigError(f"{path}: {where} must be one of {', '.join(choices)}, got {value!r}")
+    if expected is int:
+        # ``bool`` is an ``int`` to Python and a different answer to a reader.
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 1:
+            return value
+        raise ConfigError(f"{path}: {where} must be a positive integer, got {value!r}")
     raise ConfigError(f"{path}: {where} has an unsupported type")  # pragma: no cover
 
 
@@ -138,7 +180,13 @@ def _build_section(section: str, raw: Any, path: Path) -> Any:
 def _resolve_type(annotation: Any) -> Any:
     # ``from __future__ import annotations`` leaves field types as strings.
     if isinstance(annotation, str):
-        return {"Permission": Permission, "bool": bool, "str": str}[annotation]
+        return {
+            "Permission": Permission,
+            "SearchProvider": SearchProvider,
+            "bool": bool,
+            "int": int,
+            "str": str,
+        }[annotation]
     return annotation
 
 
@@ -165,6 +213,8 @@ def load_config(path: Path | None = None) -> Config:
 def _toml_value(value: Any) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"
+    if isinstance(value, int):
+        return str(value)
     if isinstance(value, str):
         escaped = value.replace("\\", "\\\\").replace('"', '\\"')
         return f'"{escaped}"'
@@ -203,6 +253,13 @@ def set_value(dotted_key: str, raw_value: str, path: Path | None = None) -> Conf
         if lowered not in {"true", "false"}:
             raise ConfigError(f"{dotted_key} must be true or false, got {raw_value!r}")
         value = lowered == "true"
+    if expected is int:
+        try:
+            value = int(raw_value.strip())
+        except ValueError:
+            raise ConfigError(
+                f"{dotted_key} must be a positive integer, got {raw_value!r}"
+            ) from None
     coerced = _coerce(section, key, value, expected, path)
     current = load_config(path)
     body = getattr(current, section)

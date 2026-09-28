@@ -15,6 +15,7 @@ from proofpath.oa import ABSTRACT_ONLY
 from proofpath.report import (
     BROWSER_SKIPPED_REASON,
     JUDGE_DETAIL_PREFIX,
+    LANGUAGE_UNSUPPORTED,
     LEVELS,
     NO_REASON_RECORDED,
     SNIPPET_LIMIT,
@@ -25,6 +26,7 @@ from proofpath.report import (
     Finding,
     Kind,
     Report,
+    SearchSummary,
     SourceStatus,
     Stage,
     coverage_reasons,
@@ -36,6 +38,8 @@ from proofpath.report import (
     render_diagnostics,
     render_footer,
     render_markdown,
+    search_experimental,
+    search_lines,
     summary_silence,
     summary_unavailable,
 )
@@ -76,7 +80,9 @@ def claim_at(line: int, page: int | None = None) -> Claim:
 
 def finding(kind: Kind, line: int, page: int | None = None, column: int = 1) -> Finding:
     """A minimally valid Finding of ``kind``, positioned where the test needs it."""
-    needs_passage = kind in {Kind.NOT_SUPPORTED, Kind.NUMERIC_MISMATCH}
+    # EVIDENCE_FOUND asserts support too (rule 1), so it needs a passage just like the
+    # other two asserting kinds -- see ``_ASSERTING`` in ``proofpath.report``.
+    needs_passage = kind in {Kind.NOT_SUPPORTED, Kind.NUMERIC_MISMATCH, Kind.EVIDENCE_FOUND}
     return Finding(
         kind=kind,
         level=LEVELS[kind],
@@ -164,7 +170,7 @@ def test_kind_values_are_the_diagnostic_codes() -> None:
 # --- Finding invariants ----------------------------------------------------------
 
 
-@pytest.mark.parametrize("kind", [Kind.NOT_SUPPORTED, Kind.NUMERIC_MISMATCH])
+@pytest.mark.parametrize("kind", [Kind.NOT_SUPPORTED, Kind.NUMERIC_MISMATCH, Kind.EVIDENCE_FOUND])
 def test_an_asserting_finding_without_a_verdict_raises(kind: Kind) -> None:
     with pytest.raises(ValueError, match="passage"):
         Finding(
@@ -182,7 +188,7 @@ def test_an_asserting_finding_without_a_verdict_raises(kind: Kind) -> None:
         )
 
 
-@pytest.mark.parametrize("kind", [Kind.NOT_SUPPORTED, Kind.NUMERIC_MISMATCH])
+@pytest.mark.parametrize("kind", [Kind.NOT_SUPPORTED, Kind.NUMERIC_MISMATCH, Kind.EVIDENCE_FOUND])
 def test_an_asserting_finding_without_a_passage_raises(kind: Kind) -> None:
     with pytest.raises(ValueError, match="passage"):
         Finding(
@@ -200,7 +206,7 @@ def test_an_asserting_finding_without_a_passage_raises(kind: Kind) -> None:
         )
 
 
-@pytest.mark.parametrize("kind", [Kind.NOT_SUPPORTED, Kind.NUMERIC_MISMATCH])
+@pytest.mark.parametrize("kind", [Kind.NOT_SUPPORTED, Kind.NUMERIC_MISMATCH, Kind.EVIDENCE_FOUND])
 def test_an_asserting_finding_with_a_passage_is_valid(kind: Kind) -> None:
     assert finding(kind, line=260, page=9).verdict is REFUTED
 
@@ -1593,3 +1599,74 @@ def test_the_footer_carries_the_reasons_so_the_terminal_can_print_them() -> None
         (CREDENTIALS_MISSING, 1),
     )
     assert render_footer(covered(4, 4, 0, 0)).reasons == ()
+
+
+# --- evidence search (OPEN-ITEMS 17.1a) -------------------------------------------
+
+
+def test_the_two_search_kinds_carry_their_section_15_words() -> None:
+    assert STATE_WORDS[Kind.EVIDENCE_FOUND] == "SUPPORTED (found by proofpath)"
+    assert LEVELS[Kind.EVIDENCE_FOUND] == "note"
+    assert STATE_WORDS[Kind.NO_EVIDENCE] == "NO EVIDENCE FOUND (searched)"
+    assert LEVELS[Kind.NO_EVIDENCE] == "warning"
+
+
+def test_evidence_found_needs_a_passage() -> None:
+    with pytest.raises(ValueError, match="passage"):
+        Finding(
+            kind=Kind.EVIDENCE_FOUND,
+            level="note",
+            locator=Locator(line=1),
+            title="t",
+            state=STATE_WORDS[Kind.EVIDENCE_FOUND],
+            reference=None,
+            claim=None,
+            verdict=None,
+            source_id=None,
+            fetch_step=None,
+            tier=None,
+        )
+
+
+def test_a_reference_is_the_authors_unless_the_search_found_it() -> None:
+    assert Reference(1, "x", Locator(line=1)).origin == "author"
+    assert Reference(1, "x", Locator(line=1), origin="search").origin == "search"
+
+
+def test_language_unsupported_is_worded_as_the_unverified_family() -> None:
+    assert LANGUAGE_UNSUPPORTED == "UNVERIFIED (language not supported)"
+
+
+SUMMARY = SearchSummary(
+    by="tavily",
+    queries_by="sentence",
+    sentences=7,
+    eligible=4,
+    searched=3,
+    pages_found=9,
+    pages_read=6,
+    notices=("LLM limit reached — searched with the sentence text",),
+)
+
+
+def test_search_lines_state_what_was_searched_and_what_was_not() -> None:
+    lines = search_lines(dataclasses.replace(report_with(), search=SUMMARY))
+    assert lines[0] == search_experimental()
+    assert "evidence search by tavily, queries by sentence" in lines
+    assert "claims searched 3 of 4 check-worthy (7 sentences)" in lines
+    assert "claims not searched 4" in lines
+    assert "pages found / read 9 / 6" in lines
+    assert lines[-1].startswith("LLM limit reached")
+
+
+def test_a_run_that_did_not_search_has_no_search_lines() -> None:
+    assert search_lines(report_with()) == ()
+    assert render_footer(report_with()).search == ()
+
+
+def test_the_footer_and_the_markdown_carry_the_search_block() -> None:
+    report = dataclasses.replace(report_with(), search=SUMMARY)
+    assert render_footer(report).search == search_lines(report)
+    markdown = render_markdown(report)
+    assert "## Evidence search" in markdown
+    assert "- claims not searched 4" in markdown

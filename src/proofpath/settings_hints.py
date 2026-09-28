@@ -15,3 +15,9 @@ from __future__ import annotations
 BROWSER_SETTING = "permissions.install_browser ask"
 #: ``permissions.network`` set to ``allow``: every network-bound stage runs.
 NETWORK_SETTING = "permissions.network allow"
+#: ``search.provider`` set to ``tavily``: a text that cites nothing is searched with
+#: the user's own Tavily key (OPEN-ITEMS 17.1a).
+SEARCH_SETTING = "search.provider tavily"
+#: ``search.provider`` set to ``searxng``: the other v1 provider, the user's own
+#: SearXNG instance addressed by ``search.base_url`` instead of a key.
+SEARXNG_SETTING = "search.provider searxng"

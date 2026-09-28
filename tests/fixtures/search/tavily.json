@@ -1,0 +1,11 @@
+{
+  "query": "ChatGPT shut down 2025",
+  "results": [
+    {"title": "OpenAI statement", "url": "https://news.test/openai-statement?utm_source=x", "content": "SNIPPET-MUST-NOT-BE-EVIDENCE", "score": 0.91},
+    {"title": "Duplicate", "url": "https://news.test/openai-statement", "content": "dup", "score": 0.8},
+    {"title": "A post", "url": "https://x.com/someone/status/1", "content": "post", "score": 0.7},
+    {"title": "Encyclopedia", "url": "https://wiki.test/ChatGPT", "content": "wiki", "score": 0.6},
+    {"title": "No address", "content": "broken entry", "score": 0.5}
+  ],
+  "response_time": 0.8
+}

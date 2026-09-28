@@ -60,6 +60,12 @@ class Paragraph:
     lines: tuple[tuple[int, int], ...]
 
 
+# Who put a reference in the document: its author, or proofpath's evidence search
+# (OPEN-ITEMS 17.1a). Carried on the reference so every finding about a found page
+# can say so, whichever stage wrote it.
+Origin = Literal["author", "search"]
+
+
 @dataclass(frozen=True)
 class Reference:
     """One bibliography entry, kept verbatim; resolve.py does the parsing."""
@@ -67,6 +73,7 @@ class Reference:
     number: int  # 1-based bibliography position, what "[12]" refers to
     raw: str  # the entry verbatim, whitespace collapsed
     locator: Locator
+    origin: Origin = "author"
 
     def __post_init__(self) -> None:
         if self.number < 1:
@@ -153,6 +160,10 @@ class Claim:
     # Shared by every Claim of one paragraph-scoped citation, e.g. "p3:118-122".
     group: str | None = None
     marker: CitationMarker | None = None
+    # The English text the models check, when it is not ``text`` itself: a claim in
+    # another language that the judge translated (OPEN-ITEMS 17.1a). ``text`` stays
+    # the reader's own sentence, and that is what the report shows.
+    hypothesis: str | None = None
 
     def __post_init__(self) -> None:
         if self.sentence < 0:

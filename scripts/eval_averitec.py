@@ -2,7 +2,7 @@
 
 Usage:
     uv run python scripts/eval_averitec.py [--limit 100] [--no-browser] [--sleep 1.0]
-        [--resume] [--out docs/eval/<date>-averitec.md]
+        [--resume] [--search] [--out docs/eval/<date>-averitec.md]
 
 SciFact measures retrieval and entailment over abstracts we are handed. AVeriTeC
 measures the whole product: a real-world claim, its real source pages, fetched over
@@ -29,7 +29,7 @@ import sys
 import time
 from collections import Counter
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -40,6 +40,8 @@ from proofpath.eval import averitec
 from proofpath.fetch import Fetched
 from proofpath.models import Label, Passage
 from proofpath.paths import cache_dir
+from proofpath.search import Searcher, keep_hits
+from proofpath.search.queries import sentence_query
 from proofpath.verify import NO_TEXT, Engine
 
 # The state a claim gets when the dataset itself names no page to read. It is not a
@@ -53,6 +55,7 @@ NOT_A_URL = "not a url"
 # split's evidence is already a snapshot, and that changes what the numbers measure.
 ARCHIVE_HOST = "web.archive.org"
 RESULTS_NAME = "averitec_results.json"
+SEARCH_RESULTS_NAME = "averitec_search_results.json"
 
 
 @dataclass(frozen=True)
@@ -88,6 +91,35 @@ def state_for(fetched: Fetched) -> str:
     if fetched.ok and not fetched.text.strip():
         return NO_TEXT
     return fetched.outcome.value
+
+
+def search_urls(searcher: Searcher, claim: averitec.Claim, limit: int) -> tuple[str, ...]:
+    """What the evidence search would read for this claim, minus the answer key.
+
+    The whole fact-checking site is excluded, not just the one article: a site that
+    rated the claim quotes its own rating on every related page (the leakage the
+    §17.1 gate must not measure). "Site" reaches across subdomains both ways, so a
+    rating on ``factcheck.afp.com`` also rules out ``www.afp.com``. That errs towards
+    a lower score, never a leaked one.
+    """
+    checker = _site(claim.fact_check_url)
+    # Three times the limit, not a fixed few: a checker's own pages can crowd the top
+    # of the results, and the claim should still get its full share of other pages.
+    hits = [
+        hit
+        for hit in searcher.search(sentence_query(claim.text), limit * 3)
+        if not checker or not _same_site(_site(hit.url), checker)
+    ]
+    return tuple(hit.url for hit in keep_hits(hits, own_host=None, limit=limit))
+
+
+def _site(url: str) -> str:
+    return (urlsplit(url).hostname or "").removeprefix("www.")
+
+
+def _same_site(host: str, checker: str) -> bool:
+    """One host is the other, or a subdomain of it, in either direction."""
+    return host == checker or host.endswith(f".{checker}") or checker.endswith(f".{host}")
 
 
 @dataclass(frozen=True)
@@ -211,8 +243,8 @@ def render_report(result: AveritecResult, *, date: str, limit: int) -> str:
 # --- live half: run by hand, not covered by tests ------------------------
 
 
-def _results_path() -> Path:
-    return cache_dir() / "datasets" / RESULTS_NAME
+def _results_path(*, search: bool) -> Path:
+    return cache_dir() / "datasets" / (SEARCH_RESULTS_NAME if search else RESULTS_NAME)
 
 
 def _load_rows(path: Path) -> list[Row]:
@@ -314,10 +346,15 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--sleep", type=float, default=1.0, help="seconds between fetches")
     parser.add_argument("--resume", action="store_true", help="skip claim ids already scored")
+    parser.add_argument(
+        "--search",
+        action="store_true",
+        help="read what the evidence search finds instead of the gold URLs",
+    )
     parser.add_argument("--out", default="")
     args = parser.parse_args(argv)
 
-    results = _results_path()
+    results = _results_path(search=args.search)
     if results.exists() and not args.resume:
         # The file is the only record of a run that costs hours of network; a fresh
         # run must not quietly replace it. Checked before anything is downloaded, so
@@ -346,11 +383,35 @@ def main(argv: list[str] | None = None) -> int:
     # prompted for (product rule 4); ``--no-browser`` forces the browser step off
     # outright, otherwise the config's own permission decides.
     engine = Engine.default(config, interactive=False, browser=False if args.no_browser else None)
+    searcher: Searcher | None = None
+    if args.search:
+        # ``Engine.default`` already resolved the configured provider onto its own
+        # polite client (verify.py); reusing that instead of building a second one
+        # keeps the run's searcher assembled exactly once, like everything else here.
+        if engine.searcher is None:
+            print(
+                f"error     evidence search is not set up: "
+                f"{engine.search_problem or 'search.provider is off'}",
+                file=sys.stderr,
+            )
+            engine.close()
+            return 2
+        searcher = engine.searcher
+
     scored = 0
     try:
         for position, claim in enumerate(claims, start=1):
             if claim.id in done:
                 continue
+            if searcher is not None:
+                # The gold URLs are the answer key; search mode reads what evidence
+                # search would actually find, which is the §17.1 gate this run exists
+                # to measure. ``non_urls=0`` because a search hit is always a URL.
+                claim = replace(
+                    claim,
+                    source_urls=search_urls(searcher, claim, config.search.results_per_claim),
+                    non_urls=0,
+                )
             stored.append(_decide_claim(engine, claim, sleep=args.sleep))
             scored += 1
             # After every claim, not at the end: a run this long is interrupted more
@@ -370,10 +431,11 @@ def main(argv: list[str] | None = None) -> int:
     report = render_report(score(rows), date=date.today().isoformat(), limit=args.limit)
     print()
     print(report)
+    suffix = "-search" if args.search else ""
     out = (
         Path(args.out)
         if args.out
-        else Path("docs/eval") / f"{date.today().isoformat()}-averitec.md"
+        else Path("docs/eval") / f"{date.today().isoformat()}-averitec{suffix}.md"
     )
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(report, encoding="utf-8")

@@ -670,7 +670,7 @@ def test_a_judgement_round_trips_and_is_keyed_by_the_judge_model(db: Cache) -> N
     db.put_judgement("h", "s", "groq gpt-oss", OPINION, now=NOW)
     assert db.get_judgement("h", "s", "groq gpt-oss") == OPINION
     # Another judge has not been asked; absence of its opinion is not an opinion.
-    assert db.get_judgement("h", "s", "ollama llama3.1") is None
+    assert db.get_judgement("h", "s", "ollama qwen3.5:9b") is None
     assert db.get_judgement("other", "s", "groq gpt-oss") is None
 
 
