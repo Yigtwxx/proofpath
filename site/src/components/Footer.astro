@@ -11,7 +11,7 @@ const unique = credits.filter((c) => (seen.has(c.page_url) ? false : (seen.add(c
 
 <footer class="footer" id="footer">
     <div class="footer__band" aria-hidden="true">
-        <Halftone id="shore" tone="crimson" hover={false} sizes="100vw" />
+        <Halftone id="shore" tone="crimson" hover={false} drift="--footer-plate" sizes="100vw" />
     </div>
     <div class="page footer__grid">
         <div class="footer__col">
@@ -72,6 +72,11 @@ const unique = credits.filter((c) => (seen.has(c.page_url) ? false : (seen.add(c
 
 <style>
     .footer {
+        /* The shore plate's drift timeline: the band clips the plate, so it
+           drifts over the footer's pass instead of its own. The page ends before
+           the footer can leave, so the drift spans its entry alone. */
+        view-timeline: --footer-plate block;
+        --drift-range: entry 0% entry 100%;
         --field: var(--crimson);
         --pen: var(--rose-soft);
         --caption: var(--rose-soft);

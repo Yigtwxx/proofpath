@@ -64,7 +64,12 @@ import CoverageBar from './CoverageBar.astro';
     </ol>
     <div class="measured__side">
         <figure class="measured__figure-plate">
-            <Halftone id="sea" tone="crimson" sizes="(min-width: 64rem) 26vw, 70vw" />
+            <Halftone
+                id="sea"
+                tone="crimson"
+                drift="--measured-plate"
+                sizes="(min-width: 64rem) 26vw, 70vw"
+            />
             <figcaption class="caption measured__caption">
                 Gustave Doré, <cite>The Raven</cite>, 1884. One bird over the open sea.
             </figcaption>
@@ -99,6 +104,9 @@ import CoverageBar from './CoverageBar.astro';
 
 <style>
     .measured {
+        /* The medallion's drift timeline: it rides a sticky column, so it
+           drifts over the section's pass instead of its own. */
+        view-timeline: --measured-plate block;
         display: grid;
         gap: var(--space-7);
     }
