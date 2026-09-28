@@ -78,7 +78,7 @@ import CoverageBar from './CoverageBar.astro';
             .filter((m) => m.weak)
             .map((m) => (
                 <div class="measured__weak">
-                    <SketchBox tone="paper" padding="md" fill>
+                    <SketchBox tone="paper" padding="md" draw fill>
                         <p class="measured__figure measured__figure--weak">
                             <b>{m.figure}</b>
                             <span class="measured__reading">{m.reading}</span>

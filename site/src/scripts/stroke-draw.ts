@@ -33,7 +33,34 @@ function measure(svg: Element): void {
     for (const stroke of strokes) {
         const len = Math.ceil(screenLength(stroke) * 1.04) + 2;
         stroke.style.setProperty('--len', String(len));
+        // Commit the hidden state now. Without a style pass in between, the drawn
+        // state that follows would transition from whatever was computed last --
+        // the 4000 fallback -- and the dash would cycle on the way to 0.
+        void getComputedStyle(stroke).strokeDashoffset;
     }
+}
+
+// Longest `--delay` a stroke is given (the echo line of a box), plus a margin: when
+// no `transitionend` arrives (a stroke with nothing left to animate), the drawing
+// still settles.
+const SETTLE_SLACK_MS = 400;
+
+/** Drop the dash once every stroke has finished drawing (see global.css). */
+function settle(svg: Element): void {
+    const strokes = svg.querySelectorAll('path, line, polyline, circle, ellipse').length;
+    let pending = strokes;
+    const done = (): void => {
+        svg.classList.add('is-settled');
+        svg.removeEventListener('transitionend', onEnd);
+    };
+    const onEnd = (event: Event): void => {
+        if ((event as TransitionEvent).propertyName !== 'stroke-dashoffset') return;
+        pending -= 1;
+        if (pending <= 0) done();
+    };
+    svg.addEventListener('transitionend', onEnd);
+    const duration = parseFloat(getComputedStyle(svg).getPropertyValue('--draw-duration')) || 900;
+    window.setTimeout(done, duration + SETTLE_SLACK_MS);
 }
 
 export function initStrokeDraw(root: ParentNode = document): void {
@@ -44,7 +71,7 @@ export function initStrokeDraw(root: ParentNode = document): void {
     for (const svg of targets) measure(svg);
 
     if (!('IntersectionObserver' in window)) {
-        for (const svg of targets) svg.classList.add('is-drawn');
+        for (const svg of targets) svg.classList.add('is-drawn', 'is-settled');
         return;
     }
     const observer = new IntersectionObserver(
@@ -53,7 +80,10 @@ export function initStrokeDraw(root: ParentNode = document): void {
                 if (!entry.isIntersecting) continue;
                 // Re-measure right before drawing: fonts may have loaded since.
                 measure(entry.target);
-                requestAnimationFrame(() => entry.target.classList.add('is-drawn'));
+                requestAnimationFrame(() => {
+                    entry.target.classList.add('is-drawn');
+                    settle(entry.target);
+                });
                 observer.unobserve(entry.target);
             }
         },

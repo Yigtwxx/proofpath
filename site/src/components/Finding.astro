@@ -12,7 +12,7 @@ const { finding, caption } = Astro.props;
 const bad = finding.verdict.tone === 'bad';
 ---
 
-<SketchBox padding="sm" class="finding">
+<SketchBox padding="sm" draw class="finding">
     <div class="finding__head">
         <span class="finding__glyph" data-tone={finding.verdict.tone} aria-hidden="true">
             {bad ? '✗' : '·'}

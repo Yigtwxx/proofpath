@@ -1,12 +1,12 @@
 ---
 /* A verdict word inside a hand-drawn ring. Tones follow what the word means in
-   proofpath: ok, bad, slate for "could not verify", ink for neutral. The ring is
-   not drawn in on scroll, for the reason SketchBox gives. */
+   proofpath: ok, bad, slate for "could not verify", ink for neutral. */
 interface Props {
     label: string;
     tone?: 'ok' | 'bad' | 'slate' | 'ink';
+    draw?: boolean;
 }
-const { label, tone = 'ink' } = Astro.props;
+const { label, tone = 'ink', draw = false } = Astro.props;
 ---
 
 <span class:list={['sketch-badge', `tone-${tone}`]}>
@@ -17,6 +17,7 @@ const { label, tone = 'ink' } = Astro.props;
         preserveAspectRatio="none"
         aria-hidden="true"
         focusable="false"
+        data-draw={draw ? '' : undefined}
     >
         <path d="M8 20 C 6 8, 30 3, 60 4 S 116 6, 114 20 S 90 37, 60 36 S 10 34, 8 20 C 7 12, 20 6, 40 5"></path>
     </svg>

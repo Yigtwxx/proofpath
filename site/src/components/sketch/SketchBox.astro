@@ -1,16 +1,13 @@
 ---
 /* A box whose border is a pencil line: an SVG rectangle behind the content,
    displaced by the shared `pencil` filter, drawn twice with a slight offset so it
-   reads as a hand going over the line. Never drawn in on scroll: animating the
-   dash of a box-sized, noise-filtered stroke repaints the filter every frame, and
-   several boxes entering at once on a fast scroll dropped frames until their
-   frames flickered (measured 2026-09-28: 979 paints and 12 dropped frames in one
-   fast scroll, 52 and 0 without the draw-in). Small strokes keep it. */
+   reads as a hand going over the line. `draw` animates the stroke on scroll. */
 export type Tone = 'ink' | 'crimson' | 'slate' | 'paper';
 interface Props {
     as?: 'div' | 'section' | 'article' | 'aside' | 'li' | 'figure';
     padding?: 'none' | 'sm' | 'md' | 'lg';
     tone?: Tone;
+    draw?: boolean;
     fill?: boolean;
     class?: string;
     id?: string;
@@ -19,6 +16,7 @@ const {
     as: Tag = 'div',
     padding = 'md',
     tone = 'ink',
+    draw = false,
     fill = false,
     class: className,
     ...rest
@@ -35,6 +33,7 @@ const {
         preserveAspectRatio="none"
         aria-hidden="true"
         focusable="false"
+        data-draw={draw ? '' : undefined}
     >
         <rect class="sketch-box__fill" x="1" y="1" width="98" height="98"></rect>
         <path class="sketch-box__line" d="M2 2.5 L98 1.8 L98.4 98 L1.6 98.4 Z"></path>

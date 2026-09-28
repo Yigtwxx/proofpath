@@ -198,7 +198,14 @@ svg {
 }
 
 /* stroke drawing: paths are hidden until in view, then drawn like a pen.
-   Only inside no-preference so reduced-motion users get complete lines with no JS. */
+   Only inside no-preference so reduced-motion users get complete lines with no JS.
+
+   The transition lives on the drawn state alone. On the hidden state it also
+   animated every measurement: `--len` goes from the 4000 fallback to the real
+   length, the offset slid 4000 -> len while the dash was already len, and the
+   line flashed on and off five or six times before it was drawn. Once drawn, the
+   dash is dropped (`is-settled`), so a line that grows later (a web font landing
+   under an underline) never shows the gap of a dash measured too short. */
 @media (prefers-reduced-motion: no-preference) {
     .js [data-draw] path,
     .js [data-draw] line,
@@ -207,8 +214,6 @@ svg {
     .js [data-draw] ellipse {
         stroke-dasharray: var(--len, 4000);
         stroke-dashoffset: var(--len, 4000);
-        transition: stroke-dashoffset var(--draw-duration) var(--ease-pen);
-        transition-delay: var(--delay, 0ms);
     }
     .js [data-draw].is-drawn path,
     .js [data-draw].is-drawn line,
@@ -216,6 +221,15 @@ svg {
     .js [data-draw].is-drawn circle,
     .js [data-draw].is-drawn ellipse {
         stroke-dashoffset: 0;
+        transition: stroke-dashoffset var(--draw-duration) var(--ease-pen);
+        transition-delay: var(--delay, 0ms);
+    }
+    .js [data-draw].is-settled path,
+    .js [data-draw].is-settled line,
+    .js [data-draw].is-settled polyline,
+    .js [data-draw].is-settled circle,
+    .js [data-draw].is-settled ellipse {
+        stroke-dasharray: none;
     }
 }
 
