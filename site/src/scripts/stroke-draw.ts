@@ -28,16 +28,26 @@ function screenLength(el: Stroke): number {
     return length;
 }
 
-function measure(svg: Element): void {
-    const strokes = svg.querySelectorAll<Stroke>('path, line, polyline, circle, ellipse');
-    for (const stroke of strokes) {
-        const len = Math.ceil(screenLength(stroke) * 1.04) + 2;
-        stroke.style.setProperty('--len', String(len));
-        // Commit the hidden state now. Without a style pass in between, the drawn
-        // state that follows would transition from whatever was computed last --
-        // the 4000 fallback -- and the dash would cycle on the way to 0.
-        void getComputedStyle(stroke).strokeDashoffset;
+const STROKES = 'path, line, polyline, circle, ellipse';
+
+/** Measure every stroke of `svgs`, then write every length, then commit once.
+
+   Reads first and writes after: interleaving them made the browser recompute
+   style once per stroke, and a section with dozens of strokes entering the
+   viewport cost a frame or two each time (14-21 ms tasks on a slow scroll).
+   The one style read at the end commits the hidden state, so a drawing that
+   follows transitions from the measured length -- not from the 4000 fallback,
+   which made the dash cycle on its way to 0. */
+function measure(svgs: Iterable<Element>): void {
+    const lengths: [Stroke, number][] = [];
+    for (const svg of svgs) {
+        for (const stroke of svg.querySelectorAll<Stroke>(STROKES)) {
+            lengths.push([stroke, Math.ceil(screenLength(stroke) * 1.04) + 2]);
+        }
     }
+    for (const [stroke, len] of lengths) stroke.style.setProperty('--len', String(len));
+    const first = lengths[0];
+    if (first) void getComputedStyle(first[0]).strokeDashoffset;
 }
 
 // Longest `--delay` a stroke is given (the echo line of a box), plus a margin: when
@@ -46,8 +56,8 @@ function measure(svg: Element): void {
 const SETTLE_SLACK_MS = 400;
 
 /** Drop the dash once every stroke has finished drawing (see global.css). */
-function settle(svg: Element): void {
-    const strokes = svg.querySelectorAll('path, line, polyline, circle, ellipse').length;
+function settle(svg: Element, drawMs: number): void {
+    const strokes = svg.querySelectorAll(STROKES).length;
     let pending = strokes;
     const done = (): void => {
         svg.classList.add('is-settled');
@@ -59,8 +69,7 @@ function settle(svg: Element): void {
         if (pending <= 0) done();
     };
     svg.addEventListener('transitionend', onEnd);
-    const duration = parseFloat(getComputedStyle(svg).getPropertyValue('--draw-duration')) || 900;
-    window.setTimeout(done, duration + SETTLE_SLACK_MS);
+    window.setTimeout(done, drawMs + SETTLE_SLACK_MS);
 }
 
 export function initStrokeDraw(root: ParentNode = document): void {
@@ -68,7 +77,18 @@ export function initStrokeDraw(root: ParentNode = document): void {
     const targets = Array.from(root.querySelectorAll<SVGElement>('[data-draw]'));
     if (targets.length === 0) return;
 
-    for (const svg of targets) measure(svg);
+    measure(targets);
+    // Read once: a style read per drawing would force a style pass per drawing.
+    const drawMs =
+        parseFloat(
+            getComputedStyle(document.documentElement).getPropertyValue('--draw-duration'),
+        ) || 900;
+    // Once more when the web fonts land, for the strokes not drawn yet: an
+    // underline stretches with its word, and a box with the text it frames.
+    // Never while scrolling; a stroke that enters the viewport only draws.
+    document.fonts?.ready.then(() => {
+        measure(targets.filter((svg) => !svg.classList.contains('is-drawn')));
+    });
 
     if (!('IntersectionObserver' in window)) {
         for (const svg of targets) svg.classList.add('is-drawn', 'is-settled');
@@ -78,11 +98,9 @@ export function initStrokeDraw(root: ParentNode = document): void {
         (entries) => {
             for (const entry of entries) {
                 if (!entry.isIntersecting) continue;
-                // Re-measure right before drawing: fonts may have loaded since.
-                measure(entry.target);
                 requestAnimationFrame(() => {
                     entry.target.classList.add('is-drawn');
-                    settle(entry.target);
+                    settle(entry.target, drawMs);
                 });
                 observer.unobserve(entry.target);
             }
