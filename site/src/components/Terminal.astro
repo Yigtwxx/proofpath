@@ -112,7 +112,21 @@ const tones = { shadow: WORDMARK_SHADOW, columns: WORDMARK_COLUMNS };
         </div>
         <div class="tui__rule"></div>
     </div>
-    <div class="tui__out" data-tui-out aria-hidden="true"></div>
+    <div class="tui__screen">
+        <!-- The run's final state, invisible, in the same cell as the live output: the
+             panel is its full height from the first frame, so lines typed into it never
+             push the page below them (on a phone the page jumped 150 px while it played). -->
+        <div class="tui__out tui__ghost" aria-hidden="true">
+            {finalLines.map((f) => (
+                <div class="tui__line">
+                    {f.spans.map((s) => (
+                        <span data-tone={s.tone}>{s.text}</span>
+                    ))}
+                </div>
+            ))}
+        </div>
+        <div class="tui__out" data-tui-out aria-hidden="true"></div>
+    </div>
     <pre class="visually-hidden">{finalLines.map((f) => f.spans.map((s) => s.text).join('')).join('\n')}</pre>
 </div>
 
@@ -220,6 +234,17 @@ const tones = { shadow: WORDMARK_SHADOW, columns: WORDMARK_COLUMNS };
         height: 1px;
         margin-top: 0.75em;
         background: var(--shadow);
+    }
+    .tui__screen {
+        display: grid;
+    }
+    .tui__screen > .tui__out {
+        grid-area: 1 / 1;
+        min-width: 0;
+    }
+    .tui__ghost {
+        visibility: hidden;
+        pointer-events: none;
     }
     .tui__out {
         padding: 0.6em 1.2em 0;
