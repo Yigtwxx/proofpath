@@ -2,6 +2,7 @@
 import '../styles/global.css';
 import PencilDefs from '../components/sketch/PencilDefs.astro';
 import { withBase } from '../lib/base';
+import { INDEXABLE } from '../lib/seo';
 // Preload the fonts the first paint needs, so the swap does not move the hero.
 import frauncesUrl from '@fontsource-variable/fraunces/files/fraunces-latin-full-normal.woff2?url';
 import interUrl from '@fontsource-variable/inter/files/inter-latin-wght-normal.woff2?url';
@@ -19,6 +20,7 @@ interface Props {
     noindex?: boolean;
 }
 const { title, description, noindex = false } = Astro.props;
+const hidden = noindex || !INDEXABLE; // see lib/seo.ts
 const canonical = new URL(Astro.url.pathname, Astro.site);
 // The link preview is the GitHub social preview card (pages/social.astro).
 const ogImage = new URL(withBase('social-preview.jpg'), Astro.site);
@@ -34,10 +36,25 @@ const IMAGE_ALT =
         <script is:inline>
             document.documentElement.classList.add('js');
         </script>
+        <!-- Vercel Web Analytics: cookieless page views. Loaded only where Vercel serves
+             it, so a local preview has no 404 in its console. -->
+        <script is:inline>
+            window.va =
+                window.va ||
+                function () {
+                    (window.vaq = window.vaq || []).push(arguments);
+                };
+            if (location.hostname.endsWith('.vercel.app')) {
+                const s = document.createElement('script');
+                s.defer = true;
+                s.src = '/_vercel/insights/script.js';
+                document.head.appendChild(s);
+            }
+        </script>
         <title>{title}</title>
         <meta name="description" content={description} />
         <link rel="canonical" href={canonical} />
-        {noindex ? <meta name="robots" content="noindex, nofollow" /> : null}
+        {hidden ? <meta name="robots" content="noindex, nofollow" /> : null}
         {preload.map((href) => (
             <link rel="preload" as="font" type="font/woff2" href={href} crossorigin />
         ))}
