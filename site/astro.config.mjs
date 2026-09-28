@@ -10,6 +10,6 @@ export default defineConfig({
     site: 'https://example.com',
     base: '/',
     output: 'static',
-    integrations: [sitemap({ filter: (page) => !page.endsWith('/og') })],
+    integrations: [sitemap({ filter: (page) => !/\/(og|social)\/?$/.test(page) })],
     build: { inlineStylesheets: 'auto' },
 });

@@ -1,0 +1,124 @@
+---
+/* The GitHub social preview, rendered as a page and captured into
+   .github/social-preview.jpg (see scripts/og.md). 1280x640, GitHub's recommended
+   size. Not linked, not indexed, not in the sitemap. */
+import '../styles/global.css';
+import PencilDefs from '../components/sketch/PencilDefs.astro';
+import Halftone from '../components/Halftone.astro';
+import SketchUnderline from '../components/sketch/SketchUnderline.astro';
+---
+
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="utf-8" />
+        <meta name="robots" content="noindex, nofollow" />
+        <title>social</title>
+    </head>
+    <body>
+        <PencilDefs />
+        <div class="card">
+            <div class="plate">
+                <Halftone id="seraphim" tone="paper" hover={false} loading="eager" sizes="1280px" />
+            </div>
+            <div class="wash"></div>
+            <div class="copy">
+                <p class="kicker">proofpath</p>
+                <h1 class="title">
+                    Don't guess.
+                    <br />
+                    Show the <SketchUnderline tone="crimson">evidence.</SketchUnderline>
+                </h1>
+                <p class="marginalia note">
+                    The room fills with voices. None of them is the source.
+                </p>
+                <p class="foot">local · free · no API key</p>
+            </div>
+        </div>
+    </body>
+</html>
+
+<style is:global>
+    html,
+    body {
+        margin: 0;
+        width: 1280px;
+        height: 640px;
+        overflow: hidden;
+    }
+    body::before {
+        display: none;
+    }
+    /* The seraphim plate is the whole ground; the words sit on a paper wash that
+       opens towards the man in the chair. */
+    .card {
+        position: relative;
+        width: 1280px;
+        height: 640px;
+        overflow: hidden;
+        background: var(--paper);
+        color: var(--ink);
+    }
+    .plate {
+        position: absolute;
+        inset: 0;
+    }
+    .plate .halftone {
+        aspect-ratio: auto;
+        height: 100%;
+    }
+    .plate .halftone__img {
+        object-position: center 55%;
+    }
+    .wash {
+        position: absolute;
+        inset: 0;
+        background: linear-gradient(
+            to right,
+            var(--paper) 0%,
+            color-mix(in srgb, var(--paper) 94%, transparent) 36%,
+            color-mix(in srgb, var(--paper) 55%, transparent) 55%,
+            transparent 72%
+        );
+    }
+    .copy {
+        position: relative;
+        box-sizing: border-box;
+        height: 100%;
+        max-width: 700px;
+        padding: 64px 72px;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+    }
+    .kicker {
+        font-family: var(--font-mono);
+        font-size: 24px;
+        color: var(--crimson);
+        margin: 0 0 20px;
+    }
+    .title {
+        font-size: 96px;
+        font-weight: 340;
+        line-height: 0.98;
+        letter-spacing: -0.02em;
+        color: var(--ink);
+        margin: 0 0 28px;
+        font-variation-settings:
+            'opsz' 144,
+            'SOFT' 60,
+            'WONK' 1;
+    }
+    .note {
+        font-size: 36px;
+        line-height: 1.15;
+        max-width: 18ch;
+        margin: 0 0 28px;
+    }
+    .foot {
+        font-family: var(--font-mono);
+        font-size: 20px;
+        color: var(--ink-soft);
+        margin: 0;
+    }
+</style>
