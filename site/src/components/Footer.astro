@@ -75,28 +75,44 @@ const unique = credits.filter((c) => (seen.has(c.page_url) ? false : (seen.add(c
         --field: var(--crimson);
         --pen: var(--rose-soft);
         --caption: var(--rose-soft);
+        /* the height the plate shows bare before the wash starts */
+        --band: min(46vh, 70vw);
+        position: relative;
+        isolation: isolate;
         background: var(--crimson);
         color: var(--paper);
         padding-bottom: var(--space-7);
     }
+    /* The shore plate runs under the whole footer; a translucent crimson wash
+       rises over it where the text sits, so the engraving still shows through. */
     .footer__band {
-        max-height: 46vh;
+        position: absolute;
+        inset: 0;
+        z-index: -2;
         overflow: hidden;
-        border-bottom: 1px solid color-mix(in srgb, var(--paper) 25%, transparent);
-        mask-image: linear-gradient(to bottom, black 70%, transparent);
     }
     .footer__band :global(.halftone) {
         aspect-ratio: auto;
-        max-height: 46vh;
+        height: 100%;
     }
     .footer__band :global(img) {
         object-position: center 30%;
-        max-height: 46vh;
+    }
+    .footer::before {
+        content: '';
+        position: absolute;
+        inset: 0;
+        z-index: -1;
+        background: linear-gradient(
+            to bottom,
+            transparent calc(var(--band) * 0.55),
+            color-mix(in srgb, var(--crimson) 82%, transparent) var(--band)
+        );
     }
     .footer__grid {
         display: grid;
         gap: var(--space-6);
-        padding-top: var(--space-7);
+        padding-top: calc(var(--band) + var(--space-7));
     }
     @media (min-width: 48rem) {
         .footer__grid {
