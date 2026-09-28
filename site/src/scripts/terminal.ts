@@ -10,9 +10,11 @@ function spanEl(s: Span): HTMLSpanElement {
     return el;
 }
 
-function lineEl(spans: Span[]): HTMLDivElement {
+function lineEl(spans: Span[], anchor?: string): HTMLDivElement {
     const line = document.createElement('div');
     line.className = 'tui__line';
+    // What a margin note beside the run finds this line by (scripts/run-notes.ts).
+    if (anchor) line.dataset.anchor = anchor;
     for (const s of spans) line.append(spanEl(s));
     return line;
 }
@@ -30,7 +32,7 @@ export class TerminalPlayer {
     }
 
     private place(frame: Frame): HTMLElement {
-        const el = lineEl(frame.spans);
+        const el = lineEl(frame.spans, frame.anchor);
         const prev = frame.id ? this.lines.get(frame.id) : undefined;
         if (prev) prev.replaceWith(el);
         else this.out.append(el);
@@ -67,7 +69,7 @@ export class TerminalPlayer {
                 // Type the last span character by character, the earlier spans at once.
                 const head = frame.spans.slice(0, -1);
                 const tail = frame.spans[frame.spans.length - 1];
-                const line = lineEl(head);
+                const line = lineEl(head, frame.anchor);
                 const typed = spanEl({ text: '', tone: tail?.tone });
                 line.append(typed);
                 this.out.append(line);

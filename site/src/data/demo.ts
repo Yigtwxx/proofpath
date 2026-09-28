@@ -19,6 +19,9 @@ export interface Frame {
     id?: string;
     /** `type` frames are typed character by character. */
     type?: boolean;
+    /** Where a margin note beside the run may point: `name` opens its span of lines,
+     *  `name-end` closes it (`data-note-for` on the note). */
+    anchor?: string;
     spans: Span[];
 }
 
@@ -80,10 +83,11 @@ export const frames: Frame[] = [
             { text: '  running', tone: 'dim' },
         ],
     },
-    { wait: 250, id: 's1', spans: stage('⏺', 'Parsing', '', '', '') },
+    { wait: 250, id: 's1', anchor: 'stages', spans: stage('⏺', 'Parsing', '', '', '') },
     {
         wait: 450,
         id: 's1',
+        anchor: 'stages',
         spans: stage('✓', 'Parsing', '1 pages · 7 refs', 'text', '0.0s'),
     },
     { wait: 150, id: 's2', spans: stage('⏺', 'Claims', '', '', '') },
@@ -106,10 +110,11 @@ export const frames: Frame[] = [
         id: 's5',
         spans: stage('✓', 'Fetching', '5 full text · 1 abstract · 0 unverified', 'cache', '0.0s'),
     },
-    { wait: 150, id: 's6', spans: stage('⏺', 'Verifying', '', '', '') },
+    { wait: 150, id: 's6', anchor: 'stages-end', spans: stage('⏺', 'Verifying', '', '', '') },
     {
         wait: 900,
         id: 's6',
+        anchor: 'stages-end',
         spans: stage(
             '✓',
             'Verifying',
@@ -129,6 +134,7 @@ export const frames: Frame[] = [
     { wait: 250, spans: [{ text: '─'.repeat(78), tone: 'dim' }] },
     {
         wait: 350,
+        anchor: 'ghost',
         spans: [
             { text: '✗ ', tone: 'bad' },
             { text: 'L41  [7] Marchetti, L. R., Osei, K. & Lind…   ' },
@@ -137,6 +143,7 @@ export const frames: Frame[] = [
     },
     {
         wait: 250,
+        anchor: 'ghost-end',
         spans: [
             { text: '       arxiv and openlibrary consulted before the ghost call', tone: 'dim' },
         ],
@@ -151,6 +158,7 @@ export const frames: Frame[] = [
     },
     {
         wait: 400,
+        anchor: 'you',
         spans: [
             { text: '✗ ', tone: 'bad' },
             { text: 'L6   [1] Vaswani, A., Shazeer, N., Parmar,…    ' },
@@ -178,6 +186,7 @@ export const frames: Frame[] = [
     },
     {
         wait: 200,
+        anchor: 'you-end',
         spans: [
             { text: '       source  ', tone: 'source' },
             {
@@ -197,6 +206,7 @@ export const frames: Frame[] = [
     { wait: 300, spans: [{ text: '─'.repeat(78), tone: 'dim' }] },
     {
         wait: 200,
+        anchor: 'coverage',
         spans: [
             { text: '██████████████████████', tone: 'ok' },
             { text: '▓▓▓▓', tone: 'warn' },
@@ -207,6 +217,7 @@ export const frames: Frame[] = [
     { wait: 200, spans: [{ text: '7 refs: 1 ghost, 2 unsupported, 4 ok', tone: 'plain' }] },
     {
         wait: 150,
+        anchor: 'coverage-end',
         spans: [{ text: 'no report written · 0 API calls · 0.8s', tone: 'dim' }],
     },
 ];
