@@ -8,13 +8,13 @@ import SketchIcon from './sketch/SketchIcon.astro';
 
 <div class="reads">
     {readColumns.map((column) => (
-        <SketchBox as="section" padding="md" tone={column.tone} draw class="reads__column">
+        <SketchBox as="section" padding="md" tone={column.tone} class="reads__column">
             <h3 class:list={['reads__title', `tone-${column.tone}`]}>{column.title}</h3>
             <p class="marginalia reads__lede">{column.lede}</p>
             <ul class="reads__items">
                 {column.items.map((item) => (
                     <li class="reads__item">
-                        <SketchIcon name={item.icon} tone={column.tone} draw />
+                        <SketchIcon name={item.icon} tone={column.tone} />
                         <span class="reads__text">
                             <span class="reads__name">{item.name}</span>
                             <span class="reads__note">{item.note}</span>

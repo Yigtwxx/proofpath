@@ -22,7 +22,7 @@ import SketchArrow from './sketch/SketchArrow.astro';
             links to. A page that prints a reference list is paired by citation number, like a
             paper.
         </p>
-        <SketchBox padding="md" draw class="posts__commands">
+        <SketchBox padding="md" class="posts__commands">
             <div class="posts__pre" role="figure" aria-label="Command examples for posts">
                 {postCommands.map((c) => (
                     <div class="posts__line">
@@ -44,7 +44,7 @@ import SketchArrow from './sketch/SketchArrow.astro';
                             <span class="posts__name">{p.name}</span>
                             {p.state ? (
                                 <span class="posts__state">
-                                    <SketchBadge label={p.state.label} tone={p.state.tone} draw />
+                                    <SketchBadge label={p.state.label} tone={p.state.tone} />
                                 </span>
                             ) : null}
                         </th>
