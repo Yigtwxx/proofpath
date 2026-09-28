@@ -48,6 +48,11 @@ export const readColumns: readonly ReadColumn[] = [
                 name: 'Sites that block robots',
                 note: 'your OK for a 280 MB browser, asked first',
             },
+            {
+                icon: 'search',
+                name: 'Claims with no source',
+                note: 'searched on the web: a free Tavily key, or your own SearXNG',
+            },
         ],
     },
     {
