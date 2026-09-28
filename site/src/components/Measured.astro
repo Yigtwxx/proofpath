@@ -186,8 +186,9 @@ import CoverageBar from './CoverageBar.astro';
     }
     .measured__against {
         display: block;
-        color: var(--paper);
-        opacity: 0.85;
+        /* The softer tone the field allows at AA (4.69:1); paper at 85% opacity
+           came out 4.12. */
+        color: var(--rose-soft);
     }
     .measured__link {
         font-family: var(--font-hand);

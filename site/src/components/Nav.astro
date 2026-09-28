@@ -8,6 +8,7 @@ import { repo } from '../data/commands';
 const links = [
     { href: '#run', label: 'A run' },
     { href: '#levels', label: 'Three questions' },
+    { href: '#reads', label: 'Reads' },
     { href: '#rules', label: 'Rules' },
     { href: '#posts', label: 'Posts' },
     { href: '#measured', label: 'Measured' },
@@ -61,7 +62,9 @@ const links = [
         z-index: 20;
         color: var(--paper);
         backdrop-filter: blur(6px);
-        background: color-mix(in srgb, var(--field) 82%, transparent);
+        /* 92%, not less: paper text needs 4.5:1 over what shows through (4.84 here;
+           82% gave 4.21 over the paper page). */
+        background: color-mix(in srgb, var(--field) 92%, transparent);
         border-bottom: 1px solid color-mix(in srgb, currentColor 18%, transparent);
     }
     .nav__row {
@@ -160,6 +163,14 @@ const links = [
         .nav__links a:focus-visible .nav__ul path,
         .nav__links a[aria-current='true'] .nav__ul path {
             opacity: 1;
+        }
+    }
+    /* Tablet: the full row ran into the wordmark under ~755 px and sat 14 px from it
+       at 780. The two links whose sections are nearest a neighbour go first. */
+    @media (max-width: 52rem) {
+        .nav__links [href='#reads'],
+        .nav__links [href='#judge'] {
+            display: none;
         }
     }
     @media (max-width: 40rem) {

@@ -1,7 +1,8 @@
 ---
 /* A dithered engraving from the manifest. Two-level PNGs with a transparent
    tone, so the field behind decides the second colour; the `dense` variant is
-   cross-faded in on hover, which reads as the print darkening under the hand. */
+   cross-faded in on hover, which reads as the print darkening under the hand. It
+   is fetched on the first hover, not with the page (scripts/halftone-hover.ts). */
 import { images, type GeneratedImage, type ImageId, type Tone } from '../data/images.generated';
 import { withBase } from '../lib/base';
 
@@ -82,8 +83,8 @@ const timeline = typeof drift === 'string' && drift.startsWith('--') ? drift : n
     {hover && denseSrcset ? (
         <img
             class="halftone__img halftone__img--dense"
-            src={denseFallback}
-            srcset={denseSrcset}
+            data-src={denseFallback}
+            data-srcset={denseSrcset}
             sizes={sizes}
             width={width}
             height={height}
@@ -119,7 +120,7 @@ const timeline = typeof drift === 'string' && drift.startsWith('--') ? drift : n
         transition: opacity 260ms ease;
     }
     @media (hover: hover) {
-        .halftone--hover:hover .halftone__img--dense {
+        .halftone--hover.has-dense:hover .halftone__img--dense {
             opacity: 1;
         }
     }

@@ -1,0 +1,98 @@
+---
+/* Not found, in the tool's own words: an address with nothing behind it is reported
+   the way proofpath reports a reference with nothing behind it. */
+import Layout from '../layouts/Layout.astro';
+import Halftone from '../components/Halftone.astro';
+import SketchBox from '../components/sketch/SketchBox.astro';
+import SketchBadge from '../components/sketch/SketchBadge.astro';
+import SketchUnderline from '../components/sketch/SketchUnderline.astro';
+import { withBase } from '../lib/base';
+---
+
+<Layout title="Not found — proofpath" description="There is nothing at this address." noindex>
+    <main class="lost" id="main">
+        <div class="page lost__grid">
+            <div class="lost__copy">
+                <p class="lost__code">error[ghost-reference]</p>
+                <h1 class="lost__title">
+                    Nothing at this{' '}
+                    <SketchUnderline tone="crimson" draw>
+                        address.
+                    </SketchUnderline>
+                </h1>
+                <SketchBox padding="md" draw class="lost__finding">
+                    <p class="lost__line">
+                        <SketchBadge label="GHOST REFERENCE" tone="bad" draw />
+                    </p>
+                    <p class="lost__detail">
+                        This page was looked for and not found. The address may be mistyped, or the
+                        page has moved.
+                    </p>
+                </SketchBox>
+                <p class="lost__back">
+                    <a href={withBase('/')}>Back to the evidence</a>
+                </p>
+            </div>
+            <figure class="lost__figure">
+                <Halftone
+                    id="muninn"
+                    tone="paper"
+                    hover={false}
+                    vignette
+                    loading="eager"
+                    sizes="18rem"
+                />
+            </figure>
+        </div>
+    </main>
+</Layout>
+
+<style>
+    .lost {
+        min-height: 100vh;
+        display: grid;
+        align-items: center;
+        padding-block: var(--space-8);
+    }
+    .lost__grid {
+        display: grid;
+        gap: var(--space-7);
+        align-items: center;
+    }
+    @media (min-width: 64rem) {
+        .lost__grid {
+            grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
+        }
+    }
+    .lost__code {
+        font-family: var(--font-mono);
+        font-size: var(--step--1);
+        color: var(--crimson);
+        margin: 0 0 var(--space-4);
+    }
+    .lost__title {
+        font-size: var(--step-5);
+        margin: 0 0 var(--space-6);
+        max-width: 14ch;
+    }
+    .lost__line {
+        margin: 0 0 var(--space-3);
+    }
+    .lost__detail {
+        margin: 0;
+        color: var(--ink-soft);
+        max-width: 42ch;
+    }
+    .lost__back {
+        margin: var(--space-6) 0 0;
+        font-size: var(--step-1);
+    }
+    .lost__back a {
+        color: var(--crimson);
+    }
+    .lost__figure {
+        margin: 0;
+        max-width: 18rem;
+        justify-self: center;
+    }
+</style>
