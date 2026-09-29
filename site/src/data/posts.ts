@@ -62,7 +62,7 @@ export const platforms: readonly Platform[] = [
     },
     {
         name: 'X',
-        how: 'Cannot be read at all. The run says so and asks you to paste the text; the links inside it are then verified as usual.',
+        how: 'Cannot be read at all. The run says so and asks you to paste the text; the links inside it are then verified as usual, and with evidence search set up a text with no link is searched (experimental).',
         state: { label: 'paste the text', tone: 'ink' },
     },
 ];

@@ -188,6 +188,10 @@ distinct, printed state (spec §15), never collapsed into a verdict:
 | `AMBIGUOUS` | several plausible records, all listed |
 | `NEI` | the source was read and neither supports nor contradicts |
 | `PARAGRAPH-SCOPED` | the citation covers a paragraph; each sentence is judged separately |
+| `FOUND BY PROOFPATH (not cited by the author)` | evidence search (experimental): proofpath found this page itself, for a text that cited nothing; the verdict still quotes its passage |
+| `NO EVIDENCE FOUND (searched)` | the search ran and no page it found confirmed or contradicted the claim; never `REFUTED` |
+| `UNVERIFIED (search unavailable)` | the search provider did not answer |
+| `UNVERIFIED (language not supported)` | the claim is not in English and no judge translated it; the models read English only |
 | `UNSUPPORTED CITATION STYLE` | reserved; no detected style produces it in v0.2 |
 
 An earlier build sometimes aborted with `134` after printing a complete report (ONNX
