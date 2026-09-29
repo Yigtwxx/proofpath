@@ -6,6 +6,51 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.8] - 2026-09-29
+
+A text that cites nothing can now be checked: proofpath searches the web for it. And
+the judge no longer goes quiet when Groq's free tier runs out.
+
+### Added
+- **Evidence search for claims with no source (experimental).** A pasted post or plain
+  text with no link, no `[12]` marker and no bibliography used to end in a parse error.
+  With `search.provider` set to `tavily` (a free key in `TAVILY_API_KEY`) or `searxng`
+  (plus `search.base_url`), up to 5 check-worthy sentences are searched, up to 3 pages
+  each. Every page is fetched and read like any other source; the search result's own
+  snippet is never evidence. Findings are marked `FOUND BY PROOFPATH (not cited by the
+  author)`: `SUPPORTED`/`REFUTED (found by proofpath)` carry their passage, and a claim
+  nothing confirmed is `NO EVIDENCE FOUND (searched)`, never `REFUTED`. Setting the
+  provider is the consent; `--no-search` turns it off for one run and
+  `permissions.web_search = deny` for good. A run that searched only some of its
+  check-worthy claims says so and exits 1. AVeriTeC search mode scores 0.404
+  against a 0.708 majority baseline, which is why it is marked experimental.
+- **Queries and translation by the judge.** With `--judge`, the model writes the search
+  queries and translates a non-English claim; the report shows your sentence and a
+  `checked as: …` line. Without a judge, a claim that is not in English is
+  `UNVERIFIED (language not supported)` rather than checked by English-only models.
+- **Local fallback judge.** When Groq hits its rate limit, rejects the key or stops
+  answering, the run switches at once to `qwen3.5:9b` in your local Ollama, if it is
+  installed. There is no retry and no wait, and the request that failed is sent again,
+  so no batch is lost. The switch and its cause appear on stderr, in the TUI just above
+  the prompt, and in the report. The next run tries the configured API first again.
+  proofpath never pulls the model; `judge.fallback off` turns this off. Without the
+  model, the run says how to add it (install Ollama, `ollama pull qwen3.5:9b`).
+- `/config` rows for `[search]` and `permissions.web_search`, and footer lines for what
+  was searched.
+- `scripts/eval_averitec.py --search` measures the product's own search path, leaving
+  out the claim's fact-checking site.
+
+### Changed
+- The `ollama` judge's default model is now `qwen3.5:9b` (was `llama3.1`), always
+  asked with reasoning off.
+- The X hint says a pasted text with no link is searched when a provider is set.
+- Pages proofpath found on its own are fetched without the contact address.
+
+### Fixed
+- A bibliography entry that is only a DOI or arXiv URL is never reported as a
+  `GHOST REFERENCE`. It resolves, or it is `AMBIGUOUS`. A cache migration (v5) drops
+  ghost results cached under the old rule, so they are checked again.
+
 ## [0.4.7] - 2026-09-18
 
 Two more platforms a post can be read from without an account: Lobste.rs and Lemmy.
