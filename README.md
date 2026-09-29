@@ -336,7 +336,7 @@ fallback below takes over; only if that fails too is the plain sentence searched
 the report says so.
 
 **This is experimental.** On AVeriTeC's search scenario, proofpath scores
-`<<AVERITEC_SEARCH_SCORE>>` against a 0.708 majority baseline, and every report from a
+[**0.404**](docs/eval/2026-09-29-averitec-search.md) against a 0.708 majority baseline, and every report from a
 run that searched prints that line at the top.
 
 ## Optional LLM judge (v0.3)

@@ -59,7 +59,7 @@ SEARCH_UNAVAILABLE = f"{UNVERIFIED_PREFIX} (search unavailable)"
 LANGUAGE_UNSUPPORTED = f"{UNVERIFIED_PREFIX} (language not supported)"
 # The §17.1 gate: printed on every run that searched until the eval beats the
 # majority baseline. Updated by hand from docs/eval/*-averitec-search.md.
-AVERITEC_SEARCH_SCORE = "not measured yet"
+AVERITEC_SEARCH_SCORE = "0.404"
 AVERITEC_BASELINE = "0.708"
 
 
