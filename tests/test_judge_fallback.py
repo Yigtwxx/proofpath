@@ -545,6 +545,117 @@ def test_fallback_off_never_asks_ollama_and_keeps_the_retries(mock: respx.MockRo
     assert local.call_count == 0
 
 
+# --- the install hint ----------------------------------------------------------------
+#
+# When there is no local model to switch to, the run could still get one. The hint is
+# delivered through the same channel as the switch notice (``on_switch``) so cli, tui
+# and the report footer need nothing new to show it -- but it is never a notice
+# (``switched``): nothing switched, and false-ghost-style overclaiming is exactly
+# what spec section 8 forbids one state pretending to be another.
+
+HINT_UNREACHABLE = (
+    f"install Ollama (https://ollama.com) and run: ollama pull {LOCAL} — "
+    "the judge then keeps going locally when Groq runs out"
+)
+HINT_MISSING = f"run: ollama pull {LOCAL} — the judge then keeps going locally when Groq runs out"
+
+
+def test_an_unreachable_ollama_offers_to_install_it(mock: respx.MockRouter) -> None:
+    routes(mock, tags=httpx.ConnectError("refused"))
+    seen: list[str] = []
+    client = fallback(on_switch=seen.append)
+    with pytest.raises(judge.JudgeUnavailable):
+        client.complete(MESSAGES)
+
+    assert seen == [HINT_UNREACHABLE]
+    assert client.hint == HINT_UNREACHABLE
+    assert client.switched is None  # a hint is not a notice: nothing switched
+
+
+def test_a_missing_model_offers_to_pull_it(mock: respx.MockRouter) -> None:
+    """Ollama answers, but not with the configured model: the shorter hint, since
+    Ollama itself does not need installing."""
+    routes(mock, tags=_tags("gemma4:12b"))
+    seen: list[str] = []
+    client = fallback(on_switch=seen.append)
+    with pytest.raises(judge.JudgeUnavailable):
+        client.complete(MESSAGES)
+
+    assert seen == [HINT_MISSING]
+    assert client.hint == HINT_MISSING
+
+
+def test_the_hint_is_offered_only_once_per_run(mock: respx.MockRouter) -> None:
+    routes(mock, tags=httpx.ConnectError("refused"))
+    seen: list[str] = []
+    client = fallback(on_switch=seen.append)
+    for _ in range(3):
+        with pytest.raises(judge.JudgeUnavailable):
+            client.complete(MESSAGES)
+
+    assert seen == [HINT_UNREACHABLE]  # once, not once per failed call
+
+
+def test_fallback_off_gets_no_hint(mock: respx.MockRouter) -> None:
+    """The user turned the fallback off themselves; there is nothing to suggest."""
+    routes(mock)
+    seen: list[str] = []
+    client = fallback(setting="off", on_switch=seen.append)
+    with pytest.raises(judge.JudgeUnavailable):
+        client.complete(MESSAGES)
+
+    assert seen == []
+    assert client.hint is None
+
+
+def test_an_ollama_primary_gets_no_hint() -> None:
+    """``judge.provider ollama`` has no fallback behind it to suggest (spec 11)."""
+    client = judge.build_client(judge.provider_defaults("ollama"), None)
+    assert not isinstance(client, judge.FallbackClient)
+    assert judge.Judge(client).hint is None
+
+
+def test_a_run_with_no_fallback_offers_the_hint_once_and_the_footer_carries_it(
+    mock: respx.MockRouter,
+) -> None:
+    routes(mock, tags=httpx.ConnectError("refused"))
+    built = searching(StubSearcher())
+    built.judge = judge.Judge(judge.build_client(GROQ, KEY))
+    events: list[Event] = []
+    report = verify_mod.verify(CLAIM, built, on_event=events.append)
+
+    notices = [event for event in events if isinstance(event, Note) and event.notice]
+    assert [note.text for note in notices] == [HINT_UNREACHABLE]
+    assert report.judge_notice == HINT_UNREACHABLE
+    footer = render_footer(report)
+    assert footer.judge_notice == HINT_UNREACHABLE
+    markdown = render_markdown(report)
+    assert f"- judge fallback: {HINT_UNREACHABLE}" in markdown
+
+
+def test_the_cli_prints_the_install_hint_on_stderr(
+    mock: respx.MockRouter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    routes(mock, tags=httpx.ConnectError("refused"))
+    monkeypatch.setenv("GROQ_API_KEY", KEY.value)
+    monkeypatch.setenv("PROOFPATH_CONFIG_DIR", str(tmp_path / "conf"))
+    built = searching(StubSearcher())
+
+    def fake_default(config: Config, **kwargs: Any) -> verify_mod.Engine:
+        built.judge = kwargs["judge"]
+        built.escalate = kwargs.get("escalate", True)
+        return built
+
+    monkeypatch.setattr(verify_mod.Engine, "default", staticmethod(fake_default))
+    target = tmp_path / "claim.txt"
+    target.write_text(CLAIM, encoding="utf-8")
+    result = runner.invoke(app, ["check", str(target), "--judge", "--format", "json"])
+
+    assert HINT_UNREACHABLE in result.stderr
+    assert json.loads(result.stdout)["judge_notice"] == HINT_UNREACHABLE
+    assert KEY.value not in result.output
+
+
 def test_a_users_own_override_is_honoured_as_written(mock: respx.MockRouter) -> None:
     """``judge.fallback`` names a model: it is checked against the tags and used as
     written. The name here is a stand-in, not a model proofpath knows about."""

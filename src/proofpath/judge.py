@@ -556,6 +556,20 @@ JUDGE_FALLBACK_DOWN = _DOWN_HEAD + _JUDGING
 #: What ``switched`` says once the local model has failed too: the primary's reason,
 #: then the local one. "Judging with local ollama" would then be false (final review).
 JUDGE_FALLBACK_FAILED = "{head}, and local ollama {model} failed too ({cause})"
+#: The install/pull hint: offered once, beside the original error, when there is no
+#: fallback for a reason the user can fix by adding the local model -- never when
+#: they chose ``judge.fallback = off`` themselves, and never a notice of a switch
+#: that did not happen (``JudgeClient.hint`` is its own attribute, apart from
+#: ``switched``, so the two states are never conflated). ``{model}`` is the fallback
+#: as configured (``judge.fallback``, ``qwen3.5:9b`` unless the user named another);
+#: ``{provider}`` the primary's display name, same as the switch notices above.
+JUDGE_FALLBACK_HINT_UNREACHABLE = (
+    "install Ollama (https://ollama.com) and run: ollama pull {model} — "
+    "the judge then keeps going locally when {provider} runs out"
+)
+JUDGE_FALLBACK_HINT_MISSING = (
+    "run: ollama pull {model} — the judge then keeps going locally when {provider} runs out"
+)
 #: The statuses that mean "over the provider's limit", read wherever a limit is named
 #: (the switch notice, the search's fallback notice), so both classify it one way.
 LIMIT_STATUSES = frozenset({429, 413})  # Groq answers 413 when a request busts TPM
@@ -668,6 +682,11 @@ class _Plan:
 
     model: str | None
     why: str = ""
+    #: The hint template for ``why``, or ``None`` when there is nothing to suggest
+    #: (a fallback, or the user's own ``off``). Formatted with the model and provider
+    #: only once the primary has actually failed (``_switch``): asking Ollama is
+    #: already paid for here, but the hint is only worth showing beside a real error.
+    hint: str | None = None
 
 
 class FallbackClient:
@@ -706,6 +725,11 @@ class FallbackClient:
         self.on_switch = on_switch
         #: The notice, once the switch has happened; ``None`` before.
         self.switched: str | None = None
+        #: The install/pull hint, once raised for this run; ``None`` before, and
+        #: ``None`` for good when there was nothing to suggest. Apart from
+        #: ``switched``: a hint is offered instead of a switch, never alongside one,
+        #: and the two must never be read as the same thing.
+        self.hint: str | None = None
         # Worker threads share one client (the TUI's summary, a run's stages): the
         # plan and the switch go through this lock so that exactly one thread
         # switches and every other one sees the result.
@@ -775,6 +799,7 @@ class FallbackClient:
             self._plan = None
             self._dead = None
             self.switched = None
+            self.hint = None
             self._primary_detail = ""
             self._primary_failure = None
             self._notice = None
@@ -901,37 +926,58 @@ class FallbackClient:
             return _Plan(None, _WHY_OFF)
         names = _tags(self._ollama_url, timeout=TAGS_TIMEOUT)
         if names is None:
-            return _Plan(None, f"ollama is not reachable at {_ollama_root(self._ollama_url)}")
+            return _Plan(
+                None,
+                f"ollama is not reachable at {_ollama_root(self._ollama_url)}",
+                hint=JUDGE_FALLBACK_HINT_UNREACHABLE,
+            )
         if not _installed(setting, names):
-            return _Plan(None, f"{setting} is not installed")
+            return _Plan(None, f"{setting} is not installed", hint=JUDGE_FALLBACK_HINT_MISSING)
         return _Plan(setting)  # as written: the user's own spelling of the name
 
     def _switch(self, failure: JudgeUnavailable) -> tuple[JudgeClient, str | None]:
         """Switch once: the local client, and the notice when *this* call switched.
 
-        Raises the primary's error, with the reason, when there is no fallback. The
-        notice is returned rather than sent from here: the listener runs after the
-        lock is released, so a slow or blocking listener can never hold another
-        thread's switch (fix round 1, C).
+        Raises the primary's error, with the reason, when there is no fallback. When
+        that reason is one the user can fix -- Ollama unreachable, the model not
+        installed, never ``judge.fallback = off`` -- the hint goes out through the
+        same listener the switch notice uses, once per run (the ``self.hint is None``
+        guard: this branch runs again on every later call, since without a local
+        client nothing ever leaves ``_route`` early). The detail the error carries is
+        unchanged; the hint travels beside it, never inside it.
+
+        The notice (or hint) is announced after the lock is released, same as a
+        switch: the listener runs after the lock is released, so a slow or blocking
+        listener can never hold another thread's switch (fix round 1, C).
         """
+        hint: str | None = None
         with self._lock:
             if self._local is not None:
                 return self._local, None  # another thread switched while we waited
             plan = self._plan
             if plan is None or plan.model is None:
                 why = _WHY_OFF if plan is None else plan.why
-                raise JudgeUnavailable(
+                if plan is not None and plan.hint is not None and self.hint is None:
+                    hint = plan.hint.format(
+                        model=self._fallback, provider=_display(self._primary.provider)
+                    )
+                    self.hint = hint
+                error = JudgeUnavailable(
                     f"{failure}; no local fallback: {why}",
                     status=failure.status,
                     cause=failure.cause,
-                ) from None
-            notice = _notice(self._primary.provider, plan.model, failure)
-            self._primary_detail = str(failure)
-            self._primary_failure = failure
-            self._notice = notice
-            self._local = self._local_factory(plan.model, self._ollama_url)
-            self.switched = notice
-            return self._local, notice
+                )
+            else:
+                notice = _notice(self._primary.provider, plan.model, failure)
+                self._primary_detail = str(failure)
+                self._primary_failure = failure
+                self._notice = notice
+                self._local = self._local_factory(plan.model, self._ollama_url)
+                self.switched = notice
+                return self._local, notice
+        if hint is not None:
+            self._announce(hint)
+        raise error from None
 
 
 def _head(provider: str, failure: JudgeUnavailable) -> str:
@@ -1166,6 +1212,12 @@ class Judge:
     def switched(self) -> str | None:
         """The local-fallback notice once this run has switched, else ``None``."""
         return self._client.switched if isinstance(self._client, FallbackClient) else None
+
+    @property
+    def hint(self) -> str | None:
+        """The install/pull hint this run has raised, once there is one, else
+        ``None``. Distinct from ``switched``: a hint means nothing switched."""
+        return self._client.hint if isinstance(self._client, FallbackClient) else None
 
     def listen(self, on_switch: Callable[[str], None] | None) -> None:
         """Point the switch notice at whoever is watching this run.

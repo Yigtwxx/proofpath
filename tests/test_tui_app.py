@@ -3516,6 +3516,28 @@ async def test_the_judge_notice_sits_right_aligned_directly_above_the_prompt() -
         assert footer.region.bottom == frame.region.y
 
 
+INSTALL_HINT = (
+    "install Ollama (https://ollama.com) and run: ollama pull qwen3.5:9b — "
+    "the judge then keeps going locally when Groq runs out"
+)
+
+
+async def test_the_judge_notice_shows_the_install_hint_when_there_is_no_fallback() -> None:
+    """No local model to switch to: the hint rides the same row the switch notice
+    uses (spec section 11 addendum) -- it is a ``Note(notice=True)`` like any other."""
+    app, schedulers = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        notice = app.query_one(JudgeNotice)
+        scheduler = schedulers[0]
+        await submit(pilot, "/check draft.md")
+        run = scheduler.runs[0]
+        scheduler.push(run, Note(INSTALL_HINT, notice=True))
+        await pilot.pause()
+
+        assert notice.display
+        assert notice.text == INSTALL_HINT
+
+
 async def test_an_ordinary_note_never_shows_the_judge_notice() -> None:
     app, schedulers = build_app()
     async with app.run_test(size=SIZE) as pilot:

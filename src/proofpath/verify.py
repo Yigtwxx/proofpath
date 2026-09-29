@@ -1372,7 +1372,10 @@ def decide_all(
         tier_note=pipeline.tier_note(engine.thresholds),
         cancelled=cancelled,
         search=prepared.search,
-        judge_notice=None if engine.judge is None else engine.judge.switched,
+        # The hint (no fallback, but one is worth adding) rides the same one-line
+        # footer field as the switch notice: never both, since a hint means nothing
+        # switched (spec section 11 addendum).
+        judge_notice=None if engine.judge is None else (engine.judge.switched or engine.judge.hint),
     )
     if cancelled:
         raise Cancelled("run cancelled", report=report)
@@ -1467,7 +1470,7 @@ def _summarise(
         # The extra call is part of what the run took; a footer that left it out
         # would price the summary at nothing.
         elapsed=time.monotonic() - started,
-        judge_notice=judge.switched or report.judge_notice,
+        judge_notice=judge.switched or judge.hint or report.judge_notice,
     )
 
 
