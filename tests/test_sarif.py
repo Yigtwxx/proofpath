@@ -423,3 +423,5 @@ def test_a_search_run_states_its_search_in_the_run_properties() -> None:
     props = to_sarif(report, artifact="draft.md")["runs"][0]["properties"]
     assert props["evidenceSearch"]["pagesRead"] == 1
     assert props["evidenceSearch"]["experimental"] is True
+    assert next(iter(props["evidenceSearch"])) == "banner"
+    assert props["evidenceSearch"]["banner"].startswith("evidence search is experimental")

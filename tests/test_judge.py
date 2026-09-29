@@ -983,3 +983,34 @@ def test_known_providers_are_the_provider_table_sorted() -> None:
     accepts, in the order its own error message lists them."""
     assert judge.known_providers() == ("gemini", "groq", "ollama")
     assert judge.known_providers() == tuple(sorted(judge._PROVIDERS))
+
+
+# --- the queries budget (final review, minor) ------------------------------------------
+
+
+@respx.mock
+def test_queries_leave_a_reasoning_model_room_to_think_and_answer_five_claims() -> None:
+    """``gpt-oss-120b`` charges its thinking to ``max_tokens``. Five claims answered in
+    full -- an English text and two queries each -- are ~170 tokens apiece, so 1500
+    left a low-effort reasoning pass ~650 tokens before ``finish_reason=length``
+    cost every query and every translation."""
+    route = respx.post(OLLAMA_URL).mock(return_value=_ok('{"items": []}'))
+    asker = judge.Judge(judge.JudgeClient(PASSTHROUGH, None))
+    claims = ["x" * 300] * 5
+    asker.queries(claims)
+
+    sent = json.loads(route.calls.last.request.content)
+    one_answer = judge.estimate_tokens(
+        json.dumps({"id": 4, "english": "x" * 300, "queries": ["y" * 150, "y" * 150]})
+    )
+    assert sent["max_tokens"] >= 5 * one_answer + judge._QUERIES_REASONING_TOKENS
+    assert sent["reasoning_effort"] == "low"
+    # Prompt and answer budget together still fit a free tier's 8k tokens a minute.
+    prompt = sum(judge.estimate_tokens(m["content"]) for m in sent["messages"])
+    assert prompt + sent["max_tokens"] <= 8000
+    asker.close()
+
+
+def test_the_queries_budget_grows_with_the_batch_and_stays_under_its_ceiling() -> None:
+    assert judge._queries_budget(1) < judge._queries_budget(5)
+    assert judge._queries_budget(1000) == judge._QUERIES_MAX_TOKENS

@@ -113,7 +113,7 @@ from proofpath.report import (
 )
 from proofpath.resolve import Resolver, ResolveResult, Retraction, State
 from proofpath.retrieval import Embedder, FastEmbedder, PassageIndex
-from proofpath.search import Searcher, SearchHit, canonical, keep_hits
+from proofpath.search import Searcher, SearchKeyError, canonical, search_claim
 from proofpath.search.providers import build_searcher
 from proofpath.search.queries import plan_queries
 from proofpath.secrets import CREDENTIALS_MISSING
@@ -206,7 +206,13 @@ NO_EVIDENCE_NOTE = "absence of evidence is not evidence against the claim"
 # A claim the models cannot read: not English, and no judge translated it. It is not
 # searched, and it is not called NEI either (OPEN-ITEMS 17.1a, Amendment A).
 LANGUAGE_TITLE = "the claim is not in English and was not translated"
-LANGUAGE_HINT = "the models read English only; --judge translates a claim before it is searched"
+# True whether or not a judge was on (it may have been down, or echoed the claim), and
+# neutral about where it is run: a TUI run builds no judge, so the hint names the one
+# switch that does, rather than a TUI setting that would not help (round 2).
+LANGUAGE_HINT = (
+    "the models read English only, and no judge translated this claim; run with a "
+    "judge (--judge) to translate a claim before it is searched"
+)
 # What a translated claim's finding says was actually checked. After the numeric
 # reason, which ``report`` reads back out of ``detail[0]``.
 CHECKED_AS = "checked as: "
@@ -992,16 +998,25 @@ def prepare(
             continue
         # Which family this entry belongs to, decided once and used by all three
         # stages below. The core never learns what the answer means (spec 5.2).
-        provider = provider_for(reference, engine.providers)
+        # A page the search found is a page: it goes to the web family whatever its
+        # address carries. ``provider_for`` would file a found ``/doi/`` or arXiv
+        # address as a bibliography entry, and the indexes' answer to a bare URL used
+        # to be a false GHOST (final review, C1; product rule 3).
+        found = reference.origin == "search"
+        provider = engine.providers.web if found else provider_for(reference, engine.providers)
         chosen[number] = provider
         # The cache answers for a reference, not for a source: a reference has no
-        # source id until it resolves. A miss costs exactly what it used to.
-        stored = None if engine.cache is None else engine.cache.get_resolution(reference.raw)
+        # source id until it resolves. A miss costs exactly what it used to. A found
+        # page skips it both ways: the web family asks nobody, and a stored record of
+        # the same address was about a bibliography entry, not about this page.
+        stored = (
+            None if engine.cache is None or found else engine.cache.get_resolution(reference.raw)
+        )
         if stored is None:
             result = provider.resolve(reference)
             if provider.scheme == INDEXED_FAMILY:
                 resolved_from_indexes += 1
-            if engine.cache is not None:
+            if engine.cache is not None and not found:
                 # ``put_resolution`` drops UNVERIFIED (provider unavailable) itself:
                 # an outage is not knowledge about the reference (product rule 2).
                 engine.cache.put_resolution(reference.raw, result)
@@ -1988,11 +2003,14 @@ def _finding(
     source_id: str | None = None,
     fetch_step: int | None = None,
     detail: tuple[str, ...] = (),
+    claim: Claim | None = None,
 ) -> Finding:
-    """A finding from a stage: never about a claim, so never carrying a verdict.
+    """A finding from a stage: never carrying a verdict.
 
     ``state`` defaults to the kind's own word; only the ``UNVERIFIED`` family passes
     one, because which flavour applies depends on what failed (product rule 2).
+    ``claim`` is set by the searching stage, whose findings are about one sentence
+    and have no reference to point at: JSON and SARIF readers get the sentence.
     """
     return Finding(
         kind=kind,
@@ -2001,7 +2019,7 @@ def _finding(
         title=title,
         state=STATE_WORDS[kind] if state is None else state,
         reference=reference,
-        claim=None,
+        claim=claim,
         verdict=None,
         source_id=source_id,
         fetch_step=fetch_step,
@@ -2284,15 +2302,31 @@ def _search(
                     LANGUAGE_TITLE,
                     state=LANGUAGE_UNSUPPORTED,
                     detail=(LANGUAGE_HINT,),
+                    claim=claim,
                 )
             )
             emit(Progress(name=SEARCHING, done=index, total=total, detail=claim.locator.label()))
             check()
             continue
-        hits: list[SearchHit] = []
         try:
-            for query in queries:
-                hits.extend(searcher.search(query, settings.results_per_claim))
+            hits = search_claim(
+                queries, searcher, settings.results_per_claim, exclude=(own,) if own else ()
+            )
+        except SearchKeyError as exc:
+            # The provider answered, and refused the key: the fix is one line of .env,
+            # so it is the credential state a missing key already has, not an outage
+            # (spec 2026-09-28 section 4; final review, minor).
+            add(
+                _finding(
+                    Kind.UNVERIFIED,
+                    claim.locator,
+                    "the evidence search refused the key",
+                    state=CREDENTIALS_MISSING,
+                    detail=(str(exc),),
+                    claim=claim,
+                )
+            )
+            break
         except ProviderError as exc:
             add(
                 _finding(
@@ -2301,11 +2335,12 @@ def _search(
                     "the evidence search did not answer",
                     state=SEARCH_UNAVAILABLE,
                     detail=(f"{searcher.name}: {exc}",),
+                    claim=claim,
                 )
             )
             break
         cited: list[int] = []
-        for hit in keep_hits(hits, own_host=own, limit=settings.results_per_claim):
+        for hit in hits:
             key = canonical(hit.url)
             if key not in numbers:
                 numbers[key] = len(references) + 1

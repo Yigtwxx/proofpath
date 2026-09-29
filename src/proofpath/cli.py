@@ -632,6 +632,11 @@ def check(
     else:
         written = _write_report(out, report, out_path, default=True)
         ui.blank(out)
+        banner = report_mod.search_banner(report)
+        if banner is not None:
+            # At the top of the report, before the first finding (spec 2026-09-28
+            # section 5), and never suppressed: it qualifies everything below it.
+            ui.kv(out, "search", banner)
         for item in report_mod.render_diagnostics(report):
             ui.diagnostic(out, item)
         ui.blank(out)

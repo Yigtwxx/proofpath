@@ -23,6 +23,8 @@ from proofpath.report import (
     SEARCH_UNAVAILABLE,
     Kind,
 )
+from proofpath.resolve import ResolveResult, State
+from proofpath.sarif import to_sarif
 from proofpath.search import SearchHit
 from proofpath.search.queries import LLM_LIMIT, sentence_query
 from proofpath.secrets import CREDENTIALS_MISSING
@@ -44,6 +46,7 @@ from tests.test_verify import (
     SUPPORTED_ROW,
     FakeJudgeClient,
     StubFetcher,
+    StubResolver,
     _opinion,
     engine,
     fetched,
@@ -338,7 +341,8 @@ def test_the_cap_limits_the_search_and_the_rest_is_counted() -> None:
 def test_a_rate_limited_judge_falls_back_to_the_sentence_and_the_report_says_so() -> None:
     searcher = StubSearcher()
     built = searching(searcher)
-    built.judge = Judge(FakeJudgeClient([JudgeUnavailable("HTTP 429 from https://api.test")]))  # type: ignore[arg-type]
+    limited = JudgeUnavailable("HTTP 429 from https://api.test", status=429)
+    built.judge = Judge(FakeJudgeClient([limited]))  # type: ignore[arg-type]
     report = verify(CLAIM, built)
     assert searcher.queries == [sentence_query(CLAIM)]
     assert report.search is not None
@@ -475,3 +479,240 @@ def test_a_translated_claims_judgement_is_cached_under_the_english_hash(tmp_path
         # Never under the reader's own sentence: that would reuse this opinion for a
         # differently translated run of the same Turkish claim later on.
         assert db.get_judgement(claim_hash(TURKISH), not_supported.source_id, judge.name) is None
+
+
+# --- found pages are read as pages (final review, Critical 1) ------------------------
+
+# The three addresses the final review reproduced a false ghost with: each carries a
+# DOI or an arXiv id, which used to send the found page to the bibliographic indexes.
+IDENTIFIER_PAGES = (
+    "https://pubs.acs.org/doi/10.1021/acs.est.0c01234",
+    "https://doi.org/10.1021/acs.est.0c01234",
+    "https://arxiv.org/abs/2106.09685",
+)
+
+
+def _found_identifier_pages(cache: Cache | None = None) -> tuple[Engine, StubResolver]:
+    resolver = StubResolver()  # answers GHOST to anything it is asked
+    fetcher = StubFetcher({url: fetched(url, f"{BACKING} {FILLER}") for url in IDENTIFIER_PAGES})
+    built = engine(
+        resolver=resolver,
+        fetcher=fetcher,
+        cache=cache,
+        config=Config(search=SearchConfig(results_per_claim=3)),
+        embedder=WordEmbedder(),
+        scorer=TableScorer({BACKING: SUPPORTED_ROW}),
+    )
+    built.searcher = StubSearcher({"ChatGPT": list(IDENTIFIER_PAGES)})
+    return built, resolver
+
+
+def test_a_found_page_with_a_doi_or_arxiv_id_is_read_as_a_page_never_a_ghost() -> None:
+    built, resolver = _found_identifier_pages()
+    report = verify(CLAIM, built)
+
+    assert resolver.resolved == []  # the indexes are never asked about a found page
+    assert Kind.GHOST not in report.counts()
+    assert [source.source_id for source in report.sources] == [
+        f"url:{url}" for url in IDENTIFIER_PAGES
+    ]
+    assert [source.reference.origin for source in report.sources] == ["search"] * 3
+    assert report.counts() == {Kind.EVIDENCE_FOUND: 3}
+
+
+def test_a_found_page_never_reads_a_cached_resolution_of_the_same_address(
+    tmp_path: Path,
+) -> None:
+    # A bibliography that printed the bare address resolved it through the indexes;
+    # that record is about an entry, not about the page the search found.
+    with Cache(tmp_path / "c.sqlite3") as db:
+        for url in IDENTIFIER_PAGES:
+            db.put_resolution(url, ResolveResult(State.GHOST, None, []))
+        built, resolver = _found_identifier_pages(cache=db)
+        # ``prepare`` only: the resolving stage is the one under test, and the model
+        # half would want the ``sources`` rows a real fetch writes.
+        ready = prepare(CLAIM, built)
+    assert resolver.resolved == []
+    assert [status.state for status in ready.sources.values()].count("GHOST REFERENCE") == 0
+    assert [status.source_id for status in ready.sources.values()] == [
+        f"url:{url}" for url in IDENTIFIER_PAGES
+    ]
+
+
+def test_a_found_page_leaves_no_resolution_behind_for_a_bibliography_entry(
+    tmp_path: Path,
+) -> None:
+    with Cache(tmp_path / "c.sqlite3") as db:
+        built, _ = _found_identifier_pages(cache=db)
+        prepare(CLAIM, built)
+        assert all(db.get_resolution(url) is None for url in IDENTIFIER_PAGES)
+
+
+# --- findings name their claim, and the hint is true in every case (final review) -----
+
+
+def test_a_search_unavailable_finding_carries_the_claim_it_was_about() -> None:
+    report = verify(CLAIM, searching(StubSearcher(error=ProviderError("HTTP 503", 503, None))))
+    [item] = report.findings
+    assert item.state == SEARCH_UNAVAILABLE
+    assert item.claim is not None and item.claim.text == CLAIM
+    [result] = to_sarif(report, artifact="claim.txt")["runs"][0]["results"]
+    assert result["properties"]["claim"] == CLAIM
+
+
+def test_a_language_unsupported_finding_carries_the_claim_it_was_about() -> None:
+    report = verify(TURKISH, searching(StubSearcher()))
+    [item] = report.findings
+    assert item.state == LANGUAGE_UNSUPPORTED
+    assert item.claim is not None and item.claim.text == TURKISH
+
+
+def test_the_language_hint_is_true_when_a_judge_was_on_and_did_not_translate() -> None:
+    """``--judge`` was on here, so "--judge translates a claim" would be false: the
+    hint says that no judge translated *this* claim, and how to have one do it."""
+    answer = json.dumps(
+        {"items": [{"id": 0, "english": TURKISH, "queries": ["OpenAI bankruptcy"]}]}
+    )
+    built = searching(StubSearcher())
+    built.judge = Judge(FakeJudgeClient([answer]))  # type: ignore[arg-type]
+    [item] = verify(TURKISH, built).findings
+    [hint] = item.detail
+    assert "no judge translated this claim" in hint
+    assert "--judge" in hint
+    assert "/config" not in hint  # a TUI setting that would not help a TUI run
+
+
+# --- the banner at the top, and the exit code (final review, minors) -----------------
+
+
+def _cli_run(
+    built: Engine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *args: str
+) -> tuple[int, str, str]:
+    from typing import Any
+
+    from typer.testing import CliRunner
+
+    from proofpath import verify as verify_mod
+    from proofpath.cli import app
+
+    monkeypatch.setenv("PROOFPATH_CONFIG_DIR", str(tmp_path / "conf"))
+
+    def fake_default(config: Config, **kwargs: Any) -> Engine:
+        return built
+
+    monkeypatch.setattr(verify_mod.Engine, "default", staticmethod(fake_default))
+    target = tmp_path / "claim.txt"
+    target.write_text(CLAIM, encoding="utf-8")
+    result = CliRunner().invoke(app, ["check", str(target), "--out", str(tmp_path / "r.md"), *args])
+    return result.exit_code, result.stdout, (tmp_path / "r.md").read_text(encoding="utf-8")
+
+
+def _supported_engine() -> Engine:
+    return searching(StubSearcher({"ChatGPT": [PAGE_A]}), pages={PAGE_A: f"{BACKING} {FILLER}"})
+
+
+def test_the_experimental_banner_opens_the_terminal_and_markdown_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from proofpath.report import search_experimental
+
+    _, stdout, markdown = _cli_run(_supported_engine(), tmp_path, monkeypatch)
+    banner = search_experimental()
+    lines = stdout.splitlines()
+    at = next(i for i, line in enumerate(lines) if banner in line)
+    finding = next(i for i, line in enumerate(lines) if "[evidence-found]" in line)
+    assert at < finding  # before the first finding, not in the footer after it
+    assert stdout.count(banner) == 1
+    body = markdown.splitlines()
+    assert banner in body[2]  # straight under the title
+    assert markdown.count(banner) == 1
+
+
+def test_a_run_whose_only_findings_are_supported_found_pages_exits_zero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Spec section 13.3 says 0 is clean and is silent on search; a claim a found page
+    supports is the searched run's clean answer, like a supported cited claim."""
+    code, _, _ = _cli_run(_supported_engine(), tmp_path, monkeypatch)
+    assert code == 0
+
+
+@pytest.mark.parametrize(
+    ("searcher", "pages", "table"),
+    [
+        (StubSearcher({"ChatGPT": [PAGE_A]}), {PAGE_A: f"{BACKING} {FILLER}"}, REFUTED_ROW),
+        (StubSearcher(), {}, SUPPORTED_ROW),  # NO EVIDENCE FOUND
+        (StubSearcher({"ChatGPT": [PAGE_A]}), {}, SUPPORTED_ROW),  # unread page
+        (StubSearcher(error=ProviderError("HTTP 503", 503, None)), {}, SUPPORTED_ROW),
+    ],
+)
+def test_every_other_searched_outcome_still_exits_one(
+    searcher: StubSearcher,
+    pages: dict[str, str],
+    table: tuple[float, float, float],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    built = searching(searcher, pages=pages, table={BACKING: table})
+    code, _, _ = _cli_run(built, tmp_path, monkeypatch)
+    assert code == 1
+
+
+def test_a_rejected_search_key_is_reported_as_a_credential_not_an_outage() -> None:
+    from proofpath.search import SearchKeyError
+
+    rejected = SearchKeyError(
+        "tavily rejected the key (HTTP 401); check TAVILY_API_KEY in .env", 401
+    )
+    report = verify(CLAIM, searching(StubSearcher(error=rejected)))
+    [item] = report.findings
+    assert item.kind is Kind.UNVERIFIED
+    assert item.state == CREDENTIALS_MISSING
+    assert item.state != SEARCH_UNAVAILABLE
+    assert any("TAVILY_API_KEY" in line for line in item.detail)
+    assert item.claim is not None and item.claim.text == CLAIM
+    assert report.search is not None and report.search.searched == 0
+
+
+# --- round 2: a capped search is not a clean run (rule 6) ------------------------------
+
+SEVEN_CLAIMS = " ".join(f"OpenAI shut down ChatGPT in March 202{n} after a vote." for n in range(7))
+
+
+def test_a_capped_search_whose_searched_claims_are_all_supported_still_exits_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Seven check-worthy claims, five searched (the cap), every one of them backed:
+    the two never searched are unchecked, and exit 0 would call the text clean."""
+    backings = {
+        f"OpenAI shut down ChatGPT in March 202{n} after a vote.": SUPPORTED_ROW for n in range(7)
+    }
+    pages = {f"https://news.test/{n}": f"{text} {FILLER}" for n, text in enumerate(backings)}
+    searcher = StubSearcher({f"202{n}": [f"https://news.test/{n}"] for n in range(7)})
+    built = searching(searcher, pages=pages, table=backings)
+    report = verify(SEVEN_CLAIMS, built)
+    assert report.search is not None
+    assert (report.search.eligible, report.search.searched) == (7, 5)
+    assert set(report.counts()) == {Kind.EVIDENCE_FOUND}
+    assert report.exit_code() == 1
+
+
+def test_a_found_page_is_fetched_without_the_contact_address_and_a_cited_one_with_it() -> None:
+    """Round 2, privacy: the user chose the pages their text cites, not the ones the
+    search found, so only the latter are fetched anonymously."""
+    built = searching(StubSearcher({"ChatGPT": [PAGE_A]}), pages={PAGE_A: f"{BACKING} {FILLER}"})
+    verify(CLAIM, built)
+    assert built.fetcher.anonymous == [PAGE_A]  # type: ignore[attr-defined]
+
+    cited = "https://cited.test/report"
+    text = f"{CLAIM} [1]\n\nReferences\n\n[1] {cited}\n"
+    built = engine(
+        # The indexes do not cover it, so it is read from the address it prints.
+        resolver=StubResolver({"cited.test": ResolveResult(State.NOT_INDEXED, None, [])}),
+        fetcher=StubFetcher({cited: fetched(cited, f"{BACKING} {FILLER}")}),
+        embedder=WordEmbedder(),
+        scorer=TableScorer({BACKING: SUPPORTED_ROW}),
+    )
+    verify(text, built)
+    assert cited in built.fetcher.calls  # type: ignore[attr-defined]
+    assert built.fetcher.anonymous == []  # type: ignore[attr-defined]

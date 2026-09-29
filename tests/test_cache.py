@@ -57,7 +57,7 @@ def test_schema_is_plain_sqlite_readable_without_extensions(db: Cache) -> None:
         "retractions",
         "judgements",
     } <= tables
-    assert conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone() == ("4",)
+    assert conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone() == ("5",)
 
 
 def test_chunks_round_trip_with_embeddings(db: Cache) -> None:
@@ -429,7 +429,7 @@ def test_opening_a_v1_file_migrates_it_and_keeps_sources_text_and_verdicts(
 
     with Cache(path) as db:
         assert db._conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone() == (
-            "4",
+            "5",
         )
         columns = {r[1] for r in db._conn.execute("PRAGMA table_info(chunks)")}
         assert "text_sha256" in columns
@@ -501,7 +501,7 @@ def test_a_failed_migration_leaves_the_old_version_and_self_heals(
     monkeypatch.undo()
     with Cache(path) as db:
         assert db._conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone() == (
-            "4",
+            "5",
         )
         assert db.migrated_from == "1"
         assert "text_sha256" in {r[1] for r in db._conn.execute("PRAGMA table_info(chunks)")}
@@ -775,7 +775,7 @@ def test_migrating_a_v3_file_adds_judgements_and_keeps_everything_else(tmp_path:
     with Cache(path) as db:
         assert db.migrated_from == "3"
         assert db._conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone() == (
-            "4",
+            "5",
         )
         # v4 is additive: the chunks stay, so a warm run stays free.
         assert db.get_chunks("s", "bge@rev", text_sha256=RAW_SHA) is not None
@@ -795,3 +795,40 @@ def test_migrating_a_v1_file_runs_the_whole_chain_including_judgements(tmp_path:
         db.put_judgement("h", "s", "groq gpt-oss", OPINION, now=NOW)
         assert db.get_judgement("h", "s", "groq gpt-oss") == OPINION
         assert db.get_verdict("h", "s", "m") is not None  # nothing else was lost
+
+
+# --- schema v5: stale ghosts are forgotten (final review, round 2) --------------------
+
+GHOST_REFERENCE = "https://doi.org/10.1021/acs.est.0c01234"
+
+
+def _write_v4_database(path: Path) -> None:
+    """A v4 file holding one GHOST and one RESOLVED resolution.
+
+    v5 changes no table, so a v4 file is today's tables with ``schema_version`` 4.
+    """
+    with Cache(path) as db:
+        db.put_resolution(GHOST_REFERENCE, ResolveResult(State.GHOST, None, []), now=NOW)
+        db.put_resolution(RAW_REFERENCE, RESOLVED, now=NOW)
+    conn = sqlite3.connect(path)
+    with conn:
+        conn.execute("UPDATE meta SET value = '4' WHERE key = 'schema_version'")
+    conn.close()
+
+
+def test_migrating_a_v4_file_forgets_every_cached_ghost_and_keeps_the_rest(
+    tmp_path: Path,
+) -> None:
+    """A GHOST cached before the identifier-only rule (final review, C1) would be
+    served for a month; a ghost is the one verdict rule 3 cannot let stand on an old
+    rule, so v5 drops them and they are resolved again."""
+    path = tmp_path / "proofpath.sqlite3"
+    _write_v4_database(path)
+
+    with Cache(path) as db:
+        assert db.migrated_from == "4"
+        assert db._conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone() == (
+            "5",
+        )
+        assert db.get_resolution(GHOST_REFERENCE, now=NOW) is None
+        assert db.get_resolution(RAW_REFERENCE, now=NOW) == RESOLVED

@@ -35,7 +35,7 @@ from proofpath import __version__
 # ``_one_line`` is private to ``report`` but it is *the* definition of flattening a
 # quoted passage onto one line, and the markdown renderer already uses it. Reusing it
 # keeps SARIF and markdown quoting the same passage the same way.
-from proofpath.report import LEVELS, Finding, Kind, Report, _one_line
+from proofpath.report import LEVELS, Finding, Kind, Report, _one_line, search_experimental
 
 SARIF_VERSION = "2.1.0"
 SCHEMA_URI = "https://json.schemastore.org/sarif-2.1.0.json"
@@ -246,6 +246,8 @@ def _run_properties(report: Report) -> dict[str, Any]:
         "evidenceSearch": None
         if report.search is None
         else {
+            # The banner the other surfaces print at the top of a searched run.
+            "banner": search_experimental(),
             "experimental": True,
             "by": report.search.by,
             "queriesBy": report.search.queries_by,

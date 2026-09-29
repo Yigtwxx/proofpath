@@ -455,10 +455,19 @@ def test_exit_code_is_zero_for_a_clean_run() -> None:
     assert report_with().exit_code() == 0
 
 
-@pytest.mark.parametrize("kind", list(Kind))
+@pytest.mark.parametrize("kind", [kind for kind in Kind if kind is not Kind.EVIDENCE_FOUND])
 def test_exit_code_is_one_for_every_state(kind: Kind) -> None:
     # Spec section 13.3: every UNVERIFIED and LOW CONFIDENCE state counts, not just errors.
     assert report_with(finding(kind, line=1)).exit_code() == 1
+
+
+def test_a_supported_found_page_alone_exits_zero_like_a_supported_cited_claim() -> None:
+    # Final review: the spec is silent on search, and SUPPORTED (found by proofpath)
+    # is the searched run's clean answer, shown where a cited one is silent.
+    assert report_with(finding(Kind.EVIDENCE_FOUND, line=1)).exit_code() == 0
+    mixed = report_with(finding(Kind.EVIDENCE_FOUND, line=1), finding(Kind.NO_EVIDENCE, line=2))
+    assert mixed.exit_code() == 1
+    assert report_with(finding(Kind.EVIDENCE_FOUND, line=1), cancelled=True).exit_code() == 1
 
 
 def test_exit_code_is_one_when_cancelled() -> None:
@@ -1651,7 +1660,9 @@ SUMMARY = SearchSummary(
 
 def test_search_lines_state_what_was_searched_and_what_was_not() -> None:
     lines = search_lines(dataclasses.replace(report_with(), search=SUMMARY))
-    assert lines[0] == search_experimental()
+    # The banner opens the report instead (spec 2026-09-28 section 5; final review).
+    assert search_experimental() not in lines
+    assert lines[0] == "evidence search by tavily, queries by sentence"
     assert "evidence search by tavily, queries by sentence" in lines
     assert "claims searched 3 of 4 check-worthy (7 sentences)" in lines
     assert "claims not searched 4" in lines
@@ -1670,3 +1681,13 @@ def test_the_footer_and_the_markdown_carry_the_search_block() -> None:
     markdown = render_markdown(report)
     assert "## Evidence search" in markdown
     assert "- claims not searched 4" in markdown
+
+
+def test_the_banner_opens_a_searched_markdown_report_and_nothing_else_carries_it() -> None:
+    report = dataclasses.replace(report_with(), search=SUMMARY)
+    lines = render_markdown(report).splitlines()
+    assert lines[2] == f"> **{search_experimental()}**"
+    assert sum(search_experimental() in line for line in lines) == 1
+    assert render_footer(report).banner == search_experimental()
+    assert render_footer(report_with()).banner is None
+    assert search_experimental() not in render_markdown(report_with())

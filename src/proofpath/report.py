@@ -361,12 +361,25 @@ class Report:
         Spec section 13.3: every reported state counts, including the UNVERIFIED and
         LOW CONFIDENCE ones. A run that could not read its sources is not a clean run.
 
+        The one finding that does not count is ``EVIDENCE_FOUND``: a page the search
+        found, read, and quoted, that supports the claim. It is printed only because
+        a searched run's answer has to be shown (spec 2026-09-28 section 4), where a
+        supported *cited* claim is no finding at all and exits 0. The spec is silent
+        on its exit code, so it exits like the cited run it mirrors (final review).
+        Everything else a search can end in -- REFUTED, NO EVIDENCE FOUND, an unread
+        page, an unavailable search -- is still a finding and still exits 1. So does a
+        search the cap cut short (``searched < eligible``): the check-worthy claims it
+        never reached were not checked at all, and a run that left claims unchecked
+        must not read as a clean one (product rule 6; final review, round 2).
+
         ``cancelled`` is folded in so that a stopped run is never reported as clean by
         a caller that only looks at this number. The CLI does not use that branch: it
         exits 2 for a cancelled run, because stopping early is the tool not finishing
         rather than a verdict on the document, and ``Report.cancelled`` is what says so.
         """
-        return 1 if self.findings or self.cancelled else 0
+        counted = [item for item in self.findings if item.kind is not Kind.EVIDENCE_FOUND]
+        capped = self.search is not None and self.search.searched < self.search.eligible
+        return 1 if counted or capped or self.cancelled else 0
 
     def counts(self) -> dict[Kind, int]:
         """How many findings of each kind, in ``Kind`` declaration order.
@@ -629,6 +642,9 @@ class Footer:
     reasons: tuple[tuple[str, int], ...] = ()
     # ``search_lines``: empty unless the run searched.
     search: tuple[str, ...] = ()
+    # ``search_banner``: the footer's surfaces that cannot print it at the top (the
+    # TUI's docked footer) print it first among the search lines.
+    banner: str | None = None
     # Of the judge's answers, those the local fallback gave; beside ``api_calls``,
     # which counts provider requests only (spec section 11).
     local_calls: int = 0
@@ -684,6 +700,7 @@ def render_footer(report: Report, *, written: str | None = None) -> Footer:
         judge_tokens=_judge_tokens(report),
         reasons=coverage_reasons(report.coverage),
         search=search_lines(report),
+        banner=search_banner(report),
         local_calls=0 if report.judge_cost is None else report.judge_cost.local_calls,
         judge_notice=report.judge_notice,
     )
@@ -715,6 +732,11 @@ def render_markdown(report: Report, *, written_at: datetime | None = None) -> st
     """The whole run as one markdown document. The caller writes it, UTF-8 encoded."""
     when = written_at if written_at is not None else datetime.now()
     lines: list[str] = [f"# proofpath report — {report.document.name}", ""]
+    banner = search_banner(report)
+    if banner is not None:
+        # First, before anything the run found: a searched run is experimental, and
+        # its findings are read in that light (spec 2026-09-28 section 5).
+        lines.extend([f"> **{banner}**", ""])
     lines.append(f"- date: {when:%Y-%m-%d %H:%M:%S}")
     lines.extend(f"- {key}: {value}" for key, value in report.models.items())
     if report.tier_note:
@@ -1073,13 +1095,25 @@ def _markdown_coverage(report: Report) -> list[str]:
     return lines
 
 
+def search_banner(report: Report) -> str | None:
+    """The experimental banner, for the top of a run that searched; ``None`` otherwise.
+
+    Apart from ``search_lines`` because it goes somewhere else: at the top of the
+    report on every surface that has one (spec 2026-09-28 section 5), not in the
+    evidence-search block at its end.
+    """
+    return None if report.search is None else search_experimental()
+
+
 def search_lines(report: Report) -> tuple[str, ...]:
-    """The evidence-search block, one line each, for every surface to print as is."""
+    """The evidence-search block, one line each, for every surface to print as is.
+
+    The experimental banner is not in it: ``search_banner`` opens the report instead.
+    """
     item = report.search
     if item is None:
         return ()
     return (
-        search_experimental(),
         f"evidence search by {item.by}, queries by {item.queries_by}",
         f"claims searched {item.searched} of {item.eligible} check-worthy "
         f"({item.sentences} sentences)",

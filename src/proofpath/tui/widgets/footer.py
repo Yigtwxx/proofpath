@@ -169,8 +169,11 @@ def _hints(item: Footer) -> list[str]:
             f" — /config set {ui.BROWSER_SETTING}"
         )
     # The docked footer has one hints row: the experimental banner and the searched
-    # line go there, and the full block is in the run's report.
-    hints.extend(item.search[:3])
+    # line go there, and the full block is in the run's report. The banner cannot sit
+    # at the top of a docked footer, so it goes first among the search lines.
+    if item.banner is not None:
+        hints.append(item.banner)
+    hints.extend(item.search[:2])
     if item.judge_notice:
         # The notice above the prompt goes when the next run starts; the footer is
         # this run's record, so it keeps saying who gave the second opinion.

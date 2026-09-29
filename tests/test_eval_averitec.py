@@ -254,62 +254,101 @@ def test_the_report_ends_with_a_newline() -> None:
     assert render_report(score(ROWS), date="2026-09-15", limit=100).endswith("\n")
 
 
-# --- search_urls -----------------------------------------------------------
+# --- search_urls: the product's search, gate and all ------------------------
+
+
+class _Stub:
+    name = "stub"
+
+    def __init__(self, urls: list[str], *, error: Exception | None = None) -> None:
+        self.urls = urls
+        self.error = error
+        self.asked: list[tuple[str, int]] = []
+
+    def search(self, query: str, max_results: int) -> list[SearchHit]:
+        self.asked.append((query, max_results))
+        if self.error is not None:
+            raise self.error
+        return [SearchHit(url, "", rank) for rank, url in enumerate(self.urls, start=1)]
+
+
+def _claim(
+    text: str = "The senator voted against the bill in 2019.", **fields: object
+) -> averitec.Claim:
+    return averitec.Claim(id=0, text=text, label="Refuted", source_urls=(), **fields)  # type: ignore[arg-type]
 
 
 def test_search_urls_never_hand_back_the_fact_check_itself() -> None:
-    class Stub:
-        name = "stub"
-
-        def search(self, query: str, max_results: int) -> list[SearchHit]:
-            return [
-                SearchHit("https://factcheck.test/claim-1", "", 1),
-                SearchHit("https://factcheck.test/other", "", 2),
-                SearchHit("https://news.test/a", "", 3),
-            ]
-
-    claim = averitec.Claim(
-        id=0, text="A claim.", label="Refuted", source_urls=(),
-        fact_check_url="https://factcheck.test/claim-1",
-    )  # fmt: skip
-    assert search_urls(Stub(), claim, 3) == ("https://news.test/a",)
+    stub = _Stub(
+        ["https://factcheck.test/claim-1", "https://factcheck.test/other", "https://news.test/a"]
+    )
+    claim = _claim(fact_check_url="https://factcheck.test/claim-1")
+    assert search_urls(stub, claim, 3).urls == ("https://news.test/a",)
 
 
 def test_search_urls_exclude_the_checker_across_subdomains() -> None:
-    class Stub:
-        name = "stub"
-
-        def search(self, query: str, max_results: int) -> list[SearchHit]:
-            return [
-                SearchHit("https://www.afp.com/en/story", "", 1),
-                SearchHit("https://factcheck.afp.com/other", "", 2),
-                SearchHit("https://news.afp.com.evil.test/a", "", 3),
-                SearchHit("https://notafp.com/b", "", 4),
-            ]
-
-    claim = averitec.Claim(
-        id=0, text="A claim.", label="Refuted", source_urls=(),
-        fact_check_url="https://factcheck.afp.com/claim-1",
-    )  # fmt: skip
-    assert search_urls(Stub(), claim, 3) == (
+    stub = _Stub(
+        [
+            "https://www.afp.com/en/story",
+            "https://factcheck.afp.com/other",
+            "https://news.afp.com.evil.test/a",
+            "https://notafp.com/b",
+        ]
+    )
+    claim = _claim(fact_check_url="https://factcheck.afp.com/claim-1")
+    assert search_urls(stub, claim, 3).urls == (
         "https://news.afp.com.evil.test/a",
         "https://notafp.com/b",
     )
 
 
-def test_search_urls_ask_for_enough_hits_to_fill_the_limit() -> None:
-    asked: list[int] = []
+def test_search_urls_ask_for_exactly_the_products_share_of_hits() -> None:
+    """Final review, Important 3: the product asks for ``results_per_claim``, and so
+    does the eval -- no over-fetch the product never makes."""
+    stub = _Stub([])
+    searched = search_urls(stub, _claim(), 3)
+    assert [asked for _, asked in stub.asked] == [3]
+    assert searched.state is None
 
-    class Stub:
-        name = "stub"
 
-        def search(self, query: str, max_results: int) -> list[SearchHit]:
-            asked.append(max_results)
-            return []
+def test_search_urls_query_with_the_products_sentence_query() -> None:
+    stub = _Stub([])
+    search_urls(stub, _claim("The senator voted against the #bill in 2019."), 3)
+    assert [query for query, _ in stub.asked] == ["The senator voted against the bill in 2019."]
 
-    claim = averitec.Claim(id=0, text="A claim.", label="Refuted", source_urls=())
-    search_urls(Stub(), claim, 3)
-    assert asked == [9]
+
+RUSSIAN = "Путин подписал закон о выборах."  # noqa: RUF001 - real Cyrillic letters
+
+
+def test_a_claim_the_product_would_not_search_is_scored_not_dropped() -> None:
+    stub = _Stub(["https://news.test/a"])
+    searched = search_urls(stub, _claim(RUSSIAN), 3)
+    assert searched.state == eval_averitec.LANGUAGE_UNSUPPORTED
+    assert stub.asked == []  # never searched in a language the models cannot read
+    row = eval_averitec.unsearched_row(_claim(RUSSIAN), searched.state)
+    assert row.predicted is None and row.states == (eval_averitec.LANGUAGE_UNSUPPORTED,)
+    assert score([row]).n == 1  # counted, as NEI
+
+
+def test_a_claim_with_no_sentence_to_search_is_reported_as_not_searched() -> None:
+    searched = search_urls(_Stub([]), _claim("???"), 3)
+    assert searched.state == eval_averitec.NOT_SEARCHED
+
+
+def test_a_provider_error_is_recorded_as_unverified_for_that_claim_only() -> None:
+    from proofpath.polite import ProviderError
+
+    searched = search_urls(_Stub([], error=ProviderError("HTTP 432", 432, None)), _claim(), 3)
+    assert searched.state == eval_averitec.SEARCH_UNAVAILABLE
+    assert search_urls(_Stub(["https://news.test/a"]), _claim(), 3).urls == ("https://news.test/a",)
+
+
+def test_the_report_states_the_measured_path() -> None:
+    assert eval_averitec.measured_path(None) == "sentence queries, no judge"
+    text = render_report(
+        score(ROWS), date="2026-09-29", limit=100, path=eval_averitec.measured_path(None)
+    )
+    assert "measured path: sentence queries, no judge" in text
 
 
 # --- main ----------------------------------------------------------------
@@ -336,3 +375,39 @@ def test_a_fresh_run_refuses_to_overwrite_an_existing_results_file(
     assert "--resume" in message
     assert str(results) in message
     assert results.read_text(encoding="utf-8") == "[]"
+
+
+def test_a_rejected_search_key_stops_the_run_at_the_first_claim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Round 2: a key the provider refuses would fail every claim the same way; the
+    run says so once and exits 2 instead of scoring a hundred claims unverified."""
+    from proofpath.config import Config
+    from proofpath.search import SearchKeyError
+
+    stub = _Stub(
+        [], error=SearchKeyError("tavily rejected the key (HTTP 401); check TAVILY_API_KEY", 401)
+    )
+    closed: list[bool] = []
+    engine = SimpleNamespace(
+        searcher=stub,
+        search_problem="",
+        judge=None,
+        escalate=True,
+        close=lambda: closed.append(True),
+    )
+    claims = [_claim(f"The senator voted against the bill in 201{n}.") for n in range(3)]
+    monkeypatch.setattr(eval_averitec, "cache_dir", lambda: tmp_path)
+    monkeypatch.setattr(eval_averitec.averitec, "ensure_downloaded", lambda _cache: tmp_path)
+    monkeypatch.setattr(eval_averitec.averitec, "load", lambda _path, limit=None: claims)
+    monkeypatch.setattr(eval_averitec, "load_config", Config)
+    monkeypatch.setattr(eval_averitec.Engine, "default", staticmethod(lambda *a, **k: engine))
+    out = tmp_path / "report.md"
+
+    assert eval_averitec.main(["--search", "--out", str(out)]) == 2
+
+    assert len(stub.asked) == 1  # the first claim, and no retry on the others
+    assert closed == [True]
+    assert not out.exists()
+    message = capsys.readouterr().err
+    assert "TAVILY_API_KEY" in message and "rejected" in message

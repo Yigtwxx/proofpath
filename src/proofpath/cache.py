@@ -28,7 +28,7 @@ from proofpath.paths import cache_dir
 from proofpath.pipeline import CUT_DECIMALS, Thresholds
 from proofpath.resolve import Candidate, FieldMatch, ResolveResult, Retraction, State, strip_marker
 
-SCHEMA_VERSION = "4"
+SCHEMA_VERSION = "5"
 RAW_TEXT_TTL_DAYS = 7
 # A resolution is a statement about a published record, which does not change; the
 # month is there so a reference an index had not yet ingested is looked at again.
@@ -191,6 +191,19 @@ def _migrate_to_v4(conn: sqlite3.Connection) -> None:
         conn.execute(statement)
 
 
+def _migrate_to_v5(conn: sqlite3.Connection) -> None:
+    """v4 -> v5: every cached ``GHOST REFERENCE`` is forgotten, nothing else.
+
+    No table changes. Before v5 an entry that is nothing but an identifier (a bare
+    DOI, a ``doi.org`` or arXiv address) could be called a ghost, and a found page
+    with such an address was resolved as one (final review, C1). Those rows would be
+    served for up to a month under the old rule, and a ghost is the one verdict rule 3
+    cannot let stand on it: the rows are dropped and resolved again. Every other
+    state is still what the providers answered, and stays.
+    """
+    conn.execute("DELETE FROM resolutions WHERE state = ?", (State.GHOST.value,))
+
+
 # One step per schema version, oldest first.
 #
 # Invariant, on which the self-healing in ``Cache.__init__`` rests: every step runs
@@ -202,6 +215,7 @@ _MIGRATIONS: tuple[tuple[str, Callable[[sqlite3.Connection], None]], ...] = (
     ("2", _migrate_to_v2),
     ("3", _migrate_to_v3),
     ("4", _migrate_to_v4),
+    ("5", _migrate_to_v5),
 )
 
 

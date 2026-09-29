@@ -32,17 +32,24 @@ from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from datetime import date
 from pathlib import Path
+from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
-from proofpath import pipeline, retrieval
-from proofpath.config import load_config
+from proofpath import claims as claims_mod
+from proofpath import ingest, pipeline, retrieval
+from proofpath.config import SearchConfig, load_config
 from proofpath.eval import averitec
 from proofpath.fetch import Fetched
 from proofpath.models import Label, Passage
 from proofpath.paths import cache_dir
-from proofpath.search import Searcher, keep_hits
-from proofpath.search.queries import sentence_query
+from proofpath.polite import ProviderError
+from proofpath.report import LANGUAGE_UNSUPPORTED, SEARCH_UNAVAILABLE
+from proofpath.search import Searcher, SearchKeyError, canonical, search_claim
+from proofpath.search.queries import plan_queries
 from proofpath.verify import NO_TEXT, Engine
+
+if TYPE_CHECKING:
+    from proofpath.judge import Judge
 
 # The state a claim gets when the dataset itself names no page to read. It is not a
 # fetch failure and must not be counted as one.
@@ -54,6 +61,12 @@ NOT_A_URL = "not a url"
 # The host whose share of the source URLs the report has to state: a third of the dev
 # split's evidence is already a snapshot, and that changes what the numbers measure.
 ARCHIVE_HOST = "web.archive.org"
+# The state a claim gets in search mode when the product would not have searched it:
+# no sentence in it with a word to search for. Scored as NEI, never dropped.
+NOT_SEARCHED = "not searched (no sentence to search)"
+# What the report says was measured, one line (final review, Important 3).
+GOLD_PATH = "gold source URLs, no search"
+SENTENCE_PATH = "sentence queries, no judge"
 RESULTS_NAME = "averitec_results.json"
 SEARCH_RESULTS_NAME = "averitec_search_results.json"
 
@@ -93,33 +106,88 @@ def state_for(fetched: Fetched) -> str:
     return fetched.outcome.value
 
 
-def search_urls(searcher: Searcher, claim: averitec.Claim, limit: int) -> tuple[str, ...]:
-    """What the evidence search would read for this claim, minus the answer key.
+@dataclass(frozen=True)
+class Searched:
+    """What the product's search did with one claim.
 
-    The whole fact-checking site is excluded, not just the one article: a site that
-    rated the claim quotes its own rating on every related page (the leakage the
-    §17.1 gate must not measure). "Site" reaches across subdomains both ways, so a
-    rating on ``factcheck.afp.com`` also rules out ``www.afp.com``. That errs towards
-    a lower score, never a leaked one.
+    ``state`` is ``None`` when it searched; otherwise it is the state the product
+    would have reported instead, and the claim is scored as NEI rather than dropped.
+    ``text`` is what the models check: the searched sentences, in English.
+    """
+
+    urls: tuple[str, ...]
+    text: str
+    state: str | None = None
+
+
+def search_urls(
+    searcher: Searcher,
+    claim: averitec.Claim,
+    limit: int,
+    *,
+    judge: Judge | None = None,
+    max_claims: int = SearchConfig().max_claims,
+) -> Searched:
+    """What the product's evidence search would read for this claim, minus the answer key.
+
+    The product's own path, step for step (final review, Important 3): the claim is
+    read as pasted text, ``checkworthy`` picks the sentences, ``plan_queries`` writes
+    the queries and applies the language gate, and ``search_claim`` asks the provider
+    for exactly ``limit`` hits per query, as ``verify`` does.
+
+    The one addition is the leakage exclusion: the whole fact-checking site is
+    excluded, not just the one article, because a site that rated the claim quotes its
+    own rating on every related page (the leakage the §17.1 gate must not measure). It
+    is passed to the helper as one more excluded host, which matches across
+    subdomains both ways, so a rating on ``factcheck.afp.com`` also rules out
+    ``www.afp.com``. That errs towards a lower score, never a leaked one.
     """
     checker = _site(claim.fact_check_url)
-    # Three times the limit, not a fixed few: a checker's own pages can crowd the top
-    # of the results, and the claim should still get its full share of other pages.
-    hits = [
-        hit
-        for hit in searcher.search(sentence_query(claim.text), limit * 3)
-        if not checker or not _same_site(_site(hit.url), checker)
-    ]
-    return tuple(hit.url for hit in keep_hits(hits, own_host=None, limit=limit))
+    exclude = (checker,) if checker else ()
+    document = ingest.from_text(claim.text, name="averitec", kind="text")
+    chosen = claims_mod.checkworthy(document, limit=max_claims)
+    if not chosen.claims:
+        return Searched((), claim.text, NOT_SEARCHED)
+    plan = plan_queries([sentence.text for sentence in chosen.claims], judge)
+    urls: list[str] = []
+    seen: set[str] = set()
+    checked: list[str] = []
+    for queries, hypothesis in zip(plan.queries, plan.hypotheses, strict=True):
+        if hypothesis is None:
+            continue  # not English and not translated: the product does not search it
+        checked.append(hypothesis)
+        try:
+            hits = search_claim(queries, searcher, limit, exclude=exclude)
+        except SearchKeyError:
+            # Not this claim's problem: every claim would fail the same way, so the
+            # run stops (``main``) rather than scoring them all unverified.
+            raise
+        except ProviderError:
+            # Per claim: this one is unverified, the run goes on (product rule 2).
+            return Searched((), claim.text, SEARCH_UNAVAILABLE)
+        for hit in hits:
+            key = canonical(hit.url)
+            if key not in seen:
+                seen.add(key)
+                urls.append(hit.url)
+    if not checked:
+        return Searched((), claim.text, LANGUAGE_UNSUPPORTED)
+    return Searched(tuple(urls), " ".join(checked))
+
+
+def unsearched_row(claim: averitec.Claim, state: str) -> Row:
+    """A claim the product would not have searched, as the product would report it:
+    no verdict (scored as NEI), and the state that says why."""
+    return Row(claim_id=claim.id, gold=claim.label, predicted=None, states=(state,), urls=())
+
+
+def measured_path(judge: Judge | None) -> str:
+    """The search path a run measured, in one line for the report."""
+    return SENTENCE_PATH if judge is None else f"judge queries ({judge.name})"
 
 
 def _site(url: str) -> str:
     return (urlsplit(url).hostname or "").removeprefix("www.")
-
-
-def _same_site(host: str, checker: str) -> bool:
-    """One host is the other, or a subdomain of it, in either direction."""
-    return host == checker or host.endswith(f".{checker}") or checker.endswith(f".{host}")
 
 
 @dataclass(frozen=True)
@@ -184,7 +252,7 @@ def _md_row(*cells: object) -> str:
     return "| " + " | ".join(str(c) for c in cells) + " |"
 
 
-def render_report(result: AveritecResult, *, date: str, limit: int) -> str:
+def render_report(result: AveritecResult, *, date: str, limit: int, path: str = GOLD_PATH) -> str:
     """The markdown skeleton. ``## Notes`` is left for the controller to fill in."""
     # ``result.counted`` is the denominator the 3-way accuracy and its baseline are
     # read over. Printed beside `n`, because "0.80 over 100 claims" would otherwise
@@ -193,6 +261,7 @@ def render_report(result: AveritecResult, *, date: str, limit: int) -> str:
         f"# AVeriTeC dev — {date}",
         "",
         f"- claims: {result.n}  (limit={limit or 'none'})",
+        f"- measured path: {path}",
         f"- dataset: `{averitec.URL}`  (sha256 {averitec.SHA256[:12]}…)",
         "- one run of the whole product: real claims, real source pages, real fetch ladder.",
         "",
@@ -284,8 +353,13 @@ def _save_rows(path: Path, rows: Sequence[Row]) -> None:
     temporary.replace(path)
 
 
-def _decide_claim(engine: Engine, claim: averitec.Claim, *, sleep: float) -> Row:
-    """Fetch every source of one claim and keep the strongest non-NEI verdict."""
+def _decide_claim(
+    engine: Engine, claim: averitec.Claim, *, sleep: float, anonymous: bool = False
+) -> Row:
+    """Fetch every source of one claim and keep the strongest non-NEI verdict.
+
+    ``anonymous`` is for pages the search found: fetched without the contact address,
+    as the product fetches them (round 2)."""
     states: list[str] = []
     best: pipeline.Verdict | None = None
     fetched_any = False
@@ -295,7 +369,7 @@ def _decide_claim(engine: Engine, claim: averitec.Claim, *, sleep: float) -> Row
         # claims too, not just within one.
         if sleep:
             time.sleep(sleep)
-        fetched = engine.fetcher.fetch(url)
+        fetched = engine.fetcher.fetch(url, anonymous=anonymous)
         states.append(state_for(fetched))
         if not fetched.ok or not fetched.text.strip():
             continue
@@ -398,21 +472,34 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         searcher = engine.searcher
 
+    # The judge the product would write queries with: the same rule ``verify`` uses.
+    judge = engine.judge if engine.escalate else None
+    path = measured_path(judge) if searcher is not None else GOLD_PATH
     scored = 0
     try:
         for position, claim in enumerate(claims, start=1):
             if claim.id in done:
                 continue
-            if searcher is not None:
+            if searcher is None:
+                stored.append(_decide_claim(engine, claim, sleep=args.sleep))
+            else:
                 # The gold URLs are the answer key; search mode reads what evidence
                 # search would actually find, which is the §17.1 gate this run exists
                 # to measure. ``non_urls=0`` because a search hit is always a URL.
-                claim = replace(
+                searched = search_urls(
+                    searcher,
                     claim,
-                    source_urls=search_urls(searcher, claim, config.search.results_per_claim),
-                    non_urls=0,
+                    config.search.results_per_claim,
+                    judge=judge,
+                    max_claims=config.search.max_claims,
                 )
-            stored.append(_decide_claim(engine, claim, sleep=args.sleep))
+                if searched.state is not None:
+                    stored.append(unsearched_row(claim, searched.state))
+                else:
+                    found = replace(
+                        claim, text=searched.text, source_urls=searched.urls, non_urls=0
+                    )
+                    stored.append(_decide_claim(engine, found, sleep=args.sleep, anonymous=True))
             scored += 1
             # After every claim, not at the end: a run this long is interrupted more
             # often than it finishes, and the file has to survive that.
@@ -423,12 +510,21 @@ def main(argv: list[str] | None = None) -> int:
             )
     except KeyboardInterrupt:
         print(f"\ninterrupted after {scored} new claims; {results} is usable", file=sys.stderr)
+    except SearchKeyError as exc:
+        # The message names the variable to check, never the key (round 2).
+        print(
+            f"error     {exc}\n"
+            "          The run stopped: every claim would fail the same way.\n"
+            f"          {results} keeps what was scored.",
+            file=sys.stderr,
+        )
+        return 2
     finally:
         engine.close()
 
     wanted = {claim.id for claim in claims}
     rows = [row for row in stored if row.claim_id in wanted]
-    report = render_report(score(rows), date=date.today().isoformat(), limit=args.limit)
+    report = render_report(score(rows), date=date.today().isoformat(), limit=args.limit, path=path)
     print()
     print(report)
     suffix = "-search" if args.search else ""

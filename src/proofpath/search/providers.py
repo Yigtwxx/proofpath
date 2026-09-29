@@ -9,8 +9,8 @@ from typing import Any
 import httpx
 
 from proofpath.config import SearchConfig
-from proofpath.polite import PoliteClient, ProviderError
-from proofpath.search import Searcher, SearchHit
+from proofpath.polite import PoliteClient, ProviderError, user_agent
+from proofpath.search import Searcher, SearchHit, SearchKeyError
 from proofpath.secrets import ApiKey, missing_hint, resolve_api_key
 
 TAVILY_URL = "https://api.tavily.com/search"
@@ -18,31 +18,50 @@ TAVILY_URL = "https://api.tavily.com/search"
 TAVILY_QUERY_LIMIT = 400
 _WEB = ("http://", "https://")
 SEARXNG_NEEDS_URL = "set search.base_url to your SearXNG instance"
+TAVILY_KEY_ENV = "TAVILY_API_KEY"
+# The statuses Tavily answers a missing, wrong or revoked key with.
+_KEY_STATUSES = frozenset({401, 403})
+# Every search request names the tool and never the user: the run's client carries
+# the contact address in its User-Agent for Crossref's and OpenAlex's polite pools,
+# and a search provider is owed neither it nor a ``mailto`` (final review, minor).
+_HEADERS = {"User-Agent": user_agent()}
 
 
 class TavilySearcher:
     name = "tavily"
 
-    def __init__(self, client: PoliteClient, key: ApiKey) -> None:
+    def __init__(self, client: PoliteClient, key: ApiKey, key_env: str = TAVILY_KEY_ENV) -> None:
         self._client = client
         self._key = key
+        self._key_env = key_env
 
     def __repr__(self) -> str:
         return f"TavilySearcher(key={self._key!r})"  # ApiKey's repr never shows the value
 
     def search(self, query: str, max_results: int) -> list[SearchHit]:
-        response = self._client.post(
-            TAVILY_URL,
-            json_body={
-                "query": query[:TAVILY_QUERY_LIMIT],
-                "max_results": max_results,
-                "search_depth": "basic",
-                "include_answer": False,
-                "include_raw_content": False,
-                "include_images": False,
-            },
-            headers={"Authorization": f"Bearer {self._key.value}"},
-        )
+        try:
+            response = self._client.post(
+                TAVILY_URL,
+                json_body={
+                    "query": query[:TAVILY_QUERY_LIMIT],
+                    "max_results": max_results,
+                    "search_depth": "basic",
+                    "include_answer": False,
+                    "include_raw_content": False,
+                    "include_images": False,
+                },
+                headers={**_HEADERS, "Authorization": f"Bearer {self._key.value}"},
+            )
+        except ProviderError as exc:
+            if exc.status in _KEY_STATUSES:
+                # One line of .env fixes it, so it is reported as a credential, not
+                # as a provider that is down (final review, minor).
+                raise SearchKeyError(
+                    f"tavily rejected the key (HTTP {exc.status}); check {self._key_env} in .env",
+                    exc.status,
+                    exc.code,
+                ) from None
+            raise
         return _hits(_payload(response, "api.tavily.com").get("results"), max_results)
 
 
@@ -56,7 +75,9 @@ class SearxngSearcher:
     def search(self, query: str, max_results: int) -> list[SearchHit]:
         # ``format=json`` must be enabled in the instance's settings.yml; an instance
         # that has not enabled it answers 403, which is reported, not guessed around.
-        response = self._client.get(self._url, {"q": query, "format": "json"}, mailto=False)
+        response = self._client.get(
+            self._url, {"q": query, "format": "json"}, mailto=False, headers=_HEADERS
+        )
         host = httpx.URL(self._url).host
         return _hits(_payload(response, host).get("results"), max_results)
 
@@ -118,7 +139,7 @@ def build_searcher(
         key = resolve_key(config.api_key_env)
         if key is None:
             return SearchSetup(None, missing_hint(config.api_key_env))
-        return SearchSetup(TavilySearcher(client, key), "")
+        return SearchSetup(TavilySearcher(client, key, config.api_key_env), "")
     if config.provider == "searxng":
         if not config.base_url:
             return SearchSetup(None, SEARXNG_NEEDS_URL)

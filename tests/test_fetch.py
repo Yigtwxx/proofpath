@@ -925,3 +925,67 @@ def test_throttle_spaces_requests_to_one_host(client: httpx.Client, clock: list[
     fetcher.fetch("https://x.test/a")
     fetcher.fetch("https://x.test/b")
     assert clock == [pytest.approx(DEFAULT_MIN_INTERVAL)]
+
+
+# --- a page nobody chose is fetched without the contact address (round 2) -------------
+
+CONTACT = "someone@example.org"
+
+
+def _contact_fetcher(*, curl: fx.CurlGet | None = curl_forbidden) -> fx.Fetcher:
+    """The run's fetcher as ``Engine.default`` builds it: its own client, whose
+    User-Agent carries the contact address, and robots.txt respected."""
+    from proofpath.config import Contact
+
+    config = Config(contact=Contact(email=CONTACT), fetch=FetchConfig(respect_robots=True))
+    return fx.Fetcher(config=config, curl_get=curl, wayback_lookup=None, interactive=False)
+
+
+def _agents(*routes: Any) -> list[str]:
+    return [call.request.headers["user-agent"] for route in routes for call in route.calls]
+
+
+@respx.mock
+def test_an_anonymous_fetch_sends_no_contact_address_on_any_request() -> None:
+    robots = respx.get("https://x.test/robots.txt").mock(return_value=httpx.Response(404))
+    page = serve()
+    fetcher = _contact_fetcher()
+    assert fetcher.fetch(PAGE, anonymous=True).outcome is fx.Outcome.OK
+    fetcher.close()
+    agents = _agents(robots, page)
+    assert len(agents) == 2
+    assert all(CONTACT not in agent and "mailto" not in agent for agent in agents)
+    assert all(agent == user_agent() for agent in agents)
+
+
+@respx.mock
+def test_a_cited_source_keeps_the_contact_address() -> None:
+    robots = respx.get("https://x.test/robots.txt").mock(return_value=httpx.Response(404))
+    page = serve()
+    fetcher = _contact_fetcher()
+    fetcher.fetch(PAGE)
+    fetcher.close()
+    assert all(agent == user_agent(CONTACT) for agent in _agents(robots, page))
+
+
+@respx.mock
+def test_an_anonymous_fetch_keeps_the_address_off_curl_and_the_wayback_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    respx.get("https://x.test/robots.txt").mock(return_value=httpx.Response(404))
+    serve(status=403, body=CHALLENGE)
+    lookup = respx.get(fx.WAYBACK_AVAILABLE).mock(
+        return_value=httpx.Response(200, json={"archived_snapshots": {}})
+    )
+    emails: list[str] = []
+
+    def fake_curl(url: str, *, timeout: float = 20.0, contact_email: str = "") -> Any:
+        emails.append(contact_email)
+        return 403, CHALLENGE, "text/html", url
+
+    monkeypatch.setattr(fx, "default_curl_get", fake_curl)
+    fetcher = _contact_fetcher(curl=None)
+    fetcher.fetch(PAGE, anonymous=True)
+    fetcher.close()
+    assert emails == [""]
+    assert _agents(lookup) == [user_agent()]

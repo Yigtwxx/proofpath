@@ -546,12 +546,19 @@ class JudgeClient:
 #: is the name as a reader knows it (``Groq``), ``model`` the Ollama tag the run
 #: switched to. Every failure switches; the notice says which one it was, so a wrong
 #: key is never mistaken for a busy free tier.
-JUDGE_FALLBACK_LIMIT = "{provider} limit reached — judging with local ollama {model}"
-JUDGE_FALLBACK_KEY = (
-    "{provider} rejected the key (HTTP {status}) — judging with local ollama {model}"
-)
-JUDGE_FALLBACK_DOWN = "{provider} did not answer ({cause}) — judging with local ollama {model}"
-_LIMIT_STATUSES = frozenset({429, 413})  # Groq answers 413 when a request busts TPM
+_LIMIT_HEAD = "{provider} limit reached"
+_KEY_HEAD = "{provider} rejected the key (HTTP {status})"
+_DOWN_HEAD = "{provider} did not answer ({cause})"
+_JUDGING = " — judging with local ollama {model}"
+JUDGE_FALLBACK_LIMIT = _LIMIT_HEAD + _JUDGING
+JUDGE_FALLBACK_KEY = _KEY_HEAD + _JUDGING
+JUDGE_FALLBACK_DOWN = _DOWN_HEAD + _JUDGING
+#: What ``switched`` says once the local model has failed too: the primary's reason,
+#: then the local one. "Judging with local ollama" would then be false (final review).
+JUDGE_FALLBACK_FAILED = "{head}, and local ollama {model} failed too ({cause})"
+#: The statuses that mean "over the provider's limit", read wherever a limit is named
+#: (the switch notice, the search's fallback notice), so both classify it one way.
+LIMIT_STATUSES = frozenset({429, 413})  # Groq answers 413 when a request busts TPM
 _KEY_STATUSES = frozenset({401, 403})
 #: ``judge.fallback``: the Ollama model to switch to (``LOCAL_JUDGE_MODEL`` unless the
 #: user named another), or ``off``, in any case, for no fallback.
@@ -711,6 +718,10 @@ class FallbackClient:
         self._plan: _Plan | None = None
         self._local: JudgeClient | None = None
         self._primary_detail = ""
+        # The primary's failure and the notice it earned, kept for the moment the
+        # local model fails too and ``switched`` has to say so.
+        self._primary_failure: JudgeUnavailable | None = None
+        self._notice: str | None = None
         #: The combined detail once the local model has failed too; ``None`` before.
         self._dead: str | None = None
         # Local answers from before a ``reset``: the client is gone, the spend is not.
@@ -765,6 +776,8 @@ class FallbackClient:
             self._dead = None
             self.switched = None
             self._primary_detail = ""
+            self._primary_failure = None
+            self._notice = None
             self._ready = threading.Event()
             self._primary.fail_fast = False
             self._primary.timeout = self._primary_timeout
@@ -826,16 +839,31 @@ class FallbackClient:
         if self._dead is not None:
             raise JudgeUnavailable(self._dead)
         try:
-            return ask(local)
+            answer = ask(local)
         except JudgeUnavailable as exc:
-            # The primary's reason first: it is what the run switched away from, and
-            # the search's own notice reads "HTTP 429" out of it (spec section 11).
+            # The primary's reason first: it is what the run switched away from
+            # (spec section 11).
             detail = f"{self._primary_detail}; local ollama {local.model}: {exc}"
+            # "Judging with local ollama" is no longer true, so the notice the report
+            # carries says both failed instead (final review, minor).
+            self._both_failed(local.model, exc)
             if exc.status is None or exc.status >= 500 or exc.status in _DEAD_STATUSES:
                 # Latched: a dead or stuck Ollama costs this run one wait, not one per
                 # batch. Anything else failed this request only (fix round 2).
                 self._dead = detail
             raise JudgeUnavailable(detail, status=exc.status, cause=exc.cause) from None
+        if self._notice is not None:
+            # Answering again after a failure that was about one request only.
+            self.switched = self._notice
+        return answer
+
+    def _both_failed(self, model: str, failure: JudgeUnavailable) -> None:
+        """Say in ``switched`` that the local model failed too, after the primary."""
+        primary = self._primary_failure
+        if primary is None:  # pragma: no cover - a local client exists only after a switch
+            return
+        head = _head(self._primary.provider, primary)
+        self.switched = JUDGE_FALLBACK_FAILED.format(head=head, model=model, cause=failure.cause)
 
     def _announce(self, notice: str) -> None:
         """Hand the notice to the listener, once, and never at the answer's expense."""
@@ -899,19 +927,26 @@ class FallbackClient:
                 ) from None
             notice = _notice(self._primary.provider, plan.model, failure)
             self._primary_detail = str(failure)
+            self._primary_failure = failure
+            self._notice = notice
             self._local = self._local_factory(plan.model, self._ollama_url)
             self.switched = notice
             return self._local, notice
 
 
-def _notice(provider: str, model: str, failure: JudgeUnavailable) -> str:
-    """The switch notice, naming why the primary was left (fix round 1, B)."""
+def _head(provider: str, failure: JudgeUnavailable) -> str:
+    """Why the primary was left, in the words every notice opens with (fix round 1, B)."""
     name = _display(provider)
-    if failure.status in _LIMIT_STATUSES:
-        return JUDGE_FALLBACK_LIMIT.format(provider=name, model=model)
+    if failure.status in LIMIT_STATUSES:
+        return _LIMIT_HEAD.format(provider=name)
     if failure.status in _KEY_STATUSES:
-        return JUDGE_FALLBACK_KEY.format(provider=name, status=failure.status, model=model)
-    return JUDGE_FALLBACK_DOWN.format(provider=name, cause=failure.cause, model=model)
+        return _KEY_HEAD.format(provider=name, status=failure.status)
+    return _DOWN_HEAD.format(provider=name, cause=failure.cause)
+
+
+def _notice(provider: str, model: str, failure: JudgeUnavailable) -> str:
+    """The switch notice: why the primary was left, and who judges now."""
+    return _head(provider, failure) + _JUDGING.format(model=model)
 
 
 def build_client(
@@ -1016,7 +1051,18 @@ _REVIEW_SCHEMA: dict[str, Any] = {
 
 # Evidence search (OPEN-ITEMS 17.1a): the judge writes *queries*, never an answer.
 # Deciding a claim without a passage is the truth oracle spec section 3 forbids.
-_QUERIES_TOKENS = 1500
+#
+# The answer budget grows with the batch (final review). ``gpt-oss-120b`` charges its
+# reasoning to ``max_tokens`` even at low effort; an item -- the claim in English and
+# two queries -- is ~170 tokens (``estimate_tokens``, a 300-character claim), so a
+# flat 1500 left five claims ~650 tokens to think in, and a pass that ran over came
+# back ``finish_reason=length`` with every query and translation lost. 1500 for the
+# thinking plus 250 per claim gives five claims 2750, and ~840 of prompt beside it
+# still fits Groq's 8k tokens a minute. The ceiling keeps a large ``search.max_claims``
+# under that budget too.
+_QUERIES_REASONING_TOKENS = 1500
+_QUERIES_TOKENS_PER_CLAIM = 250
+_QUERIES_MAX_TOKENS = 5000
 _QUERIES_PER_CLAIM = 2
 _QUERY_CHARS = 400
 _QUERIES_SCHEMA: dict[str, Any] = {
@@ -1042,6 +1088,11 @@ _QUERIES_SCHEMA: dict[str, Any] = {
 
 _SYSTEM_HEADING = "## System"
 _USER_HEADING = "## User"
+
+
+def _queries_budget(count: int) -> int:
+    """``max_tokens`` for one queries call over ``count`` claims."""
+    return min(_QUERIES_MAX_TOKENS, _QUERIES_REASONING_TOKENS + _QUERIES_TOKENS_PER_CLAIM * count)
 
 
 def _split_prompt(text: str) -> tuple[str, str]:
@@ -1095,9 +1146,11 @@ class Judge:
         self._queries_template = load_prompt("queries")
         #: One line per opinion that could not be used, in the order they arrived.
         self.skipped: list[str] = []
-        #: True once the provider stopped answering; ``detail`` says why.
+        #: True once the provider stopped answering; ``detail`` says why, and
+        #: ``status`` is the HTTP status of that failure (``None`` when there was none).
         self.unavailable = False
         self.detail = ""
+        self.status: int | None = None
 
     @property
     def name(self) -> str:
@@ -1157,6 +1210,7 @@ class Judge:
         self.skipped = []
         self.unavailable = False
         self.detail = ""
+        self.status = None
         opinions: dict[str, JudgeOpinion] = {} if into is None else into
         total = len(items)
         done = 0
@@ -1169,7 +1223,7 @@ class Judge:
                     reasoning_effort=_REASONING_EFFORT,
                 )
             except JudgeUnavailable as exc:
-                self._give_up(str(exc))
+                self._give_up(str(exc), status=exc.status)
                 break
             except Exception as exc:
                 # A bug in the adapter, a library that changed under us: whatever it
@@ -1200,6 +1254,7 @@ class Judge:
         # one that goes down now must not be hidden by an earlier success.
         self.unavailable = False
         self.detail = ""
+        self.status = None
         rendered = self._summary_template.substitute(report=report_markdown)
         system, user = _split_prompt(rendered)
         messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
@@ -1208,7 +1263,7 @@ class Judge:
                 messages, max_tokens=max_tokens, reasoning_effort=_REASONING_EFFORT
             )
         except JudgeUnavailable as exc:
-            self._give_up(str(exc))
+            self._give_up(str(exc), status=exc.status)
             return ""
         except Exception as exc:
             # As in ``review``: the type is named, the message is not, because a
@@ -1236,6 +1291,7 @@ class Judge:
         """
         self.unavailable = False
         self.detail = ""
+        self.status = None
         if not claims:
             return {}
         items = "\n".join(
@@ -1247,11 +1303,13 @@ class Judge:
             completion = self._client.complete(
                 messages,
                 json_schema=_QUERIES_SCHEMA,
-                max_tokens=_QUERIES_TOKENS,
+                max_tokens=_queries_budget(len(claims)),
                 reasoning_effort=_REASONING_EFFORT,
             )
         except JudgeUnavailable as exc:
-            self._give_up(str(exc))
+            # The status travels with the detail: the search names a limit from the
+            # status alone, never from a substring of the detail (final review).
+            self._give_up(str(exc), status=exc.status)
             return {}
         except Exception as exc:
             # The type is named, the message is not: it can carry the key.
@@ -1259,9 +1317,10 @@ class Judge:
             return {}
         return _queries_from(completion.text, len(claims))
 
-    def _give_up(self, detail: str) -> None:
+    def _give_up(self, detail: str, *, status: int | None = None) -> None:
         self.unavailable = True
         self.detail = detail
+        self.status = status
 
     def _batches(self, items: Sequence[JudgeItem]) -> list[list[JudgeItem]]:
         """Items packed to the smaller of the item cap and the token budget.

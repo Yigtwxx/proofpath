@@ -23,6 +23,7 @@ from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
+from functools import partial
 from typing import Any, Literal, Protocol
 
 import httpx
@@ -157,7 +158,8 @@ CurlGet = Callable[[str], tuple[int, bytes, str, str]]  # (status, body, content
 WaybackLookup = Callable[[str], str | None]  # url -> snapshot url or None
 # The ladder's own lookup also says *why* there is no snapshot: (snapshot, error).
 # An injected ``WaybackLookup`` is wrapped into this shape with error ``None``.
-_WaybackLookup = Callable[[str], tuple[str | None, str | None]]
+# The second argument is ``anonymous`` (see ``Fetcher.fetch``).
+_WaybackLookup = Callable[[str, bool], tuple[str | None, str | None]]
 
 
 @dataclass(frozen=True)
@@ -419,6 +421,7 @@ class Fetcher:
         text_kind: str = "fulltext",
         counts_as_source: bool = True,
         use_cache: bool = True,
+        anonymous: bool = False,
     ) -> Fetched:
         """One climb. A bare URL is one source, so a browser refusal here is one
         skipped source; the open-access chain fetches several locations for one
@@ -427,14 +430,22 @@ class Fetcher:
         ``use_cache=False`` climbs past a cached copy. A hit carries the text alone
         (``body=b""``), which is all a *source* needs; a page read as the document
         itself needs its markup back, because its links are its bibliography.
+
+        ``anonymous`` leaves the contact address out of every request of the climb
+        -- robots.txt, httpx, curl_cffi and the Wayback lookup: the User-Agent names
+        the tool and not the user. It is for pages the evidence search found, which
+        the user never chose to contact (final review, round 2). A cited source keeps
+        the address, as the polite pools it is configured for expect.
         """
-        result = self._climb(url, text_kind, use_cache=use_cache)
+        result = self._climb(url, text_kind, use_cache=use_cache, anonymous=anonymous)
         self._counts[result.outcome] += 1
         if counts_as_source and result.outcome is Outcome.BLOCKED_NO_BROWSER:
             self._gate.skipped += 1
         return result
 
-    def _climb(self, url: str, text_kind: str, *, use_cache: bool = True) -> Fetched:
+    def _climb(
+        self, url: str, text_kind: str, *, use_cache: bool = True, anonymous: bool = False
+    ) -> Fetched:
         notes: list[str] = []
         if self.network_note:
             notes.append(self.network_note)
@@ -457,13 +468,13 @@ class Fetcher:
                     notes=notes,
                     from_cache=True,
                 )
-        if self._config.fetch.respect_robots and not self._robots_allow(url):
+        if self._config.fetch.respect_robots and not self._robots_allow(url, anonymous):
             notes.append(f"step 1 httpx: robots.txt disallows {PRODUCT_TOKEN}")
             return _failed(url, 1, Outcome.BLOCKED_ROBOTS, _no_response(url), notes)
 
         # Step 1: httpx.
         step = 1
-        response, verdict, note = self._with_backoff(url)
+        response, verdict, note = self._with_backoff(url, anonymous)
         notes.append(f"step 1 httpx: {note}")
         if verdict == "ok":
             return self._finish(url, step, response, text_kind, notes)
@@ -476,7 +487,7 @@ class Fetcher:
         if failure_verdict == "blocked":
             # Step 2: TLS impersonation.
             step = 2
-            response, verdict, note = self._curl(url)
+            response, verdict, note = self._curl(url, anonymous)
             notes.append(f"step 2 curl_cffi: {note}")
             if verdict == "ok":
                 return self._finish(url, step, response, text_kind, notes)
@@ -502,7 +513,7 @@ class Fetcher:
         # Step 4: Wayback, for blocked and unreachable alike. A miss reports the
         # last real failure, not the archive's.
         step = 4
-        snapshot, error = self._wayback(url)
+        snapshot, error = self._wayback(url, anonymous)
         if snapshot is None:
             notes.append(
                 f"step 4 wayback: lookup failed ({error})"
@@ -510,7 +521,7 @@ class Fetcher:
                 else "step 4 wayback: no snapshot"
             )
         else:
-            response, verdict, note = self._with_backoff(snapshot)
+            response, verdict, note = self._with_backoff(snapshot, anonymous)
             notes.append(f"step 4 wayback: {note}")
             if verdict == "ok":
                 return self._finish(url, step, response, text_kind, notes)
@@ -560,10 +571,10 @@ class Fetcher:
 
     # --- transports ---------------------------------------------------------
 
-    def _httpx_get(self, url: str) -> _Response:
+    def _httpx_get(self, url: str, anonymous: bool = False) -> _Response:
         # PoliteClient.get raises on 429/5xx; the ladder needs the status to classify.
         try:
-            response = self._polite.client.get(url, headers={"Accept": ACCEPT})
+            response = self._polite.client.get(url, headers={"Accept": ACCEPT, **_agent(anonymous)})
         except httpx.HTTPError as exc:
             return _Response(None, b"", "", url, error=type(exc).__name__)
         retry_after = response.headers.get("Retry-After", "")
@@ -575,11 +586,11 @@ class Fetcher:
             retry_after=float(retry_after) if retry_after.isdigit() else None,
         )
 
-    def _with_backoff(self, url: str) -> tuple[_Response, Verdict, str]:
+    def _with_backoff(self, url: str, anonymous: bool = False) -> tuple[_Response, Verdict, str]:
         """An httpx GET with the PoliteClient backoff; the last response is returned, not raised."""
         for attempt in range(RETRIES + 1):
             self._polite.throttle(url)
-            response = self._httpx_get(url)
+            response = self._httpx_get(url, anonymous)
             verdict = response.verdict
             if verdict != "retryable":
                 return response, verdict, response.explain(verdict)
@@ -596,9 +607,9 @@ class Fetcher:
         detail = f"retryable, gave up after {RETRIES + 1} attempts"
         return response, "retryable", response.describe(detail)
 
-    def _curl(self, url: str) -> tuple[_Response, Verdict, str]:
+    def _curl(self, url: str, anonymous: bool = False) -> tuple[_Response, Verdict, str]:
         self._polite.throttle(url)
-        get = self._curl_get or self._default_curl
+        get = self._curl_get or partial(self._default_curl, anonymous=anonymous)
         try:
             status, body, content_type, final_url = get(url)
         except TransportFailure as exc:
@@ -612,11 +623,10 @@ class Fetcher:
         response = _Response(status, body, content_type, final_url)
         return response, response.verdict, response.explain(response.verdict)
 
-    def _default_curl(self, url: str) -> tuple[int, bytes, str, str]:
+    def _default_curl(self, url: str, *, anonymous: bool = False) -> tuple[int, bytes, str, str]:
         # Looked up at call time so tests can monkeypatch ``proofpath.fetch.default_curl_get``.
-        return default_curl_get(
-            url, timeout=self._timeout, contact_email=self._config.contact.email
-        )
+        email = "" if anonymous else self._config.contact.email
+        return default_curl_get(url, timeout=self._timeout, contact_email=email)
 
     def _browser(self, url: str) -> tuple[_Response, Verdict, str]:
         self._polite.throttle(url)
@@ -626,12 +636,14 @@ class Fetcher:
         response = _Response(status, body, content_type, url)
         return response, response.verdict, response.explain(response.verdict)
 
-    def _lookup_wayback(self, url: str) -> tuple[str | None, str | None]:
+    def _lookup_wayback(self, url: str, anonymous: bool = False) -> tuple[str | None, str | None]:
         """``(snapshot url, error)``. The error is set only when the call itself failed,
         never for a well-formed response that simply has no snapshot (a plain miss)."""
         self._polite.throttle(WAYBACK_AVAILABLE)
         try:
-            response = self._polite.client.get(WAYBACK_AVAILABLE, params={"url": url})
+            response = self._polite.client.get(
+                WAYBACK_AVAILABLE, params={"url": url}, headers=_agent(anonymous)
+            )
         except httpx.HTTPError as exc:
             return None, type(exc).__name__
         if response.status_code != 200:
@@ -646,25 +658,31 @@ class Fetcher:
 
     # --- robots -------------------------------------------------------------
 
-    def _robots_allow(self, url: str) -> bool:
+    def _robots_allow(self, url: str, anonymous: bool = False) -> bool:
         parsed = httpx.URL(url)
         host = parsed.host
         if host not in self._robots:
             robots_url = str(parsed.copy_with(path="/robots.txt", query=None, fragment=None))
-            self._robots[host] = self._load_robots(robots_url)
+            self._robots[host] = self._load_robots(robots_url, anonymous)
         rules = self._robots[host]
         return rules is None or bool(rules.can_fetch(url, PRODUCT_TOKEN))
 
-    def _load_robots(self, robots_url: str) -> Protego | None:
+    def _load_robots(self, robots_url: str, anonymous: bool = False) -> Protego | None:
         """A missing, erroring or unreachable robots.txt allows everything."""
         self._polite.throttle(robots_url)
         try:
-            response = self._polite.client.get(robots_url)
+            response = self._polite.client.get(robots_url, headers=_agent(anonymous))
         except httpx.HTTPError:
             return None
         if response.status_code != 200:
             return None
         return Protego.parse(response.text)
+
+
+def _agent(anonymous: bool) -> dict[str, str]:
+    """The per-request header that replaces the client's User-Agent for an anonymous
+    climb: the tool's name and repository, and no contact address."""
+    return {"User-Agent": user_agent()} if anonymous else {}
 
 
 def _no_response(url: str) -> _Response:
@@ -680,7 +698,7 @@ def _transport_failed(url: str, error: str) -> tuple[_Response, Verdict, str]:
 
 def _plain_lookup(lookup: WaybackLookup) -> _WaybackLookup:
     """An injected lookup has no failure channel: a ``None`` is a plain miss."""
-    return lambda url: (lookup(url), None)
+    return lambda url, _anonymous: (lookup(url), None)
 
 
 def _failed(

@@ -573,7 +573,7 @@ def test_the_model_is_never_pulled(mock: respx.MockRouter) -> None:
 
 
 def test_a_local_model_that_fails_too_keeps_the_primarys_reason(mock: respx.MockRouter) -> None:
-    """The search's ``fallback_notice`` reads ``HTTP 429`` out of this detail."""
+    """The primary's reason comes first in the detail: it is what the run left."""
     routes(mock, local=httpx.Response(404))
     client = fallback()
     with pytest.raises(judge.JudgeUnavailable) as caught:
@@ -857,3 +857,64 @@ def test_an_orphan_closing_tag_before_prose_is_not_stripped() -> None:
 def test_an_orphan_closing_tag_before_json_is_stripped() -> None:
     assert judge._strip_think('reasoning {a}\n</think>\n{"items": []}') == '{"items": []}'
     assert judge._strip_think('<think>r</think> {"items": []}') == '{"items": []}'
+
+
+# --- both failed (final review, minor: stale notice) ---------------------------------
+
+BOTH_FAILED = f"Groq limit reached, and local ollama {LOCAL} failed too (HTTP 404)"
+
+
+def test_a_local_model_that_fails_too_is_never_reported_as_judging(
+    mock: respx.MockRouter,
+) -> None:
+    routes(mock, local=httpx.Response(404))
+    client = fallback()
+    with pytest.raises(judge.JudgeUnavailable):
+        client.complete(MESSAGES)
+    assert client.switched == BOTH_FAILED
+    assert "judging with" not in client.switched
+
+
+def test_a_local_model_that_answers_again_is_reported_as_judging_again(
+    mock: respx.MockRouter,
+) -> None:
+    # A 400 fails one request, not the model (fix round 2), so the next can succeed.
+    _, _, _, local = routes(mock)
+    local.mock(side_effect=[httpx.Response(400), _ok(OPINION)])
+    client = fallback()
+    with pytest.raises(judge.JudgeUnavailable):
+        client.complete(MESSAGES)
+    assert client.switched is not None and "failed too" in client.switched
+    client.complete(MESSAGES)
+    assert client.switched == LIMIT
+
+
+def test_a_run_whose_local_model_fails_too_says_both_failed_in_the_report(
+    mock: respx.MockRouter,
+) -> None:
+    routes(mock, local=httpx.Response(404))
+    built = searching(StubSearcher())
+    built.judge = judge.Judge(judge.build_client(GROQ, KEY))
+    report = verify_mod.verify(CLAIM, built)
+    assert report.judge_notice == BOTH_FAILED
+    assert f"- judge fallback: {BOTH_FAILED}" in render_markdown(report)
+
+
+# --- one limit classification (final review, minor) ------------------------------------
+
+
+def test_judge_queries_keeps_the_status_of_the_failure() -> None:
+    class Down:
+        provider = "groq"
+        model = "m"
+        cost = judge.JudgeCost()
+
+        def complete(self, *_: object, **__: object) -> judge.Completion:
+            raise judge.JudgeUnavailable("HTTP 413 from https://api.test", status=413)
+
+        def close(self) -> None:
+            pass
+
+    built = judge.Judge(Down())  # type: ignore[arg-type]
+    assert built.queries(["a claim"]) == {}
+    assert built.unavailable and built.status == 413
