@@ -36,6 +36,7 @@ from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from functools import partial
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -91,7 +92,10 @@ from proofpath.providers.academic import AcademicProvider
 from proofpath.providers.social import SocialProvider
 from proofpath.providers.web import WebProvider
 from proofpath.report import (
+    FOUND_BY_PROOFPATH,
+    LANGUAGE_UNSUPPORTED,
     LEVELS,
+    SEARCH_UNAVAILABLE,
     STATE_WORDS,
     SUMMARY,
     ClaimResult,
@@ -99,6 +103,7 @@ from proofpath.report import (
     Finding,
     Kind,
     Report,
+    SearchSummary,
     SourceStatus,
     Stage,
     TextKind,
@@ -108,11 +113,17 @@ from proofpath.report import (
 )
 from proofpath.resolve import Resolver, ResolveResult, Retraction, State
 from proofpath.retrieval import Embedder, FastEmbedder, PassageIndex
-from proofpath.settings_hints import BROWSER_SETTING
+from proofpath.search import Searcher, SearchKeyError, canonical, search_claim
+from proofpath.search.providers import build_searcher
+from proofpath.search.queries import plan_queries
+from proofpath.secrets import CREDENTIALS_MISSING
+from proofpath.settings_hints import BROWSER_SETTING, SEARCH_SETTING, SEARXNG_SETTING
 
 # Stage names, as the report and the TUI print them (spec section 13.2).
 PARSING = "Parsing"
 CLAIMS = "Claims"
+# Between Claims and Resolving, and only for a text that cites nothing (OPEN-ITEMS 17.1a).
+SEARCHING = "Searching"
 RESOLVING = "Resolving"
 RETRACTIONS = "Retractions"
 FETCHING = "Fetching"
@@ -176,16 +187,35 @@ NO_DOCUMENT = "UNVERIFIED (the provider returned no document)"
 # text to check any of it against, and the report has to tell the two apart (rule 6).
 NOTHING_TO_VERIFY = "nothing to verify"
 
-# What the parsing stage says of pasted text that neither links nor cites anything:
-# a bare claim. The tool never goes looking for evidence of its own (README: it
-# checks the sources *behind* a claim), so a claim with no source behind it ends
-# with the stages all at zero -- which, unsaid, looks exactly like a clean run to
-# the reader who typed it (product rule 6). The hint says what to paste instead.
+# What the parsing stage says of a text that neither links nor cites anything: a bare
+# claim. Without a search provider there is nothing to check it against, and ending
+# with every stage at zero would read as a clean run (product rule 6). The hint names
+# the one setting that makes proofpath look for evidence itself (OPEN-ITEMS 17.1a).
 NO_SOURCE_IN_TEXT = "the text links or cites no source; nothing to verify against"
 NO_SOURCE_HINT = (
-    "proofpath checks a claim against the sources it cites, and does not search for "
-    "any: paste the claim with its source's address, or the address itself"
+    "proofpath checks a claim against the sources it cites; to have it search the web "
+    f"for evidence instead: proofpath config set {SEARCH_SETTING}, with TAVILY_API_KEY in "
+    f".env, or proofpath config set {SEARXNG_SETTING} plus search.base_url"
 )
+# A provider is configured but cannot run (no key, no address). Reported as the
+# credential state, naming what to set -- never as a text that simply cites nothing.
+SEARCH_CANNOT_RUN = "the text cites no source, and the evidence search could not run"
+EVIDENCE_FOUND_TITLE = "a page proofpath found supports the claim"
+NO_EVIDENCE_TITLE = "no page proofpath found supports or contradicts the claim"
+NO_EVIDENCE_NOTE = "absence of evidence is not evidence against the claim"
+# A claim the models cannot read: not English, and no judge translated it. It is not
+# searched, and it is not called NEI either (OPEN-ITEMS 17.1a, Amendment A).
+LANGUAGE_TITLE = "the claim is not in English and was not translated"
+# True whether or not a judge was on (it may have been down, or echoed the claim), and
+# neutral about where it is run: a TUI run builds no judge, so the hint names the one
+# switch that does, rather than a TUI setting that would not help (round 2).
+LANGUAGE_HINT = (
+    "the models read English only, and no judge translated this claim; run with a "
+    "judge (--judge) to translate a claim before it is searched"
+)
+# What a translated claim's finding says was actually checked. After the numeric
+# reason, which ``report`` reads back out of ``detail[0]``.
+CHECKED_AS = "checked as: "
 
 # Said *before* the factories run rather than after: the first use of either model
 # downloads it, which takes minutes, and a front end that says nothing here looks hung.
@@ -265,6 +295,13 @@ class Engine:
     # for the final summary alone, and spec section 11.1 caps the summary at one
     # call: escalating as well would quietly turn "one call" into several.
     escalate: bool = True
+    # Evidence search for a text that cites nothing (OPEN-ITEMS 17.1a). ``None`` when
+    # no provider is configured; ``search_problem`` then says why a configured one
+    # could not be built (a missing key), and ``search`` is this run's own switch
+    # (``--no-search``, or ``permissions.web_search`` other than ``allow``).
+    searcher: Searcher | None = None
+    search_problem: str = ""
+    search: bool = True
     # The polite HTTP client the social family reads posts through, and the one
     # ``target_document`` uses when the target *is* a post (spec section 6.2). Built
     # here by default so that every engine has one source family per spec section
@@ -304,6 +341,7 @@ class Engine:
         thresholds: Thresholds = DEFAULT_THRESHOLDS,
         judge: Judge | None = None,
         escalate: bool = True,
+        search: bool = True,
     ) -> Engine:
         """The real wiring: the same one ``proofpath fetch`` builds, one layer up.
 
@@ -332,6 +370,8 @@ class Engine:
             email = config.contact.email
             client = PoliteClient(contact_email=email)
             closers.append(client.client.close)
+            # On the run's polite client, so the provider is throttled like any host.
+            setup = build_searcher(config.search, client)
             chain = OpenAccess(fetcher, client, contact_email=email, cache=cache)
             # The resolver builds its own polite client, which would then have no
             # owner to close it; handing it one keeps every socket on ``_closers``.
@@ -371,6 +411,10 @@ class Engine:
             device=device_name,
             judge=judge,
             escalate=escalate,
+            searcher=setup.searcher,
+            search_problem=setup.problem,
+            # The search never prompts, so ``ask`` is ``deny`` here (rule 4).
+            search=search and config.permissions.web_search == "allow",
             _closers=closers,
         )
 
@@ -437,6 +481,8 @@ class Prepared:
     findings: list[Finding]
     stages: list[Stage]
     started: float  # time.monotonic() when the run began
+    # Set only on a run that searched (OPEN-ITEMS 17.1a).
+    search: SearchSummary | None = None
 
 
 def target_document(
@@ -691,6 +737,11 @@ def prepare(
     """
     started = time.monotonic()
     emit: Listener = on_event if on_event is not None else _ignore
+    if engine.judge is not None:
+        # A run starts on the configured provider, whatever the last one switched to
+        # (Amendment B 9), and a switch during it is told to this run's listener.
+        engine.judge.reset()
+        engine.judge.listen(_switch_notice(emit))
     findings: list[Finding] = []
     stages: list[Stage] = []
 
@@ -747,35 +798,74 @@ def prepare(
         # is what keeps the loss visible instead of it reading as a post that quoted
         # nothing (product rule 2).
         add(_finding(Kind.PARSE_ERROR, Locator(line=1), note))
-    if document.kind in ("post", "page") and not document.references:
-        # A post or a page that links to nothing has nothing behind it to check.
-        # Reporting it as a document with no findings would make "nothing was
-        # verified" look exactly like "everything checked out" (product rule 6).
-        add(
-            _finding(
-                Kind.PARSE_ERROR,
-                Locator(line=1),
-                f"{document.kind} carries no links; nothing to verify against",
+    # Whether the document cites nothing at all, and whether this run will search for
+    # it (OPEN-ITEMS 17.1a). Markers rule a search out even on a post or a page with
+    # no links: "[1]" is the author citing something, and a search would put pages in
+    # its place the author never named (spec 2026-09-28 section 3).
+    unmarked = not document.references and not claims_mod.find_markers(document)
+    sourceless = not document.references and (
+        document.kind in ("post", "page") or (bool(document.paragraphs) and unmarked)
+    )
+    # A document a search could in principle run against: no references, no markers,
+    # and some text to search. The three branches below all start from this same
+    # question, so it is asked once instead of being spelled out three times.
+    searchable = not document.references and unmarked and bool(document.paragraphs)
+    chosen: claims_mod.Checkworthy | None = None
+    if searchable and allowed and engine.search and engine.searcher is not None:
+        chosen = claims_mod.checkworthy(document, limit=engine.config.search.max_claims)
+    # A text with no sentence to search ("???", a row of emoji) is not searched: a
+    # Searching stage over nothing would end the run with no finding at all, which
+    # reads as clean (product rule 6). It keeps the parse error below instead.
+    will_search = chosen is not None and bool(chosen.claims)
+    if sourceless and not will_search:
+        if searchable and engine.search and engine.search_problem and allowed:
+            # A provider was configured and cannot run. The fix is one setting, so
+            # the finding names it, in the credential state a missing key already has
+            # (spec 2026-09-28 section 4); a missing SearXNG address is fixed the same way.
+            add(
+                _finding(
+                    Kind.UNVERIFIED,
+                    Locator(line=1),
+                    SEARCH_CANNOT_RUN,
+                    state=CREDENTIALS_MISSING,
+                    detail=(engine.search_problem,),
+                )
             )
-        )
-    elif document.paragraphs and not document.references and not claims_mod.find_markers(document):
-        # A file or pasted text that neither prints a bibliography nor links nor
-        # marks a citation. The same silence as a post with no links, and reported
-        # for the same reason; pasted text also gets told what to paste instead,
-        # because the one who typed a bare claim is at the keyboard right now. Not
-        # by ``reader``: a paste ending in ".pdf" is parsed as text but named by its
-        # suffix, and the one thing every paste shares is not being a file.
-        pasted = not _is_file(target)
-        add(
-            _finding(
-                Kind.PARSE_ERROR,
-                Locator(line=1),
-                NO_SOURCE_IN_TEXT
-                if pasted
-                else f"{document.kind} cites nothing; nothing to verify against",
-                detail=(NO_SOURCE_HINT,) if pasted else (),
+        elif document.kind in ("post", "page"):
+            # A post or a page that links to nothing has nothing behind it to check.
+            # Reporting it as a document with no findings would make "nothing was
+            # verified" look exactly like "everything checked out" (product rule 6).
+            add(
+                _finding(
+                    Kind.PARSE_ERROR,
+                    Locator(line=1),
+                    f"{document.kind} carries no links; nothing to verify against",
+                )
             )
-        )
+        else:
+            # A file or pasted text that neither prints a bibliography nor links nor
+            # marks a citation. The same silence as a post with no links, and reported
+            # for the same reason; pasted text also gets told how to have it searched,
+            # because the one who typed a bare claim is at the keyboard right now. Not
+            # by ``reader``: a paste ending in ".pdf" is parsed as text but named by its
+            # suffix, and the one thing every paste shares is not being a file.
+            pasted = not _is_file(target)
+            # The hint only makes sense when nothing is set up to search with. An
+            # engine that already has a searcher just did not search this run
+            # (``--no-search``, ``web_search`` ask/deny, a denied network, or no
+            # checkworthy sentence) -- telling the user to configure what is already
+            # configured would be wrong.
+            hint = pasted and engine.searcher is None
+            add(
+                _finding(
+                    Kind.PARSE_ERROR,
+                    Locator(line=1),
+                    NO_SOURCE_IN_TEXT
+                    if pasted
+                    else f"{document.kind} cites nothing; nothing to verify against",
+                    detail=(NO_SOURCE_HINT,) if hint else (),
+                )
+            )
     if not document.paragraphs and not document.references:
         # Every page failed, or the file is a scan with no text layer. Without this
         # the run would report nothing at all and read as clean (product rule 6).
@@ -833,6 +923,25 @@ def prepare(
     if not allowed and denied_note:
         emit(Note(denied_note))
 
+    # --- 2b. searching (OPEN-ITEMS 17.1a) ------------------------------------
+    # Only for a document that cites nothing. Its claims are the check-worthy
+    # sentences, and its references are the pages found for them, each marked as
+    # found (``origin="search"``). From here on every stage runs exactly as it does
+    # for a cited source.
+    search: SearchSummary | None = None
+    if will_search and chosen is not None:
+        found = _search(
+            document,
+            chosen,
+            engine,
+            add=add,
+            emit=emit,
+            check=check,
+            opened=opened,
+            closed=closed,
+        )
+        document, claims, search = found.document, found.claims, found.summary
+
     # --- 3. resolving -------------------------------------------------------
     began = opened(RESOLVING, RESOLVERS_BY)
     # By printed number only. ``claims`` already guarantees that every cited number
@@ -889,16 +998,25 @@ def prepare(
             continue
         # Which family this entry belongs to, decided once and used by all three
         # stages below. The core never learns what the answer means (spec 5.2).
-        provider = provider_for(reference, engine.providers)
+        # A page the search found is a page: it goes to the web family whatever its
+        # address carries. ``provider_for`` would file a found ``/doi/`` or arXiv
+        # address as a bibliography entry, and the indexes' answer to a bare URL used
+        # to be a false GHOST (final review, C1; product rule 3).
+        found = reference.origin == "search"
+        provider = engine.providers.web if found else provider_for(reference, engine.providers)
         chosen[number] = provider
         # The cache answers for a reference, not for a source: a reference has no
-        # source id until it resolves. A miss costs exactly what it used to.
-        stored = None if engine.cache is None else engine.cache.get_resolution(reference.raw)
+        # source id until it resolves. A miss costs exactly what it used to. A found
+        # page skips it both ways: the web family asks nobody, and a stored record of
+        # the same address was about a bibliography entry, not about this page.
+        stored = (
+            None if engine.cache is None or found else engine.cache.get_resolution(reference.raw)
+        )
         if stored is None:
             result = provider.resolve(reference)
             if provider.scheme == INDEXED_FAMILY:
                 resolved_from_indexes += 1
-            if engine.cache is not None:
+            if engine.cache is not None and not found:
                 # ``put_resolution`` drops UNVERIFIED (provider unavailable) itself:
                 # an outage is not knowledge about the reference (product rule 2).
                 engine.cache.put_resolution(reference.raw, result)
@@ -1081,6 +1199,12 @@ def prepare(
         began,
     )
 
+    if search is not None:
+        # Read means full text or an abstract: what a verdict could be drawn from.
+        search = replace(
+            search,
+            pages_read=sum(1 for status in sources.values() if status.text_kind != "none"),
+        )
     return Prepared(
         document=document,
         claims=claims,
@@ -1089,6 +1213,7 @@ def prepare(
         findings=findings,
         stages=stages,
         started=started,
+        search=search,
     )
 
 
@@ -1118,6 +1243,9 @@ def decide_all(
       carries the partial report, marked as partial (product rule 6).
     """
     emit: Listener = on_event if on_event is not None else _ignore
+    if engine.judge is not None:
+        # Not reset here: a switch during the search is part of this same run.
+        engine.judge.listen(_switch_notice(emit))
     findings = list(prepared.findings)
     stages = list(prepared.stages)
     results: list[ClaimResult] = []
@@ -1196,6 +1324,17 @@ def decide_all(
 
     for group, members in grouped.items():
         add(_group_finding(group, members))
+    if prepared.search is not None and not cancelled:
+        # One line per searched claim that no found page decided. A cancelled run is
+        # left alone: an undecided claim there is unfinished, not unbacked.
+        backed = {
+            (result.claim.paragraph, result.claim.sentence)
+            for result in results
+            if result.verdict.label is not Label.NEI
+        }
+        for claim in prepared.claims.claims:
+            if (claim.paragraph, claim.sentence) not in backed:
+                add(_no_evidence(claim))
     summary = _verify_summary(results, cached) if jobs else NOTHING_TO_VERIFY
     elapsed = time.monotonic() - began
     stages.append(Stage(name=VERIFYING, by=engine.device, summary=summary, elapsed=elapsed))
@@ -1226,11 +1365,17 @@ def decide_all(
         stages=tuple(stages),
         models=_models(embedder, scorer, engine),
         # Zero unless a judge ran: the default path calls nobody (spec section 11).
-        api_calls=0 if judge_cost is None else judge_cost.calls,
+        # Provider requests only: a local fallback's answers are ``local_calls``.
+        api_calls=0 if judge_cost is None else judge_cost.calls - judge_cost.local_calls,
         judge_cost=judge_cost,
         elapsed=time.monotonic() - prepared.started,
         tier_note=pipeline.tier_note(engine.thresholds),
         cancelled=cancelled,
+        search=prepared.search,
+        # The hint (no fallback, but one is worth adding) rides the same one-line
+        # footer field as the switch notice: never both, since a hint means nothing
+        # switched (spec section 11 addendum).
+        judge_notice=None if engine.judge is None else (engine.judge.switched or engine.judge.hint),
     )
     if cancelled:
         raise Cancelled("run cancelled", report=report)
@@ -1286,6 +1431,7 @@ def _summarise(
     if judge is None:
         raise ValueError("a summary needs a judge on the engine")
     emit: Listener = on_event if on_event is not None else _ignore
+    judge.listen(_switch_notice(emit))
     began = time.monotonic()
     emit(StageStart(name=SUMMARISING, by=judge.name))
     before = replace(judge.cost)  # the running total, as it stood before this call
@@ -1316,7 +1462,7 @@ def _summarise(
             *report.stages,
             Stage(name=SUMMARISING, by=judge.name, summary=summary, elapsed=elapsed),
         ),
-        api_calls=judge.cost.calls,
+        api_calls=judge.cost.calls - judge.cost.local_calls,
         # A copy, not the client's own: ``JudgeCost`` is mutable and the client keeps
         # adding to it for the next document, so an alias here would let a finished
         # report's stated cost go on changing after the run that earned it was over.
@@ -1324,7 +1470,21 @@ def _summarise(
         # The extra call is part of what the run took; a footer that left it out
         # would price the summary at nothing.
         elapsed=time.monotonic() - started,
+        judge_notice=judge.switched or judge.hint or report.judge_notice,
     )
+
+
+def _switch_notice(emit: Listener) -> Callable[[str], None]:
+    """The judge's switch to its local fallback, as the run's one notice (spec 11).
+
+    Called on the thread that switched, before the local model is loaded, so a
+    front end can show the line while the wait it announces is still ahead.
+    """
+
+    def notice(text: str) -> None:
+        emit(Note(text, notice=True))
+
+    return notice
 
 
 # --- the verifying stage ----------------------------------------------------------
@@ -1406,14 +1566,17 @@ def _decide_claim(
     stored or not stored at all -- which is what lets a cancelled run leave exactly
     as many verdicts behind as it finished claims.
     """
-    key = cache_mod.claim_hash(claim.text)
+    # The English text the models read: the claim itself, or the judge's translation
+    # of it (OPEN-ITEMS 17.1a). The cache is keyed by what was checked.
+    checked = claim.hypothesis or claim.text
+    key = cache_mod.claim_hash(checked)
     stored = (
         None if engine.cache is None else engine.cache.get_verdict(key, job.source_id, model_key)
     )
     if stored is not None:
         return ClaimResult(claim, job.number, job.source_id, stored, from_cache=True)
     verdict = pipeline.decide_indexed(
-        claim.text, index, embedder, scorer, k=engine.k, thresholds=engine.thresholds
+        checked, index, embedder, scorer, k=engine.k, thresholds=engine.thresholds
     )
     if engine.cache is not None:
         engine.cache.put_verdict(key, job.source_id, model_key, verdict)
@@ -1429,22 +1592,36 @@ def _verdict_finding(claim: Claim, status: SourceStatus, verdict: Verdict) -> Fi
     note and may carry no passage at all: "the source does not say" is a different
     statement from "the source says otherwise" (rule 2).
     """
-    if verdict.label is Label.SUPPORTED:
-        return None
+    found = status.reference.origin == "search"
+    source = "a page proofpath found" if found else "the cited source"
     kind: Kind
     detail: tuple[str, ...] = ()
-    if verdict.label is Label.REFUTED and verdict.reason.startswith(NUMERIC_REASON):
+    if verdict.label is Label.SUPPORTED:
+        if not found:
+            return None
+        # The answer the user asked for: shown, with its passage (rule 1), where a
+        # supported *cited* claim stays silent.
+        kind = Kind.EVIDENCE_FOUND
+        title = EVIDENCE_FOUND_TITLE
+    elif verdict.label is Label.REFUTED and verdict.reason.startswith(NUMERIC_REASON):
         # A rule decided this one and named both figures; the reason is the finding's
-        # only note, and ``report`` reads the carets back out of it.
+        # first note, and ``report`` reads the carets back out of it.
         kind = Kind.NUMERIC_MISMATCH
-        title = "claim contradicts the cited source"
+        title = f"claim contradicts {source}"
         detail = (verdict.reason,)
     elif verdict.label is Label.REFUTED:
         kind = Kind.NOT_SUPPORTED
-        title = "claim is not supported by the cited source"
+        title = f"claim is not supported by {source}"
     else:
         kind = Kind.NEI
-        title = "source neither supports nor contradicts the claim"
+        title = (
+            "a page proofpath found neither supports nor contradicts the claim"
+            if found
+            else "source neither supports nor contradicts the claim"
+        )
+    if claim.hypothesis:
+        # A translated claim says what the models actually read (Amendment A).
+        detail = (*detail, f"{CHECKED_AS}{claim.hypothesis}")
     return Finding(
         kind=kind,
         level=LEVELS[kind],
@@ -1457,7 +1634,7 @@ def _verdict_finding(claim: Claim, status: SourceStatus, verdict: Verdict) -> Fi
         source_id=status.source_id,
         fetch_step=status.fetch_step,
         tier=verdict.tier,
-        detail=detail,
+        detail=_provenance(status.reference, detail),
         group=claim.group,
     )
 
@@ -1628,7 +1805,13 @@ def _judging(
     ask: list[JudgeItem] = []
     for index, result in escalated:
         ident = f"c{index}"
-        keys[ident] = (cache_mod.claim_hash(result.claim.text), result.source_id)
+        # Keyed by what the models actually read (the hypothesis when the claim was
+        # translated), matching ``_decide_claim``'s verdict cache key: a judgement
+        # about the English text belongs to that text, not to the reader's sentence.
+        keys[ident] = (
+            cache_mod.claim_hash(result.claim.hypothesis or result.claim.text),
+            result.source_id,
+        )
         stored = (
             None if engine.cache is None else engine.cache.get_judgement(*keys[ident], judge.name)
         )
@@ -1641,7 +1824,7 @@ def _judging(
         ask.append(
             JudgeItem(
                 id=ident,
-                claim=result.claim.text,
+                claim=result.claim.hypothesis or result.claim.text,
                 passage=passage.text,
                 verdict=result.verdict.label,
                 tier=result.verdict.tier,
@@ -1665,7 +1848,9 @@ def _judging(
     if engine.cache is not None:
         try:
             for ident, opinion in fresh.items():
-                engine.cache.put_judgement(*keys[ident], judge.name, opinion)
+                # Under the model that gave it: a judge that switched mid-review has
+                # opinions from two models, and each belongs to its own cache row.
+                engine.cache.put_judgement(*keys[ident], opinion.model, opinion)
         except sqlite3.Error as exc:
             # The cache is a speed-up, never a gate. A judgement that cannot be
             # stored -- a source row the cascade already took, a file gone read-only
@@ -1714,7 +1899,10 @@ def _with_opinion(item: Finding, by_claim: dict[tuple[str, str], JudgeOpinion]) 
     """
     if item.claim is None or item.source_id is None:
         return item
-    opinion = by_claim.get((cache_mod.claim_hash(item.claim.text), item.source_id))
+    # Same key as ``_judging`` built ``by_claim`` with (hypothesis-or-text), so a
+    # translated claim's opinion is found under the English text it was asked about.
+    checked = item.claim.hypothesis or item.claim.text
+    opinion = by_claim.get((cache_mod.claim_hash(checked), item.source_id))
     if opinion is None:
         return item
     detail = item.detail
@@ -1818,11 +2006,14 @@ def _finding(
     source_id: str | None = None,
     fetch_step: int | None = None,
     detail: tuple[str, ...] = (),
+    claim: Claim | None = None,
 ) -> Finding:
-    """A finding from a stage: never about a claim, so never carrying a verdict.
+    """A finding from a stage: never carrying a verdict.
 
     ``state`` defaults to the kind's own word; only the ``UNVERIFIED`` family passes
     one, because which flavour applies depends on what failed (product rule 2).
+    ``claim`` is set by the searching stage, whose findings are about one sentence
+    and have no reference to point at: JSON and SARIF readers get the sentence.
     """
     return Finding(
         kind=kind,
@@ -1831,13 +2022,21 @@ def _finding(
         title=title,
         state=STATE_WORDS[kind] if state is None else state,
         reference=reference,
-        claim=None,
+        claim=claim,
         verdict=None,
         source_id=source_id,
         fetch_step=fetch_step,
         tier=None,
-        detail=detail,
+        detail=_provenance(reference, detail),
     )
+
+
+def _provenance(reference: Reference | None, detail: tuple[str, ...]) -> tuple[str, ...]:
+    """A found page says so on every finding about it (OPEN-ITEMS 17.1a). Last, not
+    first: a numeric mismatch's reason is read back out of ``detail[0]``."""
+    if reference is not None and reference.origin == "search":
+        return (*detail, FOUND_BY_PROOFPATH)
+    return detail
 
 
 def _parser_for(target: Path | str) -> str:
@@ -2048,4 +2247,170 @@ def _nothing_read(status: SourceStatus) -> EvidenceDoc:
         url=status.url,
         step=None,
         title="the source was not read",
+    )
+
+
+# --- the searching stage (OPEN-ITEMS 17.1a) ----------------------------------------
+
+
+@dataclass(frozen=True)
+class _Searched:
+    document: Document
+    claims: Claims
+    summary: SearchSummary
+
+
+def _search(
+    document: Document,
+    chosen: claims_mod.Checkworthy,
+    engine: Engine,
+    *,
+    add: Callable[[Finding], None],
+    emit: Listener,
+    check: Callable[[], None],
+    opened: Callable[[str, str], float],
+    closed: Callable[[str, str, str, float], None],
+) -> _Searched:
+    """Search for each of ``chosen``'s sentences and turn the kept hits into references.
+
+    A provider that fails is reported once and the search stops there: the claims it
+    did not reach count as not searched rather than as searched and empty, which
+    would read as "nothing out there" (product rule 2). A claim that is not English
+    and was not translated is reported and skipped, never searched in a language the
+    models cannot read (Amendment A).
+    """
+    searcher = engine.searcher
+    if searcher is None:  # pragma: no cover - ``will_search`` already checked
+        raise ValueError("no searcher on this engine")
+    settings = engine.config.search
+    began = opened(SEARCHING, searcher.name)
+    plan = plan_queries(
+        [claim.text for claim in chosen.claims], engine.judge if engine.escalate else None
+    )
+    if plan.notice:
+        emit(Note(plan.notice))
+    own = _own_host(document)
+    numbers: dict[str, int] = {}
+    references: list[Reference] = []
+    searched: list[Claim] = []
+    total = len(chosen.claims)
+    for index, (claim, queries, hypothesis) in enumerate(
+        zip(chosen.claims, plan.queries, plan.hypotheses, strict=True), start=1
+    ):
+        if hypothesis is None:
+            add(
+                _finding(
+                    Kind.UNVERIFIED,
+                    claim.locator,
+                    LANGUAGE_TITLE,
+                    state=LANGUAGE_UNSUPPORTED,
+                    detail=(LANGUAGE_HINT,),
+                    claim=claim,
+                )
+            )
+            emit(Progress(name=SEARCHING, done=index, total=total, detail=claim.locator.label()))
+            check()
+            continue
+        try:
+            hits = search_claim(
+                queries, searcher, settings.results_per_claim, exclude=(own,) if own else ()
+            )
+        except SearchKeyError as exc:
+            # The provider answered, and refused the key: the fix is one line of .env,
+            # so it is the credential state a missing key already has, not an outage
+            # (spec 2026-09-28 section 4; final review, minor).
+            add(
+                _finding(
+                    Kind.UNVERIFIED,
+                    claim.locator,
+                    "the evidence search refused the key",
+                    state=CREDENTIALS_MISSING,
+                    detail=(str(exc),),
+                    claim=claim,
+                )
+            )
+            break
+        except ProviderError as exc:
+            add(
+                _finding(
+                    Kind.UNVERIFIED,
+                    claim.locator,
+                    "the evidence search did not answer",
+                    state=SEARCH_UNAVAILABLE,
+                    detail=(f"{searcher.name}: {exc}",),
+                    claim=claim,
+                )
+            )
+            break
+        cited: list[int] = []
+        for hit in hits:
+            key = canonical(hit.url)
+            if key not in numbers:
+                numbers[key] = len(references) + 1
+                references.append(Reference(numbers[key], hit.url, claim.locator, origin="search"))
+            cited.append(numbers[key])
+        searched.append(
+            replace(
+                claim,
+                cited_refs=tuple(cited),
+                hypothesis=None if hypothesis == claim.text else hypothesis,
+            )
+        )
+        emit(Progress(name=SEARCHING, done=index, total=total, detail=claim.locator.label()))
+        check()
+    closed(
+        SEARCHING,
+        searcher.name,
+        f"{len(searched)} of {chosen.eligible} claims, {len(references)} pages",
+        began,
+    )
+    summary = SearchSummary(
+        by=searcher.name,
+        queries_by=plan.by,
+        sentences=chosen.sentences,
+        eligible=chosen.eligible,
+        searched=len(searched),
+        pages_found=len(references),
+        pages_read=0,  # filled in once the fetching stage has run
+        notices=(plan.notice,) if plan.notice else (),
+    )
+    # ``markers=()`` on purpose: the author made no citation, and the report's marker
+    # count must not say they did.
+    return _Searched(
+        document=replace(document, references=tuple(references)),
+        claims=Claims(claims=tuple(searched), markers=(), unsupported=(), unresolved=()),
+        summary=summary,
+    )
+
+
+def _own_host(document: Document) -> str | None:
+    """The host of a page or post read as the document: never found to back itself."""
+    match = _BARE_URL.fullmatch(document.name.strip())
+    return urlsplit(match.group(0)).hostname if match else None
+
+
+def _no_evidence(claim: Claim) -> Finding:
+    """A searched claim no found page decided: not REFUTED, and it says so (rule 2).
+
+    A translated claim (``claim.hypothesis`` set) also says what was checked, the same
+    way a verdict finding does (spec §2): the reader's own sentence stays the title and
+    locator, and the ``checked as:`` note names the English text the models actually
+    searched and judged.
+    """
+    return Finding(
+        kind=Kind.NO_EVIDENCE,
+        level=LEVELS[Kind.NO_EVIDENCE],
+        locator=claim.locator,
+        title=NO_EVIDENCE_TITLE,
+        state=STATE_WORDS[Kind.NO_EVIDENCE],
+        reference=None,
+        claim=claim,
+        verdict=None,
+        source_id=None,
+        fetch_step=None,
+        tier=None,
+        detail=(
+            NO_EVIDENCE_NOTE,
+            *((f"{CHECKED_AS}{claim.hypothesis}",) if claim.hypothesis else ()),
+        ),
     )

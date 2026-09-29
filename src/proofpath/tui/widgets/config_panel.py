@@ -33,11 +33,13 @@ from proofpath import ui
 from proofpath.commands import ConfigView, config_set, config_view
 from proofpath.config import (
     PERMISSION_VALUES,
+    SEARCH_PROVIDERS,
     ConfigError,
     Contact,
     FetchConfig,
     JudgeConfig,
     Permissions,
+    SearchConfig,
 )
 from proofpath.judge import JudgeError, default_dotenv_paths, known_providers
 from proofpath.secrets import resolve_api_key
@@ -98,6 +100,7 @@ def sections() -> tuple[Section, ...]:
     """The panel's rows in the config's own order. Built, not constant, because the
     provider list is the judge module's, and the defaults are the dataclasses' own."""
     permissions, fetch, judge, contact = Permissions(), FetchConfig(), JudgeConfig(), Contact()
+    search = SearchConfig()
     return (
         Section(
             "permissions",
@@ -115,6 +118,13 @@ def sections() -> tuple[Section, ...]:
                     PERMISSION_VALUES,
                     "every fetch and every provider call; deny = offline",
                     _default(permissions.network),
+                ),
+                Row(
+                    "permissions.web_search",
+                    "choice",
+                    PERMISSION_VALUES,
+                    "search the web when a text cites nothing; ask = deny (never prompts)",
+                    _default(permissions.web_search),
                 ),
             ),
         ),
@@ -143,6 +153,39 @@ def sections() -> tuple[Section, ...]:
                 Row("judge.model", "text", (), "", _default(judge.model)),
                 Row("judge.base_url", "text", (), "", _default(judge.base_url)),
                 Row("judge.api_key_env", "text", (), "", _default(judge.api_key_env)),
+                Row(
+                    "judge.fallback",
+                    "text",
+                    (),
+                    "local model when the API is limited or down; off = none",
+                    _default(judge.fallback),
+                ),
+            ),
+        ),
+        Section(
+            "search",
+            (
+                Row(
+                    "search.provider",
+                    "choice",
+                    SEARCH_PROVIDERS,
+                    "off until set; tavily needs TAVILY_API_KEY in .env",
+                    _default(search.provider),
+                ),
+                Row(
+                    "search.base_url",
+                    "text",
+                    (),
+                    "your SearXNG instance",
+                    _default(search.base_url),
+                ),
+                Row(
+                    "search.api_key_env",
+                    "text",
+                    (),
+                    "the variable holding the key",
+                    _default(search.api_key_env),
+                ),
             ),
         ),
         Section(
@@ -594,12 +637,13 @@ class ConfigPanel(Vertical):
         )
 
     def _draw_summary(self) -> Text:
-        """The one-line record: the four settings a run decides by, as the file has them."""
+        """The one-line record: the settings a run decides by, as the file has them."""
         config = self._view.config
         parts = (
             f"install_browser={config.permissions.install_browser}",
             f"network={config.permissions.network}",
             f"respect_robots={_default(config.fetch.respect_robots)}",
             f"judge={config.judge.provider}",
+            f"search={config.search.provider}",
         )
         return Text("  config  " + "  ".join(parts))

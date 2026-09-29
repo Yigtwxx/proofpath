@@ -17,10 +17,13 @@ from __future__ import annotations
 
 import importlib.resources
 import json
+import re
 import string
+import threading
 import time
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from contextlib import suppress
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from types import TracebackType
@@ -29,7 +32,7 @@ from typing import Any
 import httpx
 
 from proofpath import __version__
-from proofpath.config import JudgeConfig
+from proofpath.config import LOCAL_JUDGE_MODEL, JudgeConfig
 from proofpath.models import Label, Tier
 from proofpath.secrets import ApiKey, default_dotenv_paths, read_dotenv, resolve_api_key
 
@@ -49,8 +52,26 @@ class JudgeError(ValueError):
 
 
 class JudgeUnavailable(JudgeError):  # noqa: N818 - reads as a state, not as a failed run
-    """The provider did not answer after retries. A run reports this, never fails on it."""
+    """The provider did not answer after retries. A run reports this, never fails on it.
 
+    ``status`` is the HTTP status of the last answer, or ``None`` when there was none
+    (a transport error, an unreadable 200). ``cause`` is the same fact in a few words
+    a notice can print (``HTTP 500``, ``timeout``, ``empty answer``): never a body,
+    never a URL, never a key. The fallback reads both to say why it switched without
+    parsing its own message back.
+    """
+
+    def __init__(self, detail: str, *, status: int | None = None, cause: str = "") -> None:
+        super().__init__(detail)
+        self.status = status
+        self.cause = cause or (f"HTTP {status}" if status is not None else "no answer")
+
+
+#: ``think: false`` in Ollama's OpenAI-compatible terms, sent to every Ollama model
+#: whatever the caller asked for: qwen3.5:9b on ``low`` spent a 1500-token budget
+#: thinking and answered nothing, where ``none`` answered in 1.6 s (Ollama 0.34.4,
+#: measured 2026-09-28). A 400 naming the field still drops it.
+LOCAL_REASONING = "none"
 
 # Free, no card, OpenAI-compatible (verified 2026-09-11). Ollama is the offline default.
 _PROVIDERS: dict[str, JudgeConfig] = {
@@ -61,9 +82,10 @@ _PROVIDERS: dict[str, JudgeConfig] = {
         base_url="https://generativelanguage.googleapis.com/v1beta/openai",
         api_key_env="GEMINI_API_KEY",
     ),
+    # One local model for everything: the same one the fallback uses (spec section 11).
     "ollama": JudgeConfig(
         provider="ollama",
-        model="llama3.1",
+        model=LOCAL_JUDGE_MODEL,
         base_url="http://localhost:11434/v1",
         api_key_env="",
     ),
@@ -164,6 +186,10 @@ class JudgeCost:
     completion_tokens: int = 0
     waited_s: float = 0.0
     model: str = ""
+    #: Of ``calls``, the answers the local fallback gave (spec section 11). Counted
+    #: apart because ``api_calls`` promises provider requests, and a report that
+    #: folded local answers into it would overstate what the free tier was spent on.
+    local_calls: int = 0
 
 
 # Three attempts per request: Groq's free tier answers roughly once a minute, so a
@@ -192,6 +218,31 @@ def _retry_after_seconds(value: str) -> float | None:
     if when.tzinfo is None:
         when = when.replace(tzinfo=timezone.utc)
     return max(0.0, (when - datetime.now(timezone.utc)).total_seconds())
+
+
+# A thinking model that ignores the "no thinking" request can still open its answer
+# with its reasoning. Only a *leading*, *closed* block is taken off: anything else is
+# the answer itself, and guessing at it would be worse than reporting it unreadable.
+_THINK = re.compile(r"\A\s*<think>.*?</think>\s*", re.DOTALL)
+_CLOSE = "</think>"
+
+
+def _strip_think(text: str) -> str:
+    """The answer without a leading reasoning block.
+
+    Some chat templates open the block in the prompt, so the answer carries only its
+    end (``...reasoning...</think>{json}``). That orphan end is taken off only when
+    the answer does not already start as JSON and JSON follows it: a valid answer
+    that merely mentions ``</think>`` inside a string must reach the reader intact.
+    """
+    if _THINK.match(text):
+        return _THINK.sub("", text, count=1)
+    head = text.lstrip()[:1]
+    end = text.find(_CLOSE)
+    if end < 0 or head in ("{", "["):
+        return text
+    rest = text[end + len(_CLOSE) :].lstrip()
+    return rest if rest[:1] in ("{", "[") else text
 
 
 def _blames_response_format(response: httpx.Response) -> bool:
@@ -229,7 +280,10 @@ class JudgeClient:
         client: httpx.Client | None = None,
         sleep: Callable[[float], None] = time.sleep,
         max_wait: float = 120.0,
-        timeout: float = 60.0,
+        timeout: float | httpx.Timeout = 60.0,
+        fail_fast: bool = False,
+        force_reasoning: str | None = None,
+        retry_timeouts: bool = True,
     ) -> None:
         if config.api_key_env and key is None:
             raise JudgeError(_no_key_detail(config.api_key_env))
@@ -249,6 +303,22 @@ class JudgeClient:
         # 400 again on each of them, against a per-minute tier with no room for it.
         self._schema_refused = False
         self._effort_refused = False
+        #: With a fallback behind this client, waiting is the bug (Amendment B 1): the
+        #: first failure raises at once, no retry and no ``Retry-After``. Public and
+        #: mutable because ``FallbackClient`` only knows whether a fallback exists once
+        #: it has asked Ollama, which it does on the first call, not at construction.
+        self.fail_fast = fail_fast
+        # Replaces whatever reasoning effort a caller asks for. The local fallback
+        # sends ``none``: Ollama maps it to ``think: false``, the one value every
+        # model accepts, where ``low`` is a 400 on a model that cannot think and a
+        # budget spent thinking on one that can (measured on Ollama 0.34.4). Every
+        # Ollama client gets it, the direct ``judge.provider ollama`` one included.
+        if force_reasoning is None and config.provider == "ollama":
+            force_reasoning = LOCAL_REASONING
+        self._force_reasoning = force_reasoning
+        # A local model that timed out after 180 s is loading or stuck; asking twice
+        # more would hold the run for nine minutes (fix round 1, D4).
+        self._retry_timeouts = retry_timeouts
         self.cost = JudgeCost(model=config.model)
 
     def __repr__(self) -> str:
@@ -269,6 +339,19 @@ class JudgeClient:
         across two rows.
         """
         return self._config.model
+
+    @property
+    def timeout(self) -> float | httpx.Timeout:
+        """How long one request may take before it counts as unanswered.
+
+        Settable per client, because ``FallbackClient`` only learns that a fallback
+        exists on the first call, and only then may it shorten the primary's wait.
+        """
+        return self._timeout
+
+    @timeout.setter
+    def timeout(self, value: float | httpx.Timeout) -> None:
+        self._timeout = value
 
     def close(self) -> None:
         """Release the HTTP client, but only one this client built for itself.
@@ -320,10 +403,14 @@ class JudgeClient:
                     "json_schema": {"name": _SCHEMA_NAME, "schema": json_schema, "strict": True},
                 }
             )
+        if self._force_reasoning is not None:
+            reasoning_effort = self._force_reasoning
         if self._effort_refused:
             reasoning_effort = None
         attempt = 0
         last = "no request was made"
+        status: int | None = None
+        cause = ""
         while attempt < _MAX_ATTEMPTS:
             payload: dict[str, Any] = {
                 "model": self._config.model,
@@ -341,13 +428,19 @@ class JudgeClient:
                 )
             except httpx.HTTPError as exc:
                 last = f"request failed: {type(exc).__name__}"
+                status = None
+                timed_out = isinstance(exc, httpx.TimeoutException)
+                cause = "timeout" if timed_out else "connection failed"
                 delay = _backoff(attempt)
+                if timed_out and not self._retry_timeouts:
+                    break
             else:
                 status = response.status_code
                 if status == 200:
                     return self._record(response, messages)
                 # Never echo the body: providers put the key or account details in it.
                 last = f"HTTP {status} from {self._url}"
+                cause = f"HTTP {status}"
                 if (
                     status == 400
                     and response_format is not None
@@ -381,10 +474,14 @@ class JudgeClient:
                     delay = _backoff(attempt)
                 else:
                     break
+            if self.fail_fast:
+                # Checked after the two downgrades above, which ``continue`` before
+                # reaching here: a model refusing a field is not a model that is down.
+                break
             attempt += 1
             if attempt < _MAX_ATTEMPTS:
                 self._wait(delay)
-        raise JudgeUnavailable(last)
+        raise JudgeUnavailable(last, status=status, cause=cause)
 
     def _wait(self, delay: float) -> None:
         delay = min(delay, self._max_wait)
@@ -399,7 +496,7 @@ class JudgeClient:
             choice = choices[0] if choices else {}
             content = choice.get("message", {}).get("content")
             finish_reason = choice.get("finish_reason")
-            text = content if isinstance(content, str) else ""
+            text = _strip_think(content) if isinstance(content, str) else ""
             usage = body.get("usage") or {}
             # A missing count is estimated; an honest zero is kept exactly as sent.
             reported_prompt = usage.get("prompt_tokens")
@@ -416,7 +513,9 @@ class JudgeClient:
         except (AttributeError, IndexError, KeyError, TypeError, ValueError):
             # A 200 that is not a completion is a bot wall or a proxy page. Its shape
             # is not ours to guess at, and its body is never repeated back.
-            raise JudgeUnavailable(f"unreadable 200 response from {self._url}") from None
+            raise JudgeUnavailable(
+                f"unreadable 200 response from {self._url}", status=200, cause="unreadable answer"
+            ) from None
         if not text:
             # No choices, or a choice with no text: a refusal, a cut-off answer or a
             # wall, never an empty opinion. It costs the caller a `JudgeUnavailable`,
@@ -424,7 +523,11 @@ class JudgeClient:
             # `finish_reason` is a fixed provider token, so it may be named; the body
             # may not.
             why = f" (finish_reason={finish_reason})" if isinstance(finish_reason, str) else ""
-            raise JudgeUnavailable(f"no completion in the 200 response from {self._url}{why}")
+            raise JudgeUnavailable(
+                f"no completion in the 200 response from {self._url}{why}",
+                status=200,
+                cause="empty answer",
+            )
         self.cost.calls += 1
         self.cost.prompt_tokens += prompt_tokens
         self.cost.completion_tokens += completion_tokens
@@ -435,6 +538,475 @@ class JudgeClient:
             completion_tokens=completion_tokens,
             model=model,
         )
+
+
+# --- the local fallback (spec section 11) -----------------------------------------
+
+#: The switch notices (spec section 11; the cause added in fix round 1). ``provider``
+#: is the name as a reader knows it (``Groq``), ``model`` the Ollama tag the run
+#: switched to. Every failure switches; the notice says which one it was, so a wrong
+#: key is never mistaken for a busy free tier.
+_LIMIT_HEAD = "{provider} limit reached"
+_KEY_HEAD = "{provider} rejected the key (HTTP {status})"
+_DOWN_HEAD = "{provider} did not answer ({cause})"
+_JUDGING = " — judging with local ollama {model}"
+JUDGE_FALLBACK_LIMIT = _LIMIT_HEAD + _JUDGING
+JUDGE_FALLBACK_KEY = _KEY_HEAD + _JUDGING
+JUDGE_FALLBACK_DOWN = _DOWN_HEAD + _JUDGING
+#: What ``switched`` says once the local model has failed too: the primary's reason,
+#: then the local one. "Judging with local ollama" would then be false (final review).
+JUDGE_FALLBACK_FAILED = "{head}, and local ollama {model} failed too ({cause})"
+#: The install/pull hint: offered once, beside the original error, when there is no
+#: fallback for a reason the user can fix by adding the local model -- never when
+#: they chose ``judge.fallback = off`` themselves, and never a notice of a switch
+#: that did not happen (``JudgeClient.hint`` is its own attribute, apart from
+#: ``switched``, so the two states are never conflated). ``{model}`` is the fallback
+#: as configured (``judge.fallback``, ``qwen3.5:9b`` unless the user named another);
+#: ``{provider}`` the primary's display name, same as the switch notices above.
+JUDGE_FALLBACK_HINT_UNREACHABLE = (
+    "install Ollama (https://ollama.com) and run: ollama pull {model} — "
+    "the judge then keeps going locally when {provider} runs out"
+)
+JUDGE_FALLBACK_HINT_MISSING = (
+    "run: ollama pull {model} — the judge then keeps going locally when {provider} runs out"
+)
+#: The statuses that mean "over the provider's limit", read wherever a limit is named
+#: (the switch notice, the search's fallback notice), so both classify it one way.
+LIMIT_STATUSES = frozenset({429, 413})  # Groq answers 413 when a request busts TPM
+_KEY_STATUSES = frozenset({401, 403})
+#: ``judge.fallback``: the Ollama model to switch to (``LOCAL_JUDGE_MODEL`` unless the
+#: user named another), or ``off``, in any case, for no fallback.
+FALLBACK_OFF = "off"
+#: The first local call loads the model into memory, which can take tens of seconds
+#: on first use, so the local client waits far longer than an API client does.
+LOCAL_TIMEOUT = 180.0
+#: How long Ollama keeps the model loaded after the warm-up. Sent on the native
+#: ``/api/generate`` route because the OpenAI-compatible one ignores ``keep_alive``
+#: (Ollama 0.34.4, measured 2026-09-28); later requests keep the session's value.
+LOCAL_KEEP_ALIVE = "30m"
+#: ``/api/tags`` is a local listing; a server that takes longer than this is not
+#: one to hand a run to.
+TAGS_TIMEOUT = 2.0
+#: The primary's wait once a fallback exists: a host that does not even accept the
+#: connection within five seconds is not going to answer, and the local model is.
+PRIMARY_CONNECT_TIMEOUT = 5.0
+PRIMARY_READ_TIMEOUT = 60.0
+#: How long a thread that did not switch waits for the switching thread's notice and
+#: warm-up: the warm-up's own timeout plus a margin, so its request never starts its
+#: read timer while the model is still loading, and a hung warm-up cannot hold it
+#: for ever.
+WARM_WAIT_S = LOCAL_TIMEOUT + 5.0
+# The local failures that mean the model is gone for this run: no answer at all
+# (``status`` None: refused, reset, timed out), a server error, or no such model.
+# A cut-off, unreadable or refused *answer* is about that one request, not the model.
+_DEAD_STATUSES = frozenset({404})
+
+_DISPLAY_NAMES = {"groq": "Groq", "gemini": "Gemini", "ollama": "Ollama"}
+# Why there is no fallback, in the words the error carries after "no local fallback:".
+_WHY_OFF = "judge.fallback is off"
+
+
+def _ollama_url() -> str:
+    return provider_defaults("ollama").base_url
+
+
+def _ollama_root(base_url: str) -> str:
+    """The server root: the native API lives beside ``/v1``, not under it."""
+    root = base_url.rstrip("/")
+    return root[: -len("/v1")] if root.endswith("/v1") else root
+
+
+def _display(provider: str) -> str:
+    return _DISPLAY_NAMES.get(provider, provider.capitalize())
+
+
+def _tags(base_url: str, *, timeout: float) -> list[str] | None:
+    """The installed model names, or ``None`` when Ollama could not be asked."""
+    try:
+        response = httpx.get(f"{_ollama_root(base_url)}/api/tags", timeout=timeout)
+        if response.status_code != 200:
+            return None
+        models = response.json().get("models") or []
+        return [str(item["name"]) for item in models if isinstance(item, dict) and "name" in item]
+    except (httpx.HTTPError, ValueError, AttributeError, TypeError):
+        return None
+
+
+def _installed(model: str, names: Sequence[str]) -> bool:
+    """Whether ``model`` is among ``names``; an untagged name means its ``:latest``."""
+    wanted = model.strip().lower()
+    if ":" not in wanted:
+        wanted += ":latest"
+    return any(name.lower() == wanted for name in names)
+
+
+def installed_models(base_url: str, *, timeout: float) -> list[str]:
+    """``GET {root}/api/tags``: what Ollama has installed. ``[]`` on any error."""
+    return _tags(base_url, timeout=timeout) or []
+
+
+def local_client(model: str, base_url: str | None = None) -> JudgeClient:
+    """The fallback's client: Ollama's OpenAI route, no key, thinking off, a timeout
+    long enough for the first call to load the model, and no second try after it."""
+    settings = replace(provider_defaults("ollama"), model=model)
+    if base_url is not None:
+        settings = replace(settings, base_url=base_url)
+    return JudgeClient(
+        settings,
+        None,
+        timeout=LOCAL_TIMEOUT,
+        force_reasoning=LOCAL_REASONING,
+        retry_timeouts=False,
+    )
+
+
+def warm_local(base_url: str, model: str) -> None:
+    """Load ``model`` and keep it loaded for ``LOCAL_KEEP_ALIVE``. Never raises.
+
+    An empty ``/api/generate`` is Ollama's documented "load this model" request. A
+    warm-up that fails costs nothing: the chat request after it loads the model
+    itself, and says so if it cannot.
+    """
+    url = f"{_ollama_root(base_url)}/api/generate"
+    try:
+        httpx.post(
+            url, json={"model": model, "keep_alive": LOCAL_KEEP_ALIVE}, timeout=LOCAL_TIMEOUT
+        )
+    except httpx.HTTPError:
+        return
+
+
+@dataclass(frozen=True)
+class _Plan:
+    """Whether this run has a fallback: the model, or why there is none."""
+
+    model: str | None
+    why: str = ""
+    #: The hint template for ``why``, or ``None`` when there is nothing to suggest
+    #: (a fallback, or the user's own ``off``). Formatted with the model and provider
+    #: only once the primary has actually failed (``_switch``): asking Ollama is
+    #: already paid for here, but the hint is only worth showing beside a real error.
+    hint: str | None = None
+
+
+class FallbackClient:
+    """A primary ``JudgeClient`` that switches, once and at once, to a local model.
+
+    The same surface ``Judge`` uses from ``JudgeClient``. The first call decides
+    whether a fallback exists (``judge.fallback``, and one cheap ``/api/tags`` to
+    confirm that model is installed). With one, the primary fails fast and connects within
+    ``PRIMARY_CONNECT_TIMEOUT``: its first failure of any kind raises, the notice
+    goes out naming the cause, the model is warmed up and the very request that
+    failed is sent to it, so the caller sees one completion. Every later call goes
+    straight to the local model. Without a fallback, the primary keeps its retries
+    and its error says why no fallback was used. A local model that fails too is
+    latched dead for the run: every later call raises at once with the same detail.
+
+    The switch is sticky for the life of the client, which is one run: whatever
+    builds a judge for a run builds a new client or calls :meth:`reset`.
+    """
+
+    def __init__(
+        self,
+        primary: JudgeClient,
+        *,
+        fallback: str = LOCAL_JUDGE_MODEL,
+        on_switch: Callable[[str], None] | None = None,
+        ollama_url: str | None = None,
+        local_factory: Callable[[str, str], JudgeClient] = local_client,
+        warm: Callable[[str, str], None] | None = warm_local,
+    ) -> None:
+        self._primary = primary
+        self._primary_timeout = primary.timeout
+        self._fallback = fallback.strip()
+        self._ollama_url = ollama_url or _ollama_url()
+        self._local_factory = local_factory
+        self._warm = warm
+        self.on_switch = on_switch
+        #: The notice, once the switch has happened; ``None`` before.
+        self.switched: str | None = None
+        #: The install/pull hint, once raised for this run; ``None`` before, and
+        #: ``None`` for good when there was nothing to suggest. Apart from
+        #: ``switched``: a hint is offered instead of a switch, never alongside one,
+        #: and the two must never be read as the same thing.
+        self.hint: str | None = None
+        # Worker threads share one client (the TUI's summary, a run's stages): the
+        # plan and the switch go through this lock so that exactly one thread
+        # switches and every other one sees the result.
+        self._lock = threading.Lock()
+        # Set once the switching thread has handed the notice over and the warm-up
+        # has finished (or failed). A thread that finds the switch already made waits
+        # for it, so no local request starts before the notice is out, and none starts
+        # its read timer while the model is still loading.
+        self._ready = threading.Event()
+        self._plan: _Plan | None = None
+        self._local: JudgeClient | None = None
+        self._primary_detail = ""
+        # The primary's failure and the notice it earned, kept for the moment the
+        # local model fails too and ``switched`` has to say so.
+        self._primary_failure: JudgeUnavailable | None = None
+        self._notice: str | None = None
+        #: The combined detail once the local model has failed too; ``None`` before.
+        self._dead: str | None = None
+        # Local answers from before a ``reset``: the client is gone, the spend is not.
+        self._spent = JudgeCost()
+
+    def __repr__(self) -> str:
+        return (
+            f"FallbackClient(primary={self._primary!r}, fallback={self._fallback!r}, "
+            f"switched={self.switched is not None})"
+        )
+
+    __str__ = __repr__
+
+    @property
+    def provider(self) -> str:
+        return "ollama" if self._local is not None else self._primary.provider
+
+    @property
+    def model(self) -> str:
+        return self._local.model if self._local is not None else self._primary.model
+
+    @property
+    def cost(self) -> JudgeCost:
+        """Primary and local spend together; ``local_calls`` says which were local."""
+        primary = self._primary.cost
+        parts = [primary, self._spent]
+        if self._local is not None:
+            parts.append(self._local.cost)
+        local = self._spent.calls + (self._local.cost.calls if self._local is not None else 0)
+        return JudgeCost(
+            calls=sum(part.calls for part in parts),
+            prompt_tokens=sum(part.prompt_tokens for part in parts),
+            completion_tokens=sum(part.completion_tokens for part in parts),
+            waited_s=sum(part.waited_s for part in parts),
+            model=self._local.cost.model if self._local is not None else primary.model,
+            local_calls=local,
+        )
+
+    def reset(self) -> None:
+        """Back to the primary, for a new run: the notice, the plan and a dead local
+        model are all forgotten."""
+        with self._lock:
+            if self._local is not None:
+                spent = self._local.cost
+                self._spent.calls += spent.calls
+                self._spent.prompt_tokens += spent.prompt_tokens
+                self._spent.completion_tokens += spent.completion_tokens
+                self._spent.waited_s += spent.waited_s
+                self._local.close()
+            self._local = None
+            self._plan = None
+            self._dead = None
+            self.switched = None
+            self.hint = None
+            self._primary_detail = ""
+            self._primary_failure = None
+            self._notice = None
+            self._ready = threading.Event()
+            self._primary.fail_fast = False
+            self._primary.timeout = self._primary_timeout
+
+    def close(self) -> None:
+        self._primary.close()
+        if self._local is not None:
+            self._local.close()
+
+    def __enter__(self) -> FallbackClient:
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        self.close()
+
+    def complete(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        json_schema: dict[str, Any] | None = None,
+        max_tokens: int = 1024,
+        temperature: float = 0.0,
+        reasoning_effort: str | None = None,
+    ) -> Completion:
+        """One completion, from the primary or, once it has failed, from Ollama."""
+
+        def ask(client: JudgeClient) -> Completion:
+            return client.complete(
+                messages,
+                json_schema=json_schema,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                reasoning_effort=reasoning_effort,
+            )
+
+        local = self._route()
+        if local is None:
+            try:
+                return ask(self._primary)
+            except JudgeUnavailable as exc:
+                local, notice = self._switch(exc)
+            if notice is not None:
+                try:
+                    self._announce(notice)
+                    if self._warm is not None:
+                        # After the notice, before the request: the user reads the
+                        # line while the model loads (Amendment B 4). Outside the lock.
+                        self._warm(self._ollama_url, local.model)
+                finally:
+                    self._ready.set()
+        # A thread that did not switch waits for the notice and the warm-up, bounded
+        # by the warm-up's own timeout (fix round 2).
+        self._ready.wait(timeout=WARM_WAIT_S)
+        if self._dead is not None:
+            raise JudgeUnavailable(self._dead)
+        try:
+            answer = ask(local)
+        except JudgeUnavailable as exc:
+            # The primary's reason first: it is what the run switched away from
+            # (spec section 11).
+            detail = f"{self._primary_detail}; local ollama {local.model}: {exc}"
+            # "Judging with local ollama" is no longer true, so the notice the report
+            # carries says both failed instead (final review, minor).
+            self._both_failed(local.model, exc)
+            if exc.status is None or exc.status >= 500 or exc.status in _DEAD_STATUSES:
+                # Latched: a dead or stuck Ollama costs this run one wait, not one per
+                # batch. Anything else failed this request only (fix round 2).
+                self._dead = detail
+            raise JudgeUnavailable(detail, status=exc.status, cause=exc.cause) from None
+        if self._notice is not None:
+            # Answering again after a failure that was about one request only.
+            self.switched = self._notice
+        return answer
+
+    def _both_failed(self, model: str, failure: JudgeUnavailable) -> None:
+        """Say in ``switched`` that the local model failed too, after the primary."""
+        primary = self._primary_failure
+        if primary is None:  # pragma: no cover - a local client exists only after a switch
+            return
+        head = _head(self._primary.provider, primary)
+        self.switched = JUDGE_FALLBACK_FAILED.format(head=head, model=model, cause=failure.cause)
+
+    def _announce(self, notice: str) -> None:
+        """Hand the notice to the listener, once, and never at the answer's expense."""
+        if self.on_switch is not None:
+            # A listener that raises costs the line, not the batch (fix round 1).
+            with suppress(Exception):
+                self.on_switch(notice)
+
+    def _route(self) -> JudgeClient | None:
+        """The local client once switched; otherwise ``None``, with the plan made."""
+        with self._lock:
+            if self._local is not None:
+                return self._local
+            if self._plan is None:
+                self._plan = self._choose()
+                if self._plan.model is not None:
+                    # Decided before the first request (Amendment B 1): with a
+                    # fallback the primary must not wait, neither on a retry nor on a
+                    # host that does not answer the connect. Without one it keeps
+                    # today's retries and timeout.
+                    self._primary.fail_fast = True
+                    self._primary.timeout = httpx.Timeout(
+                        PRIMARY_READ_TIMEOUT, connect=PRIMARY_CONNECT_TIMEOUT
+                    )
+            return None
+
+    def _choose(self) -> _Plan:
+        """The configured model, once ``/api/tags`` confirms it is installed.
+
+        The tags are asked only to confirm, never to choose: the order is fixed
+        (the configured API, then this model) and nothing is ever pulled (rule 5).
+        """
+        setting = self._fallback
+        if not setting or setting.lower() == FALLBACK_OFF:
+            return _Plan(None, _WHY_OFF)
+        names = _tags(self._ollama_url, timeout=TAGS_TIMEOUT)
+        if names is None:
+            return _Plan(
+                None,
+                f"ollama is not reachable at {_ollama_root(self._ollama_url)}",
+                hint=JUDGE_FALLBACK_HINT_UNREACHABLE,
+            )
+        if not _installed(setting, names):
+            return _Plan(None, f"{setting} is not installed", hint=JUDGE_FALLBACK_HINT_MISSING)
+        return _Plan(setting)  # as written: the user's own spelling of the name
+
+    def _switch(self, failure: JudgeUnavailable) -> tuple[JudgeClient, str | None]:
+        """Switch once: the local client, and the notice when *this* call switched.
+
+        Raises the primary's error, with the reason, when there is no fallback. When
+        that reason is one the user can fix -- Ollama unreachable, the model not
+        installed, never ``judge.fallback = off`` -- the hint goes out through the
+        same listener the switch notice uses, once per run (the ``self.hint is None``
+        guard: this branch runs again on every later call, since without a local
+        client nothing ever leaves ``_route`` early). The detail the error carries is
+        unchanged; the hint travels beside it, never inside it.
+
+        The notice (or hint) is announced after the lock is released, same as a
+        switch: the listener runs after the lock is released, so a slow or blocking
+        listener can never hold another thread's switch (fix round 1, C).
+        """
+        hint: str | None = None
+        with self._lock:
+            if self._local is not None:
+                return self._local, None  # another thread switched while we waited
+            plan = self._plan
+            if plan is None or plan.model is None:
+                why = _WHY_OFF if plan is None else plan.why
+                if plan is not None and plan.hint is not None and self.hint is None:
+                    hint = plan.hint.format(
+                        model=self._fallback, provider=_display(self._primary.provider)
+                    )
+                    self.hint = hint
+                error = JudgeUnavailable(
+                    f"{failure}; no local fallback: {why}",
+                    status=failure.status,
+                    cause=failure.cause,
+                )
+            else:
+                notice = _notice(self._primary.provider, plan.model, failure)
+                self._primary_detail = str(failure)
+                self._primary_failure = failure
+                self._notice = notice
+                self._local = self._local_factory(plan.model, self._ollama_url)
+                self.switched = notice
+                return self._local, notice
+        if hint is not None:
+            self._announce(hint)
+        raise error from None
+
+
+def _head(provider: str, failure: JudgeUnavailable) -> str:
+    """Why the primary was left, in the words every notice opens with (fix round 1, B)."""
+    name = _display(provider)
+    if failure.status in LIMIT_STATUSES:
+        return _LIMIT_HEAD.format(provider=name)
+    if failure.status in _KEY_STATUSES:
+        return _KEY_HEAD.format(provider=name, status=failure.status)
+    return _DOWN_HEAD.format(provider=name, cause=failure.cause)
+
+
+def _notice(provider: str, model: str, failure: JudgeUnavailable) -> str:
+    """The switch notice: why the primary was left, and who judges now."""
+    return _head(provider, failure) + _JUDGING.format(model=model)
+
+
+def build_client(
+    config: JudgeConfig,
+    key: ApiKey | None,
+    *,
+    on_switch: Callable[[str], None] | None = None,
+) -> JudgeClient | FallbackClient:
+    """The judge's client for one run: the configured provider, with the local
+    fallback behind it unless the provider already is Ollama (spec section 11)."""
+    primary = JudgeClient(config, key)
+    if config.provider == "ollama":
+        return primary
+    return FallbackClient(primary, fallback=config.fallback, on_switch=on_switch)
 
 
 # --- the batching judge -----------------------------------------------------------
@@ -466,6 +1038,14 @@ class JudgeItem:
     passage: str
     verdict: Label
     tier: Tier
+
+
+@dataclass(frozen=True)
+class JudgedClaim:
+    """What the judge wrote for one claim: search queries, and the claim in English."""
+
+    queries: tuple[str, ...]
+    english: str  # "" when the model gave none
 
 
 # 20 claims per prompt, and a prompt under 3.5k tokens: Groq's free tier caps at 8k
@@ -515,8 +1095,50 @@ _REVIEW_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
 }
 
+# Evidence search (OPEN-ITEMS 17.1a): the judge writes *queries*, never an answer.
+# Deciding a claim without a passage is the truth oracle spec section 3 forbids.
+#
+# The answer budget grows with the batch (final review). ``gpt-oss-120b`` charges its
+# reasoning to ``max_tokens`` even at low effort; an item -- the claim in English and
+# two queries -- is ~170 tokens (``estimate_tokens``, a 300-character claim), so a
+# flat 1500 left five claims ~650 tokens to think in, and a pass that ran over came
+# back ``finish_reason=length`` with every query and translation lost. 1500 for the
+# thinking plus 250 per claim gives five claims 2750, and ~840 of prompt beside it
+# still fits Groq's 8k tokens a minute. The ceiling keeps a large ``search.max_claims``
+# under that budget too.
+_QUERIES_REASONING_TOKENS = 1500
+_QUERIES_TOKENS_PER_CLAIM = 250
+_QUERIES_MAX_TOKENS = 5000
+_QUERIES_PER_CLAIM = 2
+_QUERY_CHARS = 400
+_QUERIES_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "items": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "integer"},
+                    "english": {"type": "string"},
+                    "queries": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["id", "english", "queries"],
+                "additionalProperties": False,
+            },
+        }
+    },
+    "required": ["items"],
+    "additionalProperties": False,
+}
+
 _SYSTEM_HEADING = "## System"
 _USER_HEADING = "## User"
+
+
+def _queries_budget(count: int) -> int:
+    """``max_tokens`` for one queries call over ``count`` claims."""
+    return min(_QUERIES_MAX_TOKENS, _QUERIES_REASONING_TOKENS + _QUERIES_TOKENS_PER_CLAIM * count)
 
 
 def _split_prompt(text: str) -> tuple[str, str]:
@@ -557,7 +1179,7 @@ class Judge:
 
     def __init__(
         self,
-        client: JudgeClient,
+        client: JudgeClient | FallbackClient,
         *,
         batch_size: int = BATCH_SIZE,
         token_cap: int = TOKEN_CAP,
@@ -567,11 +1189,14 @@ class Judge:
         self._token_cap = token_cap
         self._template = load_prompt("review")
         self._summary_template = load_prompt("summarize")
+        self._queries_template = load_prompt("queries")
         #: One line per opinion that could not be used, in the order they arrived.
         self.skipped: list[str] = []
-        #: True once the provider stopped answering; ``detail`` says why.
+        #: True once the provider stopped answering; ``detail`` says why, and
+        #: ``status`` is the HTTP status of that failure (``None`` when there was none).
         self.unavailable = False
         self.detail = ""
+        self.status: int | None = None
 
     @property
     def name(self) -> str:
@@ -582,6 +1207,32 @@ class Judge:
     def cost(self) -> JudgeCost:
         """What the judge has spent so far. The client keeps the running total."""
         return self._client.cost
+
+    @property
+    def switched(self) -> str | None:
+        """The local-fallback notice once this run has switched, else ``None``."""
+        return self._client.switched if isinstance(self._client, FallbackClient) else None
+
+    @property
+    def hint(self) -> str | None:
+        """The install/pull hint this run has raised, once there is one, else
+        ``None``. Distinct from ``switched``: a hint means nothing switched."""
+        return self._client.hint if isinstance(self._client, FallbackClient) else None
+
+    def listen(self, on_switch: Callable[[str], None] | None) -> None:
+        """Point the switch notice at whoever is watching this run.
+
+        Set per run rather than when the judge is built: the judge is built before
+        the run's listener exists, and a stage that runs later (the summary) may
+        report to another one.
+        """
+        if isinstance(self._client, FallbackClient):
+            self._client.on_switch = on_switch
+
+    def reset(self) -> None:
+        """A new run starts on the configured provider again (Amendment B 9)."""
+        if isinstance(self._client, FallbackClient):
+            self._client.reset()
 
     def close(self) -> None:
         self._client.close()
@@ -611,6 +1262,7 @@ class Judge:
         self.skipped = []
         self.unavailable = False
         self.detail = ""
+        self.status = None
         opinions: dict[str, JudgeOpinion] = {} if into is None else into
         total = len(items)
         done = 0
@@ -623,7 +1275,7 @@ class Judge:
                     reasoning_effort=_REASONING_EFFORT,
                 )
             except JudgeUnavailable as exc:
-                self._give_up(str(exc))
+                self._give_up(str(exc), status=exc.status)
                 break
             except Exception as exc:
                 # A bug in the adapter, a library that changed under us: whatever it
@@ -654,6 +1306,7 @@ class Judge:
         # one that goes down now must not be hidden by an earlier success.
         self.unavailable = False
         self.detail = ""
+        self.status = None
         rendered = self._summary_template.substitute(report=report_markdown)
         system, user = _split_prompt(rendered)
         messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
@@ -662,7 +1315,7 @@ class Judge:
                 messages, max_tokens=max_tokens, reasoning_effort=_REASONING_EFFORT
             )
         except JudgeUnavailable as exc:
-            self._give_up(str(exc))
+            self._give_up(str(exc), status=exc.status)
             return ""
         except Exception as exc:
             # As in ``review``: the type is named, the message is not, because a
@@ -678,9 +1331,48 @@ class Judge:
             return ""
         return text
 
-    def _give_up(self, detail: str) -> None:
+    def queries(self, claims: Sequence[str]) -> dict[int, JudgedClaim]:
+        """One or two search queries per claim, and the claim in English, keyed by
+        its position; ``{}`` on trouble.
+
+        It never raises, like ``review``: a provider that is down or out of quota
+        costs the written queries and the translation, and ``unavailable``/``detail``
+        say why, so the run can fall back to the sentence itself and tell the reader
+        (OPEN-ITEMS 17.1a). The English text is what Amendment A hands the check
+        models, which were trained on English alone.
+        """
+        self.unavailable = False
+        self.detail = ""
+        self.status = None
+        if not claims:
+            return {}
+        items = "\n".join(
+            f"- id: {index}\n  claim: {_one_line(text)}" for index, text in enumerate(claims)
+        )
+        system, user = _split_prompt(self._queries_template.substitute(items=items))
+        messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
+        try:
+            completion = self._client.complete(
+                messages,
+                json_schema=_QUERIES_SCHEMA,
+                max_tokens=_queries_budget(len(claims)),
+                reasoning_effort=_REASONING_EFFORT,
+            )
+        except JudgeUnavailable as exc:
+            # The status travels with the detail: the search names a limit from the
+            # status alone, never from a substring of the detail (final review).
+            self._give_up(str(exc), status=exc.status)
+            return {}
+        except Exception as exc:
+            # The type is named, the message is not: it can carry the key.
+            self._give_up(f"{type(exc).__name__} from the judge client")
+            return {}
+        return _queries_from(completion.text, len(claims))
+
+    def _give_up(self, detail: str, *, status: int | None = None) -> None:
         self.unavailable = True
         self.detail = detail
+        self.status = status
 
     def _batches(self, items: Sequence[JudgeItem]) -> list[list[JudgeItem]]:
         """Items packed to the smaller of the item cap and the token budget.
@@ -776,6 +1468,42 @@ def _loads(text: str) -> list[Any] | None:
         if isinstance(payload, dict) and isinstance(payload.get("opinions"), list):
             return list(payload["opinions"])
     return None
+
+
+def _queries_from(text: str, count: int) -> dict[int, JudgedClaim]:
+    """The ``items`` of a queries answer, read leniently; an id out of range is dropped."""
+    for candidate in _json_candidates(text):
+        try:
+            payload = json.loads(candidate)
+        except ValueError:
+            continue
+        if not isinstance(payload, dict) or not isinstance(payload.get("items"), list):
+            continue
+        found: dict[int, JudgedClaim] = {}
+        for entry in payload["items"]:
+            if not isinstance(entry, dict):
+                continue
+            try:
+                ident = int(entry.get("id"))
+            except (TypeError, ValueError):
+                continue
+            if not 0 <= ident < count:
+                continue
+            raw = entry.get("queries")
+            written = (
+                tuple(
+                    _one_line(query)[:_QUERY_CHARS]
+                    for query in raw
+                    if isinstance(query, str) and query.strip()
+                )[:_QUERIES_PER_CLAIM]
+                if isinstance(raw, list)
+                else ()
+            )
+            english = _one_line(str(entry.get("english", "")))[:_QUERY_CHARS]
+            if written or english:
+                found[ident] = JudgedClaim(queries=written, english=english)
+        return found
+    return {}
 
 
 def _json_candidates(text: str) -> list[str]:

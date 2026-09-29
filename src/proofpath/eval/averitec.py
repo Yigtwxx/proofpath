@@ -65,6 +65,8 @@ class Claim:
     # Counted rather than dropped: a run has to be able to say it never tried them,
     # instead of reporting them as web sources it failed to reach (product rule 2).
     non_urls: int = 0
+    # The article that settled the claim: the answer key, never a search result.
+    fact_check_url: str = ""
 
 
 def to_label(label: str) -> Label | None:
@@ -127,6 +129,7 @@ def load(path: Path, *, limit: int | None = None, expected_sha256: str = SHA256)
                 label=str(row["label"]),
                 source_urls=urls,
                 non_urls=non_urls,
+                fact_check_url=str(row.get("fact_checking_article") or ""),
             )
         )
     return claims

@@ -57,6 +57,10 @@ class Note:
     #: A line that describes something in progress and is taken back when it is over
     #: (the TUI removes it; the CLI logs it).
     transient: bool = False
+    #: A line the user must see whatever the output mode: the judge switching to its
+    #: local fallback (spec section 11). The CLI prints it on stderr and never drops
+    #: it, not even under ``-q``; the TUI shows it above the prompt until the next run.
+    notice: bool = False
 
 
 @dataclass(frozen=True)

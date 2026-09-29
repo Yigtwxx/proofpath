@@ -124,6 +124,7 @@ class FetchesUrl(Protocol):
         text_kind: str = "fulltext",
         counts_as_source: bool = True,
         use_cache: bool = True,
+        anonymous: bool = False,
     ) -> Fetched: ...
 
     def summary(self) -> FetchStats: ...

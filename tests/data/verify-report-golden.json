@@ -79,7 +79,8 @@
           "line": 5,
           "column": 1,
           "page": null
-        }
+        },
+        "origin": "author"
       },
       {
         "number": 2,
@@ -88,7 +89,8 @@
           "line": 6,
           "column": 1,
           "page": null
-        }
+        },
+        "origin": "author"
       },
       {
         "number": 3,
@@ -97,7 +99,8 @@
           "line": 7,
           "column": 1,
           "page": null
-        }
+        },
+        "origin": "author"
       },
       {
         "number": 4,
@@ -106,7 +109,8 @@
           "line": 8,
           "column": 1,
           "page": null
-        }
+        },
+        "origin": "author"
       }
     ],
     "pages": 1,
@@ -123,7 +127,8 @@
           "line": 5,
           "column": 1,
           "page": null
-        }
+        },
+        "origin": "author"
       },
       "resolve": {
         "state": "RESOLVED",
@@ -168,7 +173,8 @@
           "line": 6,
           "column": 1,
           "page": null
-        }
+        },
+        "origin": "author"
       },
       "resolve": {
         "state": "GHOST REFERENCE",
@@ -197,7 +203,8 @@
           "line": 7,
           "column": 1,
           "page": null
-        }
+        },
+        "origin": "author"
       },
       "resolve": {
         "state": "UNVERIFIED (not in bibliographic indexes)",
@@ -226,7 +233,8 @@
           "line": 8,
           "column": 1,
           "page": null
-        }
+        },
+        "origin": "author"
       },
       "resolve": {
         "state": "RESOLVED",
@@ -291,7 +299,8 @@
           "paragraph": 0,
           "start": 42,
           "end": 45
-        }
+        },
+        "hypothesis": null
       },
       "reference": 1,
       "source_id": "doi:10.1038/s41586-021-03819-2",
@@ -333,7 +342,8 @@
           "paragraph": 0,
           "start": 115,
           "end": 118
-        }
+        },
+        "hypothesis": null
       },
       "reference": 3,
       "source_id": "url:https://example.test/air-quality.html",
@@ -371,7 +381,8 @@
           "paragraph": 0,
           "start": 156,
           "end": 159
-        }
+        },
+        "hypothesis": null
       },
       "reference": 4,
       "source_id": "doi:10.5555/closed-access-2020",
@@ -404,7 +415,8 @@
           "line": 7,
           "column": 1,
           "page": null
-        }
+        },
+        "origin": "author"
       },
       "claim": {
         "text": "Air quality limits were tightened in 2021.",
@@ -429,7 +441,8 @@
           "paragraph": 0,
           "start": 115,
           "end": 118
-        }
+        },
+        "hypothesis": null
       },
       "verdict": {
         "label": "NEI",
@@ -462,7 +475,8 @@
           "line": 8,
           "column": 1,
           "page": null
-        }
+        },
+        "origin": "author"
       },
       "claim": {
         "text": "The paper reports a measured effect.",
@@ -487,7 +501,8 @@
           "paragraph": 0,
           "start": 156,
           "end": 159
-        }
+        },
+        "hypothesis": null
       },
       "verdict": {
         "label": "NEI",
@@ -520,7 +535,8 @@
           "line": 6,
           "column": 1,
           "page": null
-        }
+        },
+        "origin": "author"
       },
       "claim": null,
       "verdict": null,
@@ -550,7 +566,8 @@
           "line": 8,
           "column": 1,
           "page": null
-        }
+        },
+        "origin": "author"
       },
       "claim": null,
       "verdict": null,
@@ -626,5 +643,7 @@
   "cancelled": false,
   "summary": null,
   "summary_model": null,
-  "judge_cost": null
+  "judge_cost": null,
+  "search": null,
+  "judge_notice": null
 }

@@ -113,6 +113,7 @@ and the shared browser cache, never system-wide — and remembers the answer.
 | 🔑 | Reddit | a free Reddit app of your own |
 | 🔑 | LLM second opinion (`--judge`, `--summarize`) | a free Groq key, or Ollama with no key |
 | 🔑 | Sites that block robots | your OK for a 280 MB browser, asked first |
+| 🔑 | Claims with no source, searched on the web (experimental) | a free Tavily key, or your own SearXNG |
 | ❌ | Scanned PDFs | no OCR yet |
 | ❌ | Old formats: `.doc`, `.odt`, `.rtf` | save as `.docx` or PDF |
 | ❌ | Paywalls | reported as unread |
@@ -187,6 +188,10 @@ distinct, printed state (spec §15), never collapsed into a verdict:
 | `AMBIGUOUS` | several plausible records, all listed |
 | `NEI` | the source was read and neither supports nor contradicts |
 | `PARAGRAPH-SCOPED` | the citation covers a paragraph; each sentence is judged separately |
+| `FOUND BY PROOFPATH (not cited by the author)` | evidence search (experimental): proofpath found this page itself, for a text that cited nothing; the verdict still quotes its passage |
+| `NO EVIDENCE FOUND (searched)` | the search ran and no page it found confirmed or contradicted the claim; never `REFUTED` |
+| `UNVERIFIED (search unavailable)` | the search provider did not answer |
+| `UNVERIFIED (language not supported)` | the claim is not in English and no judge translated it; the models read English only |
 | `UNSUPPORTED CITATION STYLE` | reserved; no detected style produces it in v0.2 |
 
 An earlier build sometimes aborted with `134` after printing a complete report (ONNX
@@ -299,11 +304,44 @@ own words are never allowed to stand as their own evidence.
 | Reddit | with a **free app you register yourself**: put `REDDIT_CLIENT_ID` and `REDDIT_CLIENT_SECRET` in `.env`. Without them the run says `UNVERIFIED (credentials missing)` and names both variables — it never quietly skips the post |
 | Mastodon | best effort, per instance. Many instances now require a login for the public API, and that answer is reported as `UNVERIFIED (blocked)`, not as a missing post |
 | Lemmy | best effort, per instance, through the `/api/v3` every instance serves without a login; a private instance's `not_logged_in` is reported as `UNVERIFIED (blocked)`, not as a missing post. A post's URL and the links in its body or in a comment. Known by its host — `lemmy.*` and the big instances without that prefix (`lemm.ee`, `sh.itjust.works`, `beehaw.org`, `programming.dev`, `feddit.org`) — never by `/post/<n>` alone, which is any blog's address; a post on an instance outside that rule is read as a page |
-| X / Twitter | cannot be read at all. `check --url` says so and asks you to paste the text; the links inside it are then verified normally |
+| X / Twitter | cannot be read at all. Paste the text instead: a link inside it is verified normally, and with evidence search set up a text with no link is searched (experimental) |
 
 The Reddit path is built against Reddit's documented shapes and covered by fixtures, but it
 has never run against Reddit on this machine — nobody here has an app to register. Bluesky,
 Hacker News, Mastodon, Lobste.rs and Lemmy were each read live before release.
+
+## Claims with no source (experimental)
+
+A plain text that cites nothing — no link, no `[12]` marker, no bibliography — has
+nothing to check it against. When a search provider is configured, proofpath searches
+the web for it instead of stopping at a parse error:
+
+```bash
+proofpath config set search.provider tavily
+echo 'TAVILY_API_KEY=tvly-…' >> .env
+```
+
+or `search.provider searxng` plus `search.base_url` for your own instance. Setting
+the provider **is** the consent — search then runs automatically on source-less text;
+`--no-search` turns it off for one run, and `permissions.web_search = deny` turns it
+off for good.
+
+Up to 5 check-worthy sentences are searched, up to 3 pages each. Each page is fetched
+and read like any other source — the search result's own snippet is never used as
+evidence (rule 1). A claim a page supports is reported `SUPPORTED (found by
+proofpath)`, with its passage; a claim nothing could confirm is `NO EVIDENCE FOUND
+(searched)`, never `REFUTED` (rule 2). Every such finding and source carries a
+`FOUND BY PROOFPATH (not cited by the author)` tag, so it is never mistaken for
+something the author themselves pointed at.
+
+With `--judge`, the model rewrites each claim into a search query (and translates it,
+if it is not in English) before searching. If the judge is rate-limited, the local
+fallback below takes over; only if that fails too is the plain sentence searched, and
+the report says so.
+
+**This is experimental.** On AVeriTeC's search scenario, proofpath scores
+[**0.404**](docs/eval/2026-09-29-averitec-search.md) against a 0.708 majority baseline, and every report from a
+run that searched prints that line at the top.
 
 ## Optional LLM judge (v0.3)
 
@@ -348,10 +386,18 @@ one per citation.
 **Providers.** Default is Groq `openai/gpt-oss-120b` (free without a card, no training
 on submitted data). `proofpath config set judge.provider gemini` switches to Gemini —
 note that Google trains on free-tier prompts outside the EEA/UK/CH, and proofpath prints
-that warning once per run. `judge.provider ollama` runs fully offline. Gemini and Ollama are
+that warning once per run. `judge.provider ollama` runs fully offline on `qwen3.5:9b`,
+which must already be installed (proofpath never pulls a model). Gemini and Ollama are
 fixture-tested and were not exercised live in v0.3.0. All three speak
 the OpenAI `chat/completions` shape. The key comes from `GROQ_API_KEY` / `GEMINI_API_KEY`
 in the environment or a `.env` file, never from config, and is never printed.
+
+**When the judge stops answering.** If the configured judge hits its rate limit or
+otherwise stops answering, the run switches at once to `qwen3.5:9b` in your local
+Ollama, if it is installed (`ollama pull qwen3.5:9b`; proofpath never pulls it). It says so on stderr, in the TUI
+above the prompt, and in the report. The next run tries the configured API again first.
+`proofpath config set judge.fallback off` turns this off. Without a local model to
+switch to, the run says so and tells you how to add one, on the same channels.
 
 ## Measured
 

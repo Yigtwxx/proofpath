@@ -88,7 +88,10 @@ UNSUPPORTED_HINT = (
 #: tool never asked anyone about must not be reported as one that could not be
 #: reached (product rule 2) — the post is there, this reader may not have it, which
 #: is what ``BLOCKED`` means in spec section 15.
-X_HINT = "X cannot be read; paste the post text — the links inside it will be verified"
+X_HINT = (
+    "X cannot be read; paste the post text — its links are verified, and with "
+    "search.provider set a text with no link is searched"
+)
 
 #: What a comment permalink is answered with when the thread came back without that
 #: comment anywhere in it. ``UNAVAILABLE`` and not ``UNREACHABLE``: the provider

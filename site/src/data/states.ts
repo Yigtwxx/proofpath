@@ -41,4 +41,17 @@ export const states: readonly State[] = [
         name: 'PARAGRAPH-SCOPED',
         cause: 'the citation covers a paragraph; each sentence is judged separately',
     },
+    {
+        name: 'FOUND BY PROOFPATH (not cited by the author)',
+        cause: 'evidence search (experimental): proofpath found this page itself, for a text that cited nothing; the verdict still quotes its passage',
+    },
+    {
+        name: 'NO EVIDENCE FOUND (searched)',
+        cause: 'the search ran and no page it found confirmed or contradicted the claim; never REFUTED',
+    },
+    { name: 'UNVERIFIED (search unavailable)', cause: 'the search provider did not answer' },
+    {
+        name: 'UNVERIFIED (language not supported)',
+        cause: 'the claim is not in English and no judge translated it; the models read English only',
+    },
 ];

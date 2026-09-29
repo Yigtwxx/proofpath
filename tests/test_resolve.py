@@ -1184,3 +1184,109 @@ def test_a_non_json_retraction_body_leaves_the_check_unmade() -> None:
     )
     with pytest.raises(rs.ProviderError):
         rs.Resolver(retries=0).retraction(NUMPY_DOI)
+
+
+# --- an entry that is nothing but an identifier (final review, Critical 1) ---------
+
+# The three addresses the final review reproduced a false ghost with. As entries they
+# carry no title, no author and no year: the identifier is the whole reference.
+ACS_DOI = "10.1021/acs.est.0c01234"
+ACS_PUBLISHER_URL = f"https://pubs.acs.org/doi/{ACS_DOI}"
+ACS_DOI_URL = f"https://doi.org/{ACS_DOI}"
+ARXIV_ABS_URL = "https://arxiv.org/abs/2106.09685"
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        ACS_PUBLISHER_URL,
+        ACS_DOI_URL,
+        ARXIV_ABS_URL,
+        f"[4] {ACS_DOI_URL}",
+        f"doi:{ACS_DOI}",
+        ACS_DOI,
+        "arXiv:2106.09685",
+        "https://arxiv.org/pdf/2106.09685v2",
+        # Round 2: a labelled address, and an address in angle brackets.
+        f"DOI: {ACS_DOI_URL}",
+        f"doi: {ACS_DOI_URL}.",
+        f"<{ACS_DOI_URL}>",
+        f"<{ARXIV_ABS_URL}>.",
+        f"[4] <{ACS_PUBLISHER_URL}>",
+    ],
+)
+def test_an_entry_that_is_only_an_identifier_is_recognised(raw: str) -> None:
+    assert rs.identifier_only(raw)
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        ALPHAFOLD,
+        ALPHAFOLD + " https://doi.org/10.1038/s41586-021-03819-2",
+        "https://www.nature.com/articles/s41586-021-03819-2",
+        "https://who.int/report.html",
+        f"See {ACS_DOI_URL} for the data",
+        "doi.org/10.1021/acs.est.0c01234 and a title",
+        f"<{ACS_DOI_URL}> Smith J. A title. 2020.",
+    ],
+)
+def test_an_entry_with_anything_beside_its_identifier_is_not_identifier_only(raw: str) -> None:
+    assert not rs.identifier_only(raw)
+
+
+def _crossref_work(doi: str, fixture_name: str = "crossref_work_numpy.json") -> respx.Route:
+    return respx.get(f"https://api.crossref.org/works/{doi}").mock(
+        return_value=httpx.Response(200, json=fixture(fixture_name))
+    )
+
+
+@respx.mock
+@pytest.mark.parametrize(
+    "raw",
+    [
+        ACS_PUBLISHER_URL,
+        ACS_DOI_URL,
+        f"[4] {ACS_DOI_URL}",
+        f"DOI: {ACS_DOI_URL}",
+        f"<{ACS_DOI_URL}>",
+    ],
+)
+def test_a_bare_doi_address_that_resolves_is_that_work_never_a_ghost(raw: str) -> None:
+    # The record's title is nowhere in the entry, because the entry is only the
+    # address. Resolving to *some* work is not evidence of fabrication (rule 3).
+    _crossref_work(ACS_DOI)
+    _mock()
+    result = rs.Resolver().resolve(raw)
+    assert result.state is rs.State.RESOLVED_LOW
+    assert result.best is not None and result.best.provider == "doi"
+    assert any("only an identifier" in note for note in result.notes)
+
+
+@respx.mock
+def test_a_bare_arxiv_address_that_resolves_is_that_work_never_a_ghost() -> None:
+    _mock(arxiv="arxiv_id_roberta.xml")
+    result = rs.Resolver().resolve(ARXIV_ABS_URL)
+    assert result.state is rs.State.RESOLVED_LOW
+    assert result.best is not None and result.best.provider == "arxiv"
+
+
+@respx.mock
+@pytest.mark.parametrize("raw", [ACS_PUBLISHER_URL, ACS_DOI_URL, ARXIV_ABS_URL])
+def test_a_bare_identifier_that_does_not_resolve_is_ambiguous_never_a_ghost(raw: str) -> None:
+    # Crossref only knows Crossref DOIs: a DataCite DOI (Zenodo, arXiv's own) is a 404
+    # there. With nothing but the identifier, there is nothing else to search by, and
+    # the matcher's answer to a URL string is noise (spec section 8).
+    respx.get(f"https://api.crossref.org/works/{ACS_DOI}").mock(return_value=httpx.Response(404))
+    routes = _mock()
+    result = rs.Resolver().resolve(raw)
+    assert result.state is rs.State.AMBIGUOUS
+    assert not routes["crossref"].called  # the bibliographic matcher is never fed a URL
+
+
+@respx.mock
+def test_a_bare_identifier_whose_lookup_is_down_is_unavailable() -> None:
+    respx.get(f"https://api.crossref.org/works/{ACS_DOI}").mock(return_value=httpx.Response(503))
+    _mock()
+    result = rs.Resolver(retries=0).resolve(ACS_DOI_URL)
+    assert result.state is rs.State.UNAVAILABLE

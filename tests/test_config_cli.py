@@ -28,7 +28,7 @@ def test_config_prints_path_and_every_section_as_toml(config_dir: Path) -> None:
     assert result.exit_code == 0, result.output
     assert str(config_dir / "config.toml") in result.stdout
     assert "not written yet" in result.stdout
-    for section in ("[permissions]", "[fetch]", "[contact]", "[judge]"):
+    for section in ("[permissions]", "[fetch]", "[contact]", "[judge]", "[search]"):
         assert section in result.stdout
     assert 'install_browser = "ask"' in result.stdout
     assert "GROQ_API_KEY" in result.stdout
@@ -141,3 +141,28 @@ def test_old_top_level_groups_are_gone(config_dir: Path, group: str) -> None:
     result = runner.invoke(app, [group])
     assert result.exit_code == 2
     assert "No such command" in result.output
+
+
+# --- evidence search settings (ledger T1, final review) --------------------------------
+
+
+def test_config_renders_the_web_search_permission(config_dir: Path) -> None:
+    result = runner.invoke(app, ["config"])
+    assert result.exit_code == 0, result.output
+    assert 'web_search = "allow"' in result.stdout.splitlines()
+
+
+def test_the_search_provider_values_and_the_hinted_settings_are_the_real_ones(
+    config_dir: Path,
+) -> None:
+    from proofpath.config import SEARCH_PROVIDERS
+    from proofpath.settings_hints import SEARCH_SETTING, SEARXNG_SETTING
+
+    assert SEARCH_PROVIDERS == ("off", "tavily", "searxng")
+    assert SEARCH_SETTING == "search.provider tavily"
+    assert SEARXNG_SETTING == "search.provider searxng"
+    # The hints are commands a reader types, so each one has to be accepted as one.
+    for setting in (SEARCH_SETTING, SEARXNG_SETTING):
+        result = runner.invoke(app, ["config", "set", *setting.split()])
+        assert result.exit_code == 0, result.output
+        assert result.stdout.startswith(f"{setting.replace(' ', ' = ', 1)}  (")

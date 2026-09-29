@@ -64,7 +64,10 @@ class WebProvider:
         url = find_url(ref.raw) or _address(resolved)
         if not url:
             return []
-        return [_from_page(url, self._fetcher.fetch(url))]
+        # A page the search found is one the user never chose to contact, so it is
+        # fetched without their contact address; a cited one keeps it (round 2).
+        fetched = self._fetcher.fetch(url, anonymous=ref.origin == "search")
+        return [_from_page(url, fetched)]
 
 
 def _address(resolved: ResolveResult) -> str | None:

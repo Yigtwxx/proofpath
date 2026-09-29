@@ -50,6 +50,10 @@ MIN_INTERVAL: dict[str, float] = {
     "lobste.rs": 0.5,
     "www.reddit.com": 1.0,
     "oauth.reddit.com": 1.0,
+    # Evidence search (OPEN-ITEMS 17.1a): a run asks at most a handful of queries, and
+    # the user's own key is what they spend. SearXNG is the user's own instance, so it
+    # is not listed and gets the default.
+    "api.tavily.com": 0.5,
 }
 MAX_RETRY_AFTER = 60.0
 RETRYABLE = (429, 500, 502, 503, 504)
@@ -217,17 +221,18 @@ class PoliteClient:
         url: str,
         *,
         data: dict[str, str] | None = None,
+        json_body: dict[str, Any] | None = None,
         headers: dict[str, str] | None = None,
         auth: tuple[str, str] | None = None,
     ) -> httpx.Response:
-        """A form POST, throttled and retried like :meth:`get`.
+        """A POST, throttled and retried like :meth:`get`.
 
-        Only one caller needs it: the OAuth token exchange a user's own Reddit app
-        makes (spec section 6.2). ``auth`` is HTTP basic and ``data`` is the form
-        body, so neither ever reaches the URL — a credential does not belong in a
-        query string, which is the part of a request that gets logged.
+        Two callers: the OAuth token exchange a user's own Reddit app makes (spec
+        section 6.2), which sends a form in ``data``, and the evidence search, which
+        sends JSON in ``json_body``. A credential rides in ``auth`` or ``headers`` and
+        never in the URL: a query string is the part of a request that gets logged.
         """
-        return self._send("POST", url, data=data, headers=headers, auth=auth)
+        return self._send("POST", url, data=data, json_body=json_body, headers=headers, auth=auth)
 
     def _send(
         self,
@@ -236,6 +241,7 @@ class PoliteClient:
         *,
         params: dict[str, Any] | None = None,
         data: dict[str, str] | None = None,
+        json_body: dict[str, Any] | None = None,
         headers: dict[str, str] | None = None,
         auth: tuple[str, str] | None = None,
     ) -> httpx.Response:
@@ -257,6 +263,7 @@ class PoliteClient:
                     url,
                     params=params,
                     data=data,
+                    json=json_body,
                     headers=headers,
                     auth=auth or httpx.USE_CLIENT_DEFAULT,
                 )

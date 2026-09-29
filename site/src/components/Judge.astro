@@ -16,7 +16,9 @@ import SketchArrow from './sketch/SketchArrow.astro';
             <code>--judge</code> asks it about the low-confidence verdicts alone, and its answer is
             printed <em class="key">beside</em> the local verdict, never in place of it.{' '}
             <code>--summarize</code> is one call over the finished report, labelled model-written.
-            If the provider does not answer, the report says so; the SARIF log never carries either.
+            If the provider hits its limit or stops answering, the run switches at once to a local{' '}
+            <code>qwen3.5:9b</code>, if it is installed, and says so; the next run tries the
+            provider first again. The SARIF log never carries either.
         </p>
         <SketchBox padding="md" draw class="judge__commands">
             <div class="judge__pre" role="figure" aria-label="Judge commands">

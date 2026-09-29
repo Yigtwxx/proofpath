@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.resources
 import json
 import re
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -115,6 +116,10 @@ def test_check_without_a_key_on_a_keyed_provider_fails_cleanly() -> None:
 # Ollama is the preset with no API key, so these tests need no secret at all.
 
 OLLAMA = judge.provider_defaults("ollama")
+# The same keyless endpoint under another provider name: Ollama clients always send
+# ``reasoning_effort: none`` (fix round 1), so the tests about passing the caller's
+# effort through, and about the downgrade, need a provider that does not.
+PASSTHROUGH = replace(OLLAMA, provider="openai-compatible")
 OLLAMA_URL = "http://localhost:11434/v1/chat/completions"
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 MESSAGES = [
@@ -126,7 +131,7 @@ SCHEMA = {"type": "object", "properties": {"opinions": {"type": "array"}}}
 
 def _ok(content: str = '{"opinions": []}', **extra: object) -> httpx.Response:
     body: dict[str, object] = {
-        "model": "llama3.1",
+        "model": "qwen3.5:9b",
         "choices": [{"message": {"content": content}}],
     }
     body.update(extra)
@@ -146,7 +151,7 @@ def test_complete_sends_the_json_schema_and_fills_usage_from_the_response() -> N
     client = judge.JudgeClient(OLLAMA, None)
     done = client.complete(MESSAGES, json_schema=SCHEMA)
     sent = json.loads(route.calls.last.request.content)
-    assert sent["model"] == "llama3.1"
+    assert sent["model"] == "qwen3.5:9b"
     assert sent["messages"] == MESSAGES
     assert sent["max_tokens"] == 1024
     assert sent["temperature"] == 0.0
@@ -156,13 +161,13 @@ def test_complete_sends_the_json_schema_and_fills_usage_from_the_response() -> N
     # Ollama takes no key, so no Authorization header may be sent.
     assert "authorization" not in route.calls.last.request.headers
     assert done == judge.Completion(
-        text='{"opinions": []}', prompt_tokens=120, completion_tokens=7, model="llama3.1"
+        text='{"opinions": []}', prompt_tokens=120, completion_tokens=7, model="qwen3.5:9b"
     )
     assert client.cost.calls == 1
     assert client.cost.prompt_tokens == 120
     assert client.cost.completion_tokens == 7
     assert client.cost.waited_s == 0.0
-    assert client.cost.model == "llama3.1"
+    assert client.cost.model == "qwen3.5:9b"
 
 
 @respx.mock
@@ -197,10 +202,24 @@ def test_a_provider_that_rejects_the_schema_is_retried_once_with_json_object() -
 
 
 @respx.mock
+def test_an_ollama_judge_is_always_asked_not_to_think() -> None:
+    """``judge.provider ollama`` defaults to qwen3.5:9b, a thinking model: on ``low``
+    it spent a 1500-token budget thinking and answered nothing (live, 2026-09-28)."""
+    assert OLLAMA.model == "qwen3.5:9b"
+    route = respx.post(OLLAMA_URL).mock(return_value=_ok("a paragraph"))
+    client = judge.JudgeClient(OLLAMA, None)
+    client.complete(MESSAGES, reasoning_effort="low")
+    assert json.loads(route.calls.last.request.content)["reasoning_effort"] == "none"
+    client.complete(MESSAGES)
+    assert json.loads(route.calls.last.request.content)["reasoning_effort"] == "none"
+    client.close()
+
+
+@respx.mock
 def test_complete_sends_the_reasoning_effort_it_was_given_and_omits_it_otherwise() -> None:
     """A reasoning model spends its budget thinking unless it is told how much to."""
     route = respx.post(OLLAMA_URL).mock(return_value=_ok("a paragraph"))
-    client = judge.JudgeClient(OLLAMA, None)
+    client = judge.JudgeClient(PASSTHROUGH, None)
 
     client.complete(MESSAGES, reasoning_effort="low")
     assert json.loads(route.calls.last.request.content)["reasoning_effort"] == "low"
@@ -240,7 +259,7 @@ def test_each_downgrade_costs_one_extra_request_and_no_more() -> None:
             _ok(),
         ]
     )
-    client = judge.JudgeClient(OLLAMA, None)
+    client = judge.JudgeClient(PASSTHROUGH, None)
     done = client.complete(MESSAGES, json_schema=SCHEMA, reasoning_effort="low")
 
     assert done.text == '{"opinions": []}'
@@ -270,7 +289,7 @@ def test_a_provider_that_refuses_reasoning_effort_is_only_taught_once() -> None:
             _ok("second"),
         ]
     )
-    client = judge.JudgeClient(OLLAMA, None)
+    client = judge.JudgeClient(PASSTHROUGH, None)
     client.complete(MESSAGES, reasoning_effort="low")
     client.complete(MESSAGES, reasoning_effort="low")
 
@@ -310,7 +329,7 @@ def test_a_provider_that_refuses_the_schema_is_only_taught_once() -> None:
 def test_a_client_that_never_sees_a_400_keeps_asking_for_both_fields() -> None:
     """The latch only ever closes on a refusal: a provider that takes both keeps both."""
     route = respx.post(OLLAMA_URL).mock(return_value=_ok())
-    client = judge.JudgeClient(OLLAMA, None)
+    client = judge.JudgeClient(PASSTHROUGH, None)
     client.complete(MESSAGES, json_schema=SCHEMA, reasoning_effort="low")
     client.complete(MESSAGES, json_schema=SCHEMA, reasoning_effort="low")
 
@@ -487,7 +506,7 @@ def test_a_filtered_answer_is_unavailable_and_names_the_finish_reason_only() -> 
         return_value=httpx.Response(
             200,
             json={
-                "model": "llama3.1",
+                "model": "qwen3.5:9b",
                 "system_fingerprint": "gsk_secret_value",
                 "choices": [{"message": {"content": None}, "finish_reason": "content_filter"}],
             },
@@ -505,7 +524,7 @@ def test_a_filtered_answer_is_unavailable_and_names_the_finish_reason_only() -> 
 def test_an_empty_string_answer_is_unavailable_rather_than_an_empty_completion() -> None:
     respx.post(OLLAMA_URL).mock(
         return_value=httpx.Response(
-            200, json={"model": "llama3.1", "choices": [{"message": {"content": ""}}]}
+            200, json={"model": "qwen3.5:9b", "choices": [{"message": {"content": ""}}]}
         )
     )
     client = judge.JudgeClient(OLLAMA, None)
@@ -675,7 +694,7 @@ def test_review_sends_two_messages_and_a_strict_schema() -> None:
     # The per-item field the template names is `verdict`: the local label and tier.
     assert "verdict: NEI (low)" in sent["messages"][-1]["content"]
     assert opinions["c1"] == judge.JudgeOpinion(
-        label=Label.NEI, rationale='the passage says "faster"', model="ollama llama3.1"
+        label=Label.NEI, rationale='the passage says "faster"', model="ollama qwen3.5:9b"
     )
     assert reviewer.cost.calls == 1
     assert not reviewer.unavailable and reviewer.skipped == []
@@ -686,7 +705,7 @@ def test_review_asks_for_low_reasoning_and_a_budget_it_can_answer_within() -> No
     """A reasoning model charges its thinking to ``max_tokens``: too small a budget
     comes back ``finish_reason=length`` with no opinions in it at all."""
     route = respx.post(OLLAMA_URL).mock(side_effect=_answers())
-    reviewer = judge.Judge(judge.JudgeClient(OLLAMA, None))
+    reviewer = judge.Judge(judge.JudgeClient(PASSTHROUGH, None))
     reviewer.review([_item("c1")])
 
     sent = json.loads(route.calls.last.request.content)
@@ -845,9 +864,9 @@ def test_review_never_raises_when_the_client_misbehaves() -> None:
     """Nothing the optional layer does may reach the run (spec section 11.1)."""
 
     class Broken:
-        cost = judge.JudgeCost(model="llama3.1")
+        cost = judge.JudgeCost(model="qwen3.5:9b")
         provider = "ollama"
-        model = "llama3.1"
+        model = "qwen3.5:9b"
 
         def complete(self, *args: object, **kwargs: object) -> judge.Completion:
             raise ZeroDivisionError("a bug in the adapter")
@@ -859,7 +878,7 @@ def test_review_never_raises_when_the_client_misbehaves() -> None:
 
 def test_the_judge_names_itself_by_provider_and_model() -> None:
     reviewer = judge.Judge(judge.JudgeClient(OLLAMA, None))
-    assert reviewer.name == "ollama llama3.1"
+    assert reviewer.name == "ollama qwen3.5:9b"
     reviewer.close()
 
 
@@ -880,7 +899,7 @@ PARAGRAPH = "42 references were checked and three do not say what the draft says
 @respx.mock
 def test_summarize_sends_the_finished_report_as_plain_text() -> None:
     route = respx.post(OLLAMA_URL).mock(return_value=_ok(f"  {PARAGRAPH}\n"))
-    reviewer = judge.Judge(judge.JudgeClient(OLLAMA, None))
+    reviewer = judge.Judge(judge.JudgeClient(PASSTHROUGH, None))
     text = reviewer.summarize(REPORT)
 
     sent = json.loads(route.calls.last.request.content)
@@ -964,3 +983,34 @@ def test_known_providers_are_the_provider_table_sorted() -> None:
     accepts, in the order its own error message lists them."""
     assert judge.known_providers() == ("gemini", "groq", "ollama")
     assert judge.known_providers() == tuple(sorted(judge._PROVIDERS))
+
+
+# --- the queries budget (final review, minor) ------------------------------------------
+
+
+@respx.mock
+def test_queries_leave_a_reasoning_model_room_to_think_and_answer_five_claims() -> None:
+    """``gpt-oss-120b`` charges its thinking to ``max_tokens``. Five claims answered in
+    full -- an English text and two queries each -- are ~170 tokens apiece, so 1500
+    left a low-effort reasoning pass ~650 tokens before ``finish_reason=length``
+    cost every query and every translation."""
+    route = respx.post(OLLAMA_URL).mock(return_value=_ok('{"items": []}'))
+    asker = judge.Judge(judge.JudgeClient(PASSTHROUGH, None))
+    claims = ["x" * 300] * 5
+    asker.queries(claims)
+
+    sent = json.loads(route.calls.last.request.content)
+    one_answer = judge.estimate_tokens(
+        json.dumps({"id": 4, "english": "x" * 300, "queries": ["y" * 150, "y" * 150]})
+    )
+    assert sent["max_tokens"] >= 5 * one_answer + judge._QUERIES_REASONING_TOKENS
+    assert sent["reasoning_effort"] == "low"
+    # Prompt and answer budget together still fit a free tier's 8k tokens a minute.
+    prompt = sum(judge.estimate_tokens(m["content"]) for m in sent["messages"])
+    assert prompt + sent["max_tokens"] <= 8000
+    asker.close()
+
+
+def test_the_queries_budget_grows_with_the_batch_and_stays_under_its_ceiling() -> None:
+    assert judge._queries_budget(1) < judge._queries_budget(5)
+    assert judge._queries_budget(1000) == judge._QUERIES_MAX_TOKENS

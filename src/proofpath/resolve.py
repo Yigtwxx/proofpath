@@ -244,6 +244,37 @@ def find_arxiv_id(raw: str) -> str | None:
     return ident
 
 
+# The label a style prints before a bare identifier ("doi:", "arXiv:"), which is not
+# a title, an author or a year either.
+# The label is followed by a colon or a space, so "doi.org/…" keeps its host.
+_ID_LABEL = re.compile(r"^(?:doi|arxiv)(?:\s*:\s*|\s+)", re.I)
+
+
+def identifier_only(raw: str) -> bool:
+    """Whether an entry is an identifier and nothing else, once its marker is gone.
+
+    A bare DOI, a ``doi.org`` or publisher ``/doi/`` address, an arXiv id or its
+    ``abs``/``pdf`` address. Such an entry carries no title, author or year, so the
+    field checks of spec section 8 have nothing to agree or disagree with: the
+    resolver must not read the matcher's answer to a URL string as "nothing agrees".
+    """
+    text = strip_marker(raw).strip().rstrip(_URL_TAIL)
+    # "DOI: https://doi.org/…" and "<https://…>": a label, or the angle brackets some
+    # styles print around an address, are no more a title than the identifier is.
+    body = _ID_LABEL.sub("", text, count=1).strip()
+    if body.startswith("<") and body.endswith(">"):
+        body = body[1:-1].strip().rstrip(_URL_TAIL)
+    if not body:
+        return False
+    url = find_url(body)
+    if url is not None:
+        return url == body and bool(find_doi(url) or find_arxiv_id(url))
+    doi = find_doi(body)
+    if doi is not None:
+        return body == doi
+    return _ARXIV_ID_BARE.fullmatch(body) is not None
+
+
 _QUOTED = re.compile(r"[\"“]([^\"”]{10,}?)[,.]?[\"”]")
 _SPLIT = re.compile(r"[.?!]\s+")
 # Every marker form ingest._ENTRY_START accepts: "[12] ", "12. ", "12) " and the
@@ -536,6 +567,28 @@ def classify(candidates: Sequence[Candidate], raw: str) -> ResolveResult:
     return ResolveResult(State.GHOST, None, list(candidates))
 
 
+IDENTIFIER_ONLY_NOTE = "the entry is only an identifier; no title, author or year to compare"
+IDENTIFIER_UNRESOLVED_NOTE = (
+    "the entry is only an identifier, and it does not resolve; nothing else to search by"
+)
+
+
+def _identified(direct: Candidate, raw: str, notes: list[str]) -> ResolveResult:
+    """An identifier-only entry, resolved to the record its identifier names.
+
+    Low confidence, not ``RESOLVED``: no field was checked, because there was none to
+    check. But the identifier is the reference, so the record it names is the work
+    cited -- and the one thing it can never be is a ghost (spec section 8, rule 3).
+    """
+    return ResolveResult(
+        State.RESOLVED_LOW,
+        direct,
+        [direct],
+        notes=[*notes, IDENTIFIER_ONLY_NOTE],
+        match=match_fields(direct, raw),
+    )
+
+
 # --- provider records -> candidates -----------------------------------------------
 
 
@@ -814,15 +867,22 @@ class Resolver:
         raw = strip_marker(raw)
         notes: list[str] = []
         pool: list[Candidate] = []
+        # An entry that is nothing but its identifier is decided by the identifier
+        # alone: it has no fields to check a record against (final review, C1).
+        bare = identifier_only(raw)
+        lookup_down = False
         arxiv_id = find_arxiv_id(raw)
         if arxiv_id:
             try:
                 direct = self.arxiv_id(arxiv_id)
             except ProviderError as exc:
+                lookup_down = True
                 notes.append(f"arxiv unavailable for id lookup ({exc})")
             else:
                 if direct is None:
                     notes.append(f"arXiv:{arxiv_id} does not resolve")
+                elif bare:
+                    return _identified(direct, raw, [*notes, f"arXiv:{arxiv_id} resolved"])
                 else:
                     result = classify([direct], raw)
                     if result.state in (State.RESOLVED, State.RESOLVED_LOW):
@@ -859,10 +919,13 @@ class Resolver:
             try:
                 direct = self.crossref_doi(doi)
             except ProviderError as exc:
+                lookup_down = True
                 notes.append(f"crossref unavailable for DOI lookup ({exc})")
             else:
                 if direct is None:
                     notes.append(f"DOI {doi} does not resolve")
+                elif bare:
+                    return _identified(direct, raw, [*notes, f"DOI {doi} resolved"])
                 else:
                     result = classify([direct], raw)
                     if result.state in (State.RESOLVED, State.RESOLVED_LOW):
@@ -893,6 +956,20 @@ class Resolver:
                         )
                     notes.append(f"DOI {doi} resolves to a different work")
                     pool.append(direct)
+
+        if bare:
+            # Nothing but an identifier, and it did not resolve. The entry has no
+            # title to search by, and the bibliographic matcher's answer to a URL
+            # string is an unrelated paper whose fields cannot agree with a string
+            # that has none -- "nothing agrees" there is not evidence of fabrication.
+            # Crossref also 404s every DataCite DOI (Zenodo, arXiv's own), so an
+            # unresolved identifier is uncertainty, and uncertainty is AMBIGUOUS
+            # (spec section 8, product rule 3).
+            if lookup_down:
+                return ResolveResult(State.UNAVAILABLE, None, [], notes=notes)
+            return ResolveResult(
+                State.AMBIGUOUS, None, [], notes=[*notes, IDENTIFIER_UNRESOLVED_NOTE]
+            )
 
         segments = title_segments(raw)[:2]
         required_down: list[str] = []

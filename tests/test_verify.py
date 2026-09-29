@@ -161,6 +161,8 @@ class StubFetcher:
         self.asked: list[tuple[str, str]] = []  # (url, text_kind) as the ladder saw it
         # (url, counts_as_source, use_cache): how the target page was asked for.
         self.options: list[tuple[str, bool, bool]] = []
+        # The URLs fetched without the contact address (``Fetcher.fetch(anonymous=)``).
+        self.anonymous: list[str] = []
         self.on_call: Callable[[], None] | None = None
 
     def fetch(
@@ -170,7 +172,10 @@ class StubFetcher:
         text_kind: str = "fulltext",
         counts_as_source: bool = True,
         use_cache: bool = True,
+        anonymous: bool = False,
     ) -> Fetched:
+        if anonymous:
+            self.anonymous.append(url)
         self.calls.append(url)
         self.asked.append((url, text_kind))
         self.options.append((url, counts_as_source, use_cache))
