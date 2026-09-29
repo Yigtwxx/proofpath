@@ -940,6 +940,10 @@ presented as evidence of absence.
 | `PARAGRAPH-SCOPED` | the citation supports a paragraph, not one sentence (§9); every sentence is verified separately and grouped |
 | `UNSUPPORTED CITATION STYLE` | a citation style proofpath cannot pair yet — footnote-only and superscript-letter (`ᵃ`) styles; the claim is listed but not judged. Author-year has been paired since v0.2 and is no longer reported here |
 | `UNRESOLVED MARKER` | a citation marker naming no bibliography entry: a number outside what the list prints, or an author-year item with no matching entry — or with several and no `2020a`/`2020b` to say which. Reported, never guessed at (§9 step 2) |
+| `SUPPORTED` / `REFUTED (found by proofpath)` | v0.4.8, evidence search: a page proofpath found itself for a claim with no source, with its passage. Tagged `FOUND BY PROOFPATH (not cited by the author)`. See `2026-09-28-evidence-search-design.md` §4 |
+| `NO EVIDENCE FOUND (searched)` | v0.4.8: the search ran and no page confirmed or contradicted the claim. Never `REFUTED` (rule 2) |
+| `UNVERIFIED (search unavailable)` | v0.4.8: the search provider failed. A rejected key is `UNVERIFIED (credentials missing)` |
+| `UNVERIFIED (language not supported)` | v0.4.8: the claim is not in English and no judge translated it. The NLI models read English only |
 
 Unparseable pages fail loudly with the page number and processing continues.
 
