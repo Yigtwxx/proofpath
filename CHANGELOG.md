@@ -6,6 +6,26 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- **`Tavily API:` in `/config`.** The search section of the settings panel has a key
+  row: press Enter, paste the key, Enter again. It is saved to the `.env` in your
+  config directory (mode 0600 on macOS/Linux), never to `config.toml` or the project's
+  `.env`, and it is never shown: the row says only whether a key is saved and where.
+  Backspace removes it.
+
+### Fixed
+- **Wikipedia pages no longer read as `UNVERIFIED (blocked)`.** The bot-wall check
+  matched `captcha` inside MediaWiki's inline configuration script, so every Wikipedia
+  page was reported blocked at all four ladder steps despite answering 200. Challenge
+  phrases are now matched outside `<script>`/`<style>` contents and only on small
+  pages; `cf-chl` still marks a wall wherever it appears.
+- **A verdict judged against an abstract now says so on its own row.** A short page
+  or an abstract-only source already had its `LOW CONFIDENCE (abstract only)` row, but
+  the claim's verdict row (`SUPPORTED (found by proofpath)`, `NOT SUPPORTED`, …) did
+  not, so read alone it looked like a full-text verdict. It now carries "judged
+  against the abstract only, not the full text", in the terminal, Markdown, JSON and
+  SARIF.
+
 ## [0.4.8] - 2026-09-29
 
 A text that cites nothing can now be checked: proofpath searches the web for it. And

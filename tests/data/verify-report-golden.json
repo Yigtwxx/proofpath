@@ -514,7 +514,9 @@
       "source_id": "doi:10.5555/closed-access-2020",
       "fetch_step": null,
       "tier": "low",
-      "detail": [],
+      "detail": [
+        "judged against the abstract only, not the full text"
+      ],
       "group": null,
       "judge": null
     },

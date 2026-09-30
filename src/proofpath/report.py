@@ -53,6 +53,11 @@ UNVERIFIED_PREFIX = "UNVERIFIED"
 # Evidence search (OPEN-ITEMS 17.1a). The provenance note every finding about a found
 # page carries, so no renderer can show one as a source the author cited.
 FOUND_BY_PROOFPATH = "FOUND BY PROOFPATH (not cited by the author)"
+# The note a verdict read from an abstract-grade text carries on its own finding
+# (rule 6). The source's abstract-only finding is a separate row, and every surface
+# that shows a verdict alone -- a diagnostic, a markdown bullet, a SARIF message --
+# would otherwise pass a partial read off as a full one.
+ABSTRACT_BASIS = "judged against the abstract only, not the full text"
 SEARCH_UNAVAILABLE = f"{UNVERIFIED_PREFIX} (search unavailable)"
 # A claim in another language that no judge translated: the models read English only,
 # so it is not searched, and it is not called NEI either (OPEN-ITEMS 17.1a).

@@ -13,10 +13,20 @@ their defaults are what ``Backspace`` restores, and a default that lived in two
 places would drift. The API key's *value* is never on screen; the ``key`` line says
 which variable is looked up and where a value for it was found, nothing more
 (``secrets.ApiKey`` will not print it either).
+
+One row is not a setting of the file at all: ``Tavily API:``, where the search key is
+pasted. It is a row so it is found where the search settings are, but its value goes
+to the config dir's ``.env`` (:func:`proofpath.secrets.save_dotenv_value`), never to
+the TOML file and never to the project ``.env``, and it is drawn as a status -- not
+set, saved where, or overridden by the environment -- with no character of the key.
+Its edit is a password field that opens empty, and a save is announced with
+:class:`ConfigPanel.KeySaved` (a name and a path) rather than ``Written``, whose pairs
+the app prints with their values.
 """
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import ClassVar, Literal
@@ -42,11 +52,19 @@ from proofpath.config import (
     SearchConfig,
 )
 from proofpath.judge import JudgeError, default_dotenv_paths, known_providers
-from proofpath.secrets import resolve_api_key
+from proofpath.secrets import (
+    SecretValueError,
+    read_dotenv,
+    remove_dotenv_value,
+    resolve_api_key,
+    save_dotenv_value,
+    user_dotenv_path,
+)
 from proofpath.tui.theme import Theme
 from proofpath.tui.widgets._shared import panelled, textual_colour
 
-Kind = Literal["choice", "text"]
+#: ``secret`` is the key row: a password edit, saved to a ``.env``, drawn as a status.
+Kind = Literal["choice", "text", "secret"]
 
 #: The column a row's value starts at, after the marker, a space and the padded
 #: name; measured off the spec's own mock, where the longest name is
@@ -67,6 +85,10 @@ UNSET = "(unset)"
 BADGE_INK = "black"
 #: The panel's title on its border, exactly the line that opened it.
 TITLE = "/config"
+#: The key row's name column. Written out in full, colon and all, because the user
+#: asked for exactly this label; the padding to :data:`NAME_WIDTH` still lines the
+#: status up with every other row's value.
+TAVILY_LABEL = "Tavily API:"
 
 
 @dataclass(frozen=True)
@@ -78,11 +100,12 @@ class Row:
     values: tuple[str, ...]  # the choices; empty for a text row
     meaning: str  # one dim line under a choice row, or beside a text row; "" for none
     default: str
+    label: str = ""  # what the row line shows instead of the key's name; "" for the name
 
     @property
     def name(self) -> str:
-        """The key without its section: what the row line shows."""
-        return self.key.partition(".")[2]
+        """The key without its section, or the row's own label: what the line shows."""
+        return self.label or self.key.partition(".")[2]
 
 
 @dataclass(frozen=True)
@@ -169,7 +192,7 @@ def sections() -> tuple[Section, ...]:
                     "search.provider",
                     "choice",
                     SEARCH_PROVIDERS,
-                    "off until set; tavily needs TAVILY_API_KEY in .env",
+                    "off until set; tavily needs a key: paste it in Tavily API below",
                     _default(search.provider),
                 ),
                 Row(
@@ -186,6 +209,9 @@ def sections() -> tuple[Section, ...]:
                     "the variable holding the key",
                     _default(search.api_key_env),
                 ),
+                # Not a TOML key: nothing is written to the file under this name. The
+                # key is the row's identity; its "default" is no key at all.
+                Row("search.api_key", "secret", (), "", "", label=TAVILY_LABEL),
             ),
         ),
         Section(
@@ -267,6 +293,17 @@ class ConfigPanel(Vertical):
     class Closed(Message):
         """``Esc`` folded the panel: focus belongs back on the bar."""
 
+    class KeySaved(Message):
+        """The key row wrote (or, ``removed``, took out) ``name`` in the ``.env`` at
+        ``path``. The variable's name and the file, never the value: this is what the
+        app's log line is made of, and a log is a place a key must not reach."""
+
+        def __init__(self, name: str, path: Path, *, removed: bool = False) -> None:
+            super().__init__()
+            self.name = name
+            self.path = path
+            self.removed = removed
+
     def __init__(self, view: ConfigView, accent: str, out: ui.Ui, theme: Theme) -> None:
         super().__init__(classes=f"run-block config-panel {theme.name}")
         self._view = view
@@ -284,6 +321,9 @@ class ConfigPanel(Vertical):
         #: A text row's ``Input`` is open and has focus.
         self.editing = False
         self._edit: Input | None = None
+        #: Typing that arrived after ``editing`` went up but before the edit's
+        #: ``Input`` was in the DOM; it is poured into the input once it is.
+        self._pending = ""
         self._edit_row: Horizontal | None = None
         self._head = PanelLine()
         self._key = PanelLine()
@@ -380,10 +420,14 @@ class ConfigPanel(Vertical):
             await self._begin_edit(row)
 
     def action_reset(self) -> None:
-        """``Backspace``: the row's default, written like any other value."""
+        """``Backspace``: the row's default, written like any other value; on the key
+        row, the saved key taken out of the config dir's ``.env``."""
         if self.editing or self.collapsed:
             return
         row = self.rows[self.selected]
+        if row.kind == "secret":
+            self._remove_key()
+            return
         self._write(row.key, row.default)
 
     def action_close(self) -> None:
@@ -424,27 +468,111 @@ class ConfigPanel(Vertical):
 
     # --- the text edit --------------------------------------------------------------
 
-    async def _begin_edit(self, row: Row) -> None:
+    async def on_key(self, event: tevents.Key) -> None:
+        """Typing that is the panel's own, kept from the app's forward to the bar.
+
+        Two cases, both about a key never reaching the bar in clear text (and, with
+        a newline behind it, the bar's history on disk):
+
+        * An edit is opening but its ``Input`` has no focus yet -- the mount is
+          awaited and ``focus`` lands a beat later -- so a fast typist's first keys
+          arrive here. They are poured into the edit rather than let through.
+        * The key row is selected. A paste without bracketed paste (conhost, tmux,
+          a slow paste) arrives as keys, and "paste your key here" has to be true
+          for those too: the first key opens the password edit holding itself.
+
+        Every other printable key is left alone and bubbles to the app, which moves
+        it to the bar as before (wordmark design section 11).
+        """
+        if self.collapsed or not event.is_printable or event.character is None:
+            return
+        if self.editing:
+            if self._edit is None or self.app.focused is self._edit:
+                return
+            event.stop()
+            event.prevent_default()
+            self._feed(event.character)
+            return
+        row = self.rows[self.selected]
+        if row.kind != "secret":
+            return
+        event.stop()
+        event.prevent_default()
+        await self._begin_edit(row, "" if event.character.isspace() else event.character)
+
+    async def on_paste(self, event: tevents.Paste) -> None:
+        """A bracketed paste on the key row opens the password edit already holding
+        it -- masked, cursor at the end -- so the user sees a field and one ``Enter``
+        saves. Not saved at once: a paste can carry the wrong clipboard, and the
+        edit is where that is noticed and ``Esc`` drops it unwritten. A paste in the
+        window before an opening edit has focus is poured into it like typing."""
+        if self.collapsed:
+            return
+        text = " ".join(event.text.strip().splitlines())
+        if self.editing:
+            if self._edit is None or self.app.focused is self._edit:
+                return
+            event.stop()
+            event.prevent_default()
+            self._feed(text)
+            return
+        row = self.rows[self.selected]
+        if row.kind != "secret":
+            return
+        event.stop()
+        event.prevent_default()
+        await self._begin_edit(row, text)
+
+    def _feed(self, text: str) -> None:
+        """Typing for an edit whose ``Input`` does not have focus yet: straight into
+        it once it is mounted, into ``_pending`` until then."""
+        if self._edit is not None and self._edit.is_mounted:
+            self._edit.value += text
+            self._edit.cursor_position = len(self._edit.value)
+        else:
+            self._pending += text
+
+    async def _begin_edit(self, row: Row, initial: str = "") -> None:
         """Replace the row line with its name and an ``Input`` holding the value.
 
         ``editing`` goes up before the input takes focus, so the panel's own blur --
         focus is moving to its child -- is not read as a departure. The input does
         not select its text on focus: ``Enter`` on ``model`` is for adding to it as
         often as for replacing it, and the cursor sits at the end, as in the bar.
+
+        The key row's input is a password field and never holds the saved key:
+        prefilling it would put the key back on screen (masked, but one
+        ``password = False`` away), and a key is replaced whole, never appended to.
+        It holds only ``initial`` -- what was just pasted or typed on the row.
+
+        Keys that arrive while the mount is awaited are the edit's (see ``on_key``):
+        they were buffered in ``_pending`` and are added here, before focus.
         """
         self.editing = True
+        self._pending = ""
         line = self._lines[row.key]
         label = PanelLine(self._marker_and_name(row))
-        self._edit = Input(value=self.value(row.key), select_on_focus=False)
+        if row.kind == "secret":
+            self._edit = Input(
+                value=initial, password=True, placeholder="paste the key", select_on_focus=False
+            )
+        else:
+            self._edit = Input(value=self.value(row.key), select_on_focus=False)
         self._edit_row = Horizontal(label, self._edit, classes="edit")
         line.display = False
         # Waited for: focus can only land on a widget that is in the DOM.
         await self._body.mount(self._edit_row, after=line)
+        if self._edit is None:  # cancelled (``Esc``) while the mount was awaited
+            return
+        self._edit.value += self._pending
+        self._pending = ""
+        self._edit.cursor_position = len(self._edit.value)
         self._edit.focus()
 
     def _end_edit(self, *, refocus: bool = True) -> None:
         """Take the input away and show the row line again. Writes nothing."""
         self.editing = False
+        self._pending = ""
         if self._edit_row is not None:
             self._edit_row.remove()
         self._edit = None
@@ -461,7 +589,10 @@ class ConfigPanel(Vertical):
             return
         row = self.rows[self.selected]
         self._end_edit()
-        self._write(row.key, event.value)
+        if row.kind == "secret":
+            self._save_key(event.value)
+        else:
+            self._write(row.key, event.value)
 
     def on_input_changed(self, event: Input.Changed) -> None:
         # The edit's keystrokes are not the bar's: the suggestion list has no say here.
@@ -498,6 +629,77 @@ class ConfigPanel(Vertical):
             return
         self._draw_all()
         self.post_message(self.Written(pairs, self._view.path))
+
+    # --- the key row ----------------------------------------------------------------
+
+    def _key_env(self) -> str:
+        """The variable the key row reads and writes: ``search.api_key_env``, or its
+        default when the file emptied it -- a row with no name to save under would
+        have nothing to offer, and the search provider looks the default up anyway."""
+        return self._view.config.search.api_key_env or SearchConfig().api_key_env
+
+    def _save_key(self, value: str) -> None:
+        """Save the pasted key to the config dir's ``.env`` and say so by name.
+
+        A refusal is ``Failed`` with :class:`SecretValueError`'s message, which is
+        written never to contain the value; a file that cannot be written is the
+        ``OSError``'s, which names the path and not the content.
+        """
+        name, path = self._key_env(), user_dotenv_path()
+        try:
+            save_dotenv_value(path, name, value)
+        except (SecretValueError, OSError) as exc:
+            self.post_message(self.Failed(str(exc)))
+            return
+        self._draw_all()
+        self.post_message(self.KeySaved(name, path))
+
+    def _remove_key(self) -> None:
+        """``Backspace`` on the key row: the key out of the config dir's ``.env``.
+
+        Only that file: a key in the project ``.env`` or the environment is the
+        user's own doing and stays, and the row goes on saying where it is. With no
+        key in the config dir's file there is nothing to remove, and a line says so
+        rather than the key press doing nothing visible.
+        """
+        name, path = self._key_env(), user_dotenv_path()
+        try:
+            removed = remove_dotenv_value(path, name)
+        except OSError as exc:
+            self.post_message(self.Failed(str(exc)))
+            return
+        if not removed:
+            self.post_message(self.Failed(f"{name} is not saved in {path}; nothing was removed"))
+            return
+        self._draw_all()
+        self.post_message(self.KeySaved(name, path, removed=True))
+
+    def _draw_key_status(self, line: Text) -> Text:
+        """``(not set) · paste ...``, ``saved · <path>`` or ``set in the environment``.
+
+        Where the key would be found, in :func:`resolve_api_key`'s own order, so the
+        row and a run can never disagree. Never the value, nor any part of it: even a
+        ``tvly-`` prefix says which provider's key sits in which file.
+        """
+        name, sep, user = self._key_env(), self._theme.glyphs.sep, user_dotenv_path()
+        # A key saved here but read from somewhere else first is *shadowed*: the row
+        # says so and by what, or a user who just pasted a new key would believe the
+        # next search uses it.
+        saved = bool(read_dotenv(user).get(name))
+        if os.environ.get(name):
+            if saved:
+                line.append(f"saved {sep} {user} {sep} overridden by the environment")
+            else:
+                line.append("set in the environment (it overrides the file)")
+            return line
+        found = resolve_api_key(name, environ={}, dotenv_paths=default_dotenv_paths())
+        if found is None:
+            line.append(f"(not set) {sep} paste your key here, enter to save", style=self._muted())
+        elif saved and found.source != str(user):
+            line.append(f"saved {sep} {user} {sep} overridden by {found.source}")
+        else:
+            line.append(f"saved {sep} {found.source}")
+        return line
 
     # --- folding --------------------------------------------------------------------
 
@@ -572,6 +774,8 @@ class ConfigPanel(Vertical):
         """A choice row: every choice, the current one as a badge; a text row: the
         value, or ``(unset)``, with its note beside it."""
         line = self._marker_and_name(row)
+        if row.kind == "secret":
+            return self._draw_key_status(line)
         current = self.value(row.key)
         if row.kind == "choice":
             return self._choices(line, row, current)

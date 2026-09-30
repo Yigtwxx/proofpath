@@ -44,6 +44,46 @@ EMPTY_SHELL = (
 # abstract): non-zero extracted words, so it must stay `ok`, not `blocked`.
 SHORT_REAL_PAGE = b"<html><body><p>Moved. See the new page.</p></body></html>"
 
+# ~400 words of real prose, so a page built from it is well past CHALLENGE_MAX_WORDS.
+ARTICLE_PROSE = (
+    "The city sits on both sides of the strait and has been a trading port for "
+    "centuries, with markets, harbours and caravan routes meeting at its walls. "
+) * 16
+# Every Wikipedia page embeds MediaWiki config in an inline <script> (RLCONF) that
+# names its hCaptcha settings. Markers inside a script must not make a real
+# article read as a bot wall.
+WIKIPEDIA_PAGE = (
+    b"<html><head><title>Istanbul - Wikipedia</title>"
+    b'<script>RLCONF={"wgConfirmEditCaptchaNeededForGenericEdit":"hcaptcha",'
+    b'"wgConfirmEditForceShowCaptcha":false};</script></head>'
+    b"<body><main><h1>Istanbul</h1><p>" + ARTICLE_PROSE.encode() + b"</p></main></body></html>"
+)
+# A long real article whose visible text legitimately mentions a CAPTCHA.
+CAPTCHA_ARTICLE = (
+    b"<html><body><article><h1>GPT-4 and the TaskRabbit worker</h1>"
+    b"<p>During testing the model asked a human worker to solve a CAPTCHA for it.</p><p>"
+    + ARTICLE_PROSE.encode()
+    + b"</p></article></body></html>"
+)
+TITLE_ONLY_CHALLENGE = b"<html><head><title>Just a moment...</title></head><body></body></html>"
+CF_CHL_IN_SCRIPT = (
+    b"<html><head><script>turnstile.render('#cf-chl-widget-a1b2');</script></head>"
+    b"<body><p>Checking your browser before accessing the site.</p></body></html>"
+)
+# Walls whose only marker trace is a script's src attribute (DataDome, reCAPTCHA):
+# the opening tag must survive the script-content removal.
+DATADOME_WALL = (
+    b'<html><head><script src="https://ct.captcha-delivery.com/c.js"></script></head>'
+    b"<body><p>Please enable JS and disable any ad blocker</p></body></html>"
+)
+RECAPTCHA_SRC_WALL = (
+    b'<html><head><script src="https://www.google.com/recaptcha/api.js" async></script>'
+    b"</head><body><p>Please verify you are a human</p></body></html>"
+)
+# A custom element whose name starts with "style" is not a <style> element: text
+# after it is visible and must still be scanned.
+CUSTOM_ELEMENT_WALL = b"<html><body><style-guide></style-guide><h1>Access Denied</h1></body></html>"
+
 WAYBACK_PAYLOAD: dict[str, Any] = {
     "url": "http://example.com/",
     "archived_snapshots": {
@@ -266,6 +306,15 @@ def test_corrupt_pdf_is_noted_not_crashed(client: httpx.Client) -> None:
         (200, "html", b"<p>Please enable JavaScript and cookies</p>", "blocked"),
         (200, "html", b"<p>Access Denied</p>", "blocked"),
         (200, "html", b"<p>Solve the CAPTCHA</p>", "blocked"),
+        (200, "html", TITLE_ONLY_CHALLENGE, "blocked"),  # the phrase lives in <title>
+        (200, "html", b"<noscript>Enable JavaScript and cookies</noscript>", "blocked"),
+        (200, "html", CF_CHL_IN_SCRIPT, "blocked"),  # structural marker, scripts included
+        (200, "html", DATADOME_WALL, "blocked"),  # marker in a script's src attribute
+        (200, "html", RECAPTCHA_SRC_WALL, "blocked"),
+        (200, "html", CUSTOM_ELEMENT_WALL, "blocked"),  # <style-guide> is not <style>
+        (200, "html", WIKIPEDIA_PAGE, "ok"),  # "captcha" only inside an inline script
+        (200, "html", CAPTCHA_ARTICLE, "ok"),  # a long article may say "CAPTCHA"
+        (200, "html", b"<style>.captcha { color: red }</style><p>Hello there</p>", "ok"),
         (503, "html", CHALLENGE, "blocked"),
         (503, "html", b"<p>maintenance</p>", "retryable"),
         (401, "html", b"", "blocked"),
@@ -285,6 +334,46 @@ def test_corrupt_pdf_is_noted_not_crashed(client: httpx.Client) -> None:
 )
 def test_classify(status: int | None, kind: fx.Kind, body: bytes, expected: str) -> None:
     assert fx.classify(status, kind, body) == expected
+
+
+def test_article_prose_is_past_the_challenge_word_limit() -> None:
+    assert fx._html_words(WIKIPEDIA_PAGE) >= fx.CHALLENGE_MAX_WORDS
+    assert fx._html_words(CAPTCHA_ARTICLE) >= fx.CHALLENGE_MAX_WORDS
+
+
+def test_script_cut_by_the_scan_boundary_does_not_leak_a_marker() -> None:
+    """A <script> that the CHALLENGE_SCAN_BYTES cut splits has no closing tag in
+    the scanned head; its contents must still be ignored, not read as page text."""
+    opening = b"<html><body><p>Short page.</p><script>var pad = '"
+    pad = b"x" * (fx.CHALLENGE_SCAN_BYTES - len(opening) - 20)
+    body = opening + pad + b"captcha access denied" + b"';</script></body></html>"
+    assert body.index(b"captcha") < fx.CHALLENGE_SCAN_BYTES < body.index(b"</script>")
+    assert not fx._has_challenge(body)
+    assert fx.classify(200, "html", body) == "ok"
+
+
+def test_unterminated_script_at_the_end_is_ignored() -> None:
+    body = b"<html><body><p>Short page.</p><script>solveCaptcha()"
+    assert not fx._has_challenge(body)
+
+
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [
+        # 0 extracted words would read as blocked anyway (MIN_HTML_WORDS), so these
+        # pin the phrase path itself, not just the verdict.
+        (TITLE_ONLY_CHALLENGE, True),
+        (b"<noscript>Enable JavaScript and cookies</noscript>", True),
+        (DATADOME_WALL, True),
+        (RECAPTCHA_SRC_WALL, True),
+        (CUSTOM_ELEMENT_WALL, True),
+        (b"<script-x></script-x><p>Access Denied</p>", True),
+        (WIKIPEDIA_PAGE, False),
+        (CAPTCHA_ARTICLE, False),
+    ],
+)
+def test_has_challenge(body: bytes, expected: bool) -> None:
+    assert fx._has_challenge(body) is expected
 
 
 # --- the ladder --------------------------------------------------------------
@@ -426,6 +515,27 @@ def test_curl_unexpected_exception_propagates(client: httpx.Client) -> None:
 def test_challenge_page_with_200_counts_as_blocked(client: httpx.Client) -> None:
     serve(status=200, body=CHALLENGE)
     result = make(client, curl=curl_returning(200, CHALLENGE)).fetch(PAGE)
+    assert result.outcome is fx.Outcome.BLOCKED_NO_BROWSER
+    assert result.notes[0] == "step 1 httpx: HTTP 200 (blocked)"
+
+
+@respx.mock
+def test_wikipedia_page_with_captcha_config_reads_ok_at_step_1(client: httpx.Client) -> None:
+    """MediaWiki's inline RLCONF names hCaptcha on every Wikipedia page; the page
+    is a real 200 article and must be read at step 1, text kept (product rule 2)."""
+    serve(status=200, body=WIKIPEDIA_PAGE)
+    result = make(client, curl=curl_forbidden).fetch(PAGE)
+    assert result.ok and result.step == 1
+    assert "trading port" in result.text
+    assert "hcaptcha" not in result.text
+    assert result.notes == ["step 1 httpx: HTTP 200 (ok)"]
+
+
+@respx.mock
+def test_small_access_denied_page_is_blocked_not_empty(client: httpx.Client) -> None:
+    wall = b"<html><body><h1>Access Denied</h1></body></html>"
+    serve(status=200, body=wall)
+    result = make(client, curl=curl_returning(200, wall)).fetch(PAGE)
     assert result.outcome is fx.Outcome.BLOCKED_NO_BROWSER
     assert result.notes[0] == "step 1 httpx: HTTP 200 (blocked)"
 

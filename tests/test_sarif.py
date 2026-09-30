@@ -24,6 +24,8 @@ from proofpath import __version__
 from proofpath.fetch import Outcome
 from proofpath.models import Label, Passage, Verdict
 from proofpath.report import (
+    ABSTRACT_BASIS,
+    FOUND_BY_PROOFPATH,
     LEVELS,
     STATE_WORDS,
     Coverage,
@@ -233,6 +235,24 @@ def test_a_passage_spanning_a_line_break_still_reaches_the_message_in_one_line()
     ]
     assert "\n" not in text
     assert '"we observed a 4-8% improvement"' in text
+
+
+def test_a_verdict_judged_against_an_abstract_says_so_in_its_message() -> None:
+    # Rule 6: a viewer shows only this line, so an error from a partial text must say
+    # so there; the other detail lines (provenance, judge) stay out of the message.
+    item = dataclasses.replace(
+        finding(Kind.NOT_SUPPORTED, line=1), detail=(ABSTRACT_BASIS, FOUND_BY_PROOFPATH)
+    )
+    text = to_sarif(report_with(item), artifact="draft.md")["runs"][0]["results"][0]["message"][
+        "text"
+    ]
+    assert text.endswith(f" — {ABSTRACT_BASIS}")
+    assert FOUND_BY_PROOFPATH not in text
+
+
+def test_a_full_text_verdict_message_has_no_abstract_marker() -> None:
+    result = results_by_kind(to_sarif(full_report(), artifact="draft.md"))[Kind.NOT_SUPPORTED.value]
+    assert ABSTRACT_BASIS not in result["message"]["text"]
 
 
 # --- locations ----------------------------------------------------------------------

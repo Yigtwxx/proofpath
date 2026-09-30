@@ -560,3 +560,21 @@ Two readers added on the Hacker News and Mastodon patterns respectively
 | 18.3 | A Lobste.rs comment permalink's story is never read | `/c/<id>` reads the comment alone (its parent is other people's words, as on Hacker News). A user who pastes `/s/<id>/<slug>#c_<id>` meaning "this thread" gets the one comment; the address says so, but the report does not |
 | 18.4 | `_is_own_story` sees only absolute anchors | a relative `href="/s/<id>"` in a Lobste.rs description has no host and passes the filter; downstream `find_url` reads no address out of it either, so nothing is fetched, but the link is not named among the dropped ones |
 | 18.5 | `ProviderError.code` is read by one caller | the token is parsed for every 4xx/5xx a `PoliteClient` raises; Crossref, OpenAlex and the rest could use it the same way the Lemmy reader does, and today none does |
+
+## 19. A live `/check openai won` — 2026-09-30
+
+A two-word claim run through evidence search surfaced three things. Two are fixed on
+`fix/challenge-markers-and-tavily-key`: every Wikipedia page read as `UNVERIFIED
+(blocked)` because the challenge scan matched `captcha` inside MediaWiki's inline
+config script (`fetch.py`: phrase markers are now matched outside `<script>`/`<style>`
+and only on small pages), and a verdict resting on an abstract-grade read did not say
+so on its own row (`verify.py`: the verdict finding now carries a line saying so). The
+third needs a design decision first.
+
+### New open items
+
+| # | Item | Note |
+|---|---|---|
+| 19.1 | **Underspecified claims pass too easily** | "openai won" was `SUPPORTED (found by proofpath)`, medium, on a single vanity-award page ("OpenAI's recognition with a 2026 Global Recognition Award"). The passage does entail the claim, so rules 1–3 hold; but a claim with no object ("won *what*?") is satisfied by any win, and the report gives it the same weight as a specific claim. Candidate fix: a check-worthiness signal for a missing object/complement (verb with no argument, < N content words) that adds an `underspecified claim` note to the verdict, or caps its tier at `low`. Needs: the heuristic (rules vs `--judge`), whether it caps the tier or only annotates, and whether it applies to cited claims too. Source credibility (vanity awards, content farms) stays out of scope — proofpath checks what a source says, not whether it is reputable (§3) |
+| 19.2 | A bot wall inside a site's full template can read as `ok` | challenge *phrases* now count only on pages under `fetch.CHALLENGE_MAX_WORDS` (300) extracted words, so a long real article that says "CAPTCHA" is not blocked. A wall served inside the site's own layout, with menus not in `<nav>`, can exceed 300 words and be read as content (review, 2026-09-30: a 364-word probe). A title/h1 signal was considered and rejected: it would block real pages titled "CAPTCHA". `cf-chl` stays unconditional. Cloudflare's underscore traces (`_cf_chl_opt`, `__cf_chl_f_tk`) are not matched by `cf-chl` — a candidate structural marker |
+| 19.3 | The markdown `## Checked` table does not mark abstract-grade support | a cited claim SUPPORTED by an abstract produces no finding (by design), so its row in `report.py`'s Checked table is the only place it appears, and it carries no abstract mark. The source's own `LOW CONFIDENCE (abstract only)` finding and the coverage line still state it; a per-row mark would make the table honest on its own (review, 2026-09-30) |

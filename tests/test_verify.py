@@ -43,12 +43,15 @@ from proofpath.oa import ABSTRACT_ONLY, Attempt, Evidence, Location
 from proofpath.pipeline import Thresholds
 from proofpath.polite import ProviderError
 from proofpath.report import (
+    ABSTRACT_BASIS,
     JUDGE_DETAIL_PREFIX,
     ClaimResult,
     Kind,
     Report,
     judge_detail,
     judge_unavailable,
+    render_diagnostics,
+    render_markdown,
 )
 from proofpath.resolve import Candidate, ResolveResult, Retraction, State
 from proofpath.retrieval import Embedder
@@ -1204,6 +1207,36 @@ def test_verify_reports_a_supported_claim_a_numeric_mismatch_and_a_blocked_sourc
     assert report.api_calls == 0 and report.elapsed >= 0.0
     assert report.cancelled is False
     assert report.exit_code() == 1
+
+
+def test_a_verdict_read_from_an_abstract_says_so_on_its_own_row() -> None:
+    """Rule 6: the verdict row travels alone in every renderer, so it has to say
+    it rests on a partial text; the source's own abstract-only row is not enough."""
+    abstract = replace(abstract_evidence(), text=PAPER)
+    built = engine(
+        resolver=StubResolver({"Vaswani": resolved()}),
+        chain=StubOpenAccess({DOI: abstract}),
+        embedder=WordEmbedder(),
+        scorer=TableScorer({SUPPORTING: SUPPORTED_ROW}),
+    )
+    report = verify(draft(ONE_SOURCE_BODY, [REAL]), built)
+
+    assert report.counts() == {Kind.ABSTRACT_ONLY: 1, Kind.NUMERIC_MISMATCH: 1}
+    numeric = next(f for f in report.findings if f.kind is Kind.NUMERIC_MISMATCH)
+    # ``report`` reads the carets back out of ``detail[0]``: the reason stays first.
+    assert numeric.detail == (
+        "numeric mismatch: claim says 40%, source says 4-8%",
+        ABSTRACT_BASIS,
+    )
+    assert numeric.level == "error" and numeric.tier == "high"
+    state_row = next(f for f in report.findings if f.kind is Kind.ABSTRACT_ONLY)
+    assert ABSTRACT_BASIS not in state_row.detail
+
+    printed = "\n".join(line for d in render_diagnostics(report) for line in d.lines)
+    assert f"= note: {ABSTRACT_BASIS}" in printed
+    assert f"  - note: {ABSTRACT_BASIS}" in render_markdown(report)
+    payload = json.loads(json_text(report))
+    assert any(ABSTRACT_BASIS in item["detail"] for item in payload["findings"])
 
 
 def test_the_claim_citing_an_unreadable_source_gets_no_result() -> None:

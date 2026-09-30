@@ -42,14 +42,43 @@ PRODUCT_TOKEN = "proofpath"  # what robots.txt rules are matched against
 RETRIES = 2  # same budget as PoliteClient: three attempts on 429/5xx
 
 # A 200 that is really a bot wall. Matched case-insensitively against HTML bodies.
-CHALLENGE_MARKERS = (
-    "cf-chl",
+# Structural: Cloudflare puts ``cf-chl`` in form actions, widget ids and sometimes
+# only in its scripts, and no real page carries it, so it is matched against the
+# raw head, scripts included.
+CHALLENGE_STRUCTURAL_MARKERS = ("cf-chl",)
+# Phrases a wall shows its reader. Matched against the head with the *contents* of
+# every <script> and <style> removed, because real pages name these words in code
+# -- every Wikipedia page's inline MediaWiki config (RLCONF) says "hcaptcha", which
+# once made all of Wikipedia read as blocked. The opening tags stay, attributes and
+# all: a DataDome or reCAPTCHA wall's only trace is often a script src
+# (captcha-delivery.com, /recaptcha/api.js). <title> and <noscript> stay too: a
+# wall's "Just a moment..." lives in its title and "enable JavaScript" often in a
+# noscript.
+CHALLENGE_PHRASE_MARKERS = (
     "just a moment",
     "access denied",
     "captcha",
     "enable javascript and cookies",
 )
 CHALLENGE_SCAN_BYTES = 200_000  # challenge pages are small; do not lowercase a whole PDF
+# A phrase marker only counts on a small page. Walls are tiny -- the ones measured
+# for this module extracted 0 to a few dozen words -- while a real article can
+# legitimately say "CAPTCHA" or "access denied" in its prose (the GPT-4 TaskRabbit
+# story). Reading such an article as blocked would discard real content for a false
+# UNVERIFIED(blocked), so past this many extracted words a phrase is just text.
+# ``cf-chl`` is not bound by it. Well above any wall, well below an article.
+# Known gap, recorded rather than fixed: a wall served inside a site's full template
+# (menus not in <nav>) can pass this bar and read as ok.
+CHALLENGE_MAX_WORDS = 300
+# A <script>/<style> element's contents, for the phrase scan; group 1 is the
+# opening tag, which is kept. ``\Z`` also drops the contents of one the
+# CHALLENGE_SCAN_BYTES cut left unterminated, so a script straddling the boundary
+# cannot leak its text back in. The ``(?=[\s/>])`` lookahead keeps <noscript> (no
+# ``<`` directly before "script") and custom elements like <style-guide> out:
+# ``\b`` would match those and delete visible text up to the end.
+_CODE_ELEMENTS = re.compile(
+    r"(<(script|style)(?=[\s/>])[^>]*>).*?(?:</\2\s*>|\Z)", re.IGNORECASE | re.DOTALL
+)
 # A 2xx HTML page with no extractable text at all is a bot wall too: the
 # JavaScript/cookie shell publishers serve instead of a 403 (spec section 6.1
 # measured Science at "403, 3 words"). A live 50-DOI run showed every observed
@@ -227,8 +256,16 @@ def classify(status: int | None, kind: Kind, body: bytes) -> Verdict:
 
 
 def _has_challenge(body: bytes) -> bool:
+    """Whether an HTML body is a bot wall by its markers. ``classify`` and
+    ``explain`` both ask this, so a verdict and its note never disagree."""
     head = body[:CHALLENGE_SCAN_BYTES].decode("utf-8", errors="replace").lower()
-    return any(marker in head for marker in CHALLENGE_MARKERS)
+    if any(marker in head for marker in CHALLENGE_STRUCTURAL_MARKERS):
+        return True
+    visible = _CODE_ELEMENTS.sub(r"\1", head)
+    if not any(marker in visible for marker in CHALLENGE_PHRASE_MARKERS):
+        return False
+    # Parsed only on a phrase hit: most pages never pay for it here.
+    return _html_words(body) < CHALLENGE_MAX_WORDS
 
 
 def _html_words(body: bytes) -> int:

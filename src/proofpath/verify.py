@@ -92,6 +92,7 @@ from proofpath.providers.academic import AcademicProvider
 from proofpath.providers.social import SocialProvider
 from proofpath.providers.web import WebProvider
 from proofpath.report import (
+    ABSTRACT_BASIS,
     FOUND_BY_PROOFPATH,
     LANGUAGE_UNSUPPORTED,
     LEVELS,
@@ -1622,6 +1623,10 @@ def _verdict_finding(claim: Claim, status: SourceStatus, verdict: Verdict) -> Fi
     if claim.hypothesis:
         # A translated claim says what the models actually read (Amendment A).
         detail = (*detail, f"{CHECKED_AS}{claim.hypothesis}")
+    if status.text_kind == "abstract":
+        # Rule 6: this row is shown on its own, apart from the source's abstract-only
+        # row. After the numeric reason and ``CHECKED_AS``, before provenance.
+        detail = (*detail, ABSTRACT_BASIS)
     return Finding(
         kind=kind,
         level=LEVELS[kind],

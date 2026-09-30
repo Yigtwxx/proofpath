@@ -18,6 +18,7 @@ from proofpath.fetch import Fetched, Outcome
 from proofpath.judge import Judge, JudgeUnavailable
 from proofpath.polite import ProviderError
 from proofpath.report import (
+    ABSTRACT_BASIS,
     FOUND_BY_PROOFPATH,
     LANGUAGE_UNSUPPORTED,
     SEARCH_UNAVAILABLE,
@@ -247,6 +248,24 @@ def test_a_refuted_result_from_a_found_page_says_so() -> None:
     finding = report.findings[0]
     assert finding.title == "claim is not supported by a page proofpath found"
     assert finding.detail[-1] == FOUND_BY_PROOFPATH
+
+
+def test_a_verdict_from_a_short_found_page_says_it_rests_on_the_abstract() -> None:
+    """Rule 6: a page under ``oa.FULLTEXT_MIN_WORDS`` is graded abstract, and the
+    verdict row must say so itself, not only the source's abstract-only row."""
+    report = verify(CLAIM, searching(StubSearcher({"ChatGPT": [PAGE_A]}), pages={PAGE_A: BACKING}))
+
+    assert report.counts() == {Kind.ABSTRACT_ONLY: 1, Kind.EVIDENCE_FOUND: 1}
+    found = next(f for f in report.findings if f.kind is Kind.EVIDENCE_FOUND)
+    assert found.detail == (ABSTRACT_BASIS, FOUND_BY_PROOFPATH)
+    assert found.verdict is not None and found.verdict.passage is not None
+
+
+def test_a_verdict_from_a_full_text_found_page_has_no_abstract_line() -> None:
+    report = verify(CLAIM, _supported_engine())
+
+    found = next(f for f in report.findings if f.kind is Kind.EVIDENCE_FOUND)
+    assert found.detail == (FOUND_BY_PROOFPATH,)
 
 
 def own_page(url: str, text: str) -> Fetched:
