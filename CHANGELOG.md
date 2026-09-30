@@ -11,14 +11,24 @@ All notable changes to this project are documented here. The format follows
   row: press Enter, paste the key, Enter again. It is saved to the `.env` in your
   config directory (mode 0600 on macOS/Linux), never to `config.toml` or the project's
   `.env`, and it is never shown: the row says only whether a key is saved and where.
-  Backspace removes it.
+  Backspace removes it. Saving a key does not turn search on: while
+  `search.provider` is not `tavily` the row says the key is unused, and with
+  `tavily` selected and no key it says one is needed.
+- **A note on claims too short to pin down.** A claim like "openai won" is supported
+  by almost any page about any win. A claim with two content words or fewer, and no
+  linking verb (`is`, `are`, `was`, …) between them, now carries a "short claim"
+  note on each of its verdict rows, SARIF included. The note tells you to check
+  that the quoted passage is about the event you meant. It is a rule, not a model,
+  and it changes no verdict, tier or exit code.
 
 ### Fixed
 - **Wikipedia pages no longer read as `UNVERIFIED (blocked)`.** The bot-wall check
   matched `captcha` inside MediaWiki's inline configuration script, so every Wikipedia
   page was reported blocked at all four ladder steps despite answering 200. Challenge
   phrases are now matched outside `<script>`/`<style>` contents and only on small
-  pages; `cf-chl` still marks a wall wherever it appears.
+  pages. `cf-chl` and Cloudflare's `_cf_chl_opt` still mark a wall wherever they
+  appear. Other `cf_chl` tokens (such as `__cf_chl_f_tk`) count only on small
+  pages, because they linger in the URLs of real articles.
 - **A verdict judged against an abstract now says so on its own row.** A short page
   or an abstract-only source already had its `LOW CONFIDENCE (abstract only)` row, but
   the claim's verdict row (`SUPPORTED (found by proofpath)`, `NOT SUPPORTED`, …) did

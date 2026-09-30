@@ -18,12 +18,14 @@ from proofpath.claims import (
     extract,
     find_markers,
     is_checkworthy,
+    is_underspecified,
     pair,
     pair_links,
     strip_links,
     strip_markers,
+    underspecified,
 )
-from proofpath.document import Document, Locator, Paragraph, Reference, Sentence
+from proofpath.document import Claim, Document, Locator, Paragraph, Reference, Sentence
 
 EN_DASH = "\u2013"
 EM_DASH = "\u2014"
@@ -874,6 +876,73 @@ def test_a_bracketed_number_in_a_link_citing_documents_prose_is_not_a_citation()
 )
 def test_is_checkworthy(text: str, expected: bool) -> None:
     assert is_checkworthy(text) is expected
+
+
+# --- `is_underspecified` (OPEN-ITEMS 19.1) ------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("openai won", True),  # the live case: won *what*?
+        ("OpenAI won.", True),
+        ("OpenAI has won!", True),  # an auxiliary is not a content word
+        ("OpenAI didn't win.", True),  # nor is a contraction of one
+        ("OpenAI didn’t win.", True),  # noqa: RUF001 - a typographic apostrophe
+        ("#AI #OpenAI OpenAI won @sama", True),  # tags and handles are dropped
+        ("OpenAI won the award.", False),  # three content words: the floor
+        ("OpenAI won in 2026.", False),  # a number is a content word
+        ("Revenue rose 12.5%.", False),  # "12.5" is one number, not two words
+        ("Revenue was 12.5%.", False),  # a complete predication, see below
+        ("OpenAI won the 2026 Global Recognition Award.", False),
+        ("GPT-4 scored 86.4% on MMLU.", False),
+        # A linking verb between two content terms is a complete predication.
+        ("The Earth is flat.", False),
+        ("Vaccines are safe.", False),
+        ("Pluto is a planet.", False),
+        ("The vaccine is not safe.", False),
+        ("The vaccine isn't safe.", False),
+        ("It is true.", True),  # the subject is not a content word
+        # An intransitive verb says what happened, but not to what, when or where.
+        ("OpenAI failed.", True),
+        ("Biden resigned.", True),
+        ("The war ended.", True),
+        # A run of capitalised words is one name.
+        ("Elon Musk won.", True),
+        ("OpenAI won the Global Recognition Award.", False),
+        ("Musk, Bezos won.", False),  # a comma keeps two names apart
+        # Title case and all caps: a capital says nothing, so words count one by one.
+        ("OpenAI Wins The Global Award", False),
+        ("OPENAI WON THE AWARD", False),
+        ("Elon Musk Wins Election", False),
+        ("OpenAI 2026 Küresel Tanınma Ödülü'nü kazandı.", False),  # noqa: RUF001 - Turkish, untranslated
+    ],
+)
+def test_is_underspecified(text: str, expected: bool) -> None:
+    assert is_underspecified(text) is expected
+
+
+def _claim(text: str, hypothesis: str | None = None) -> Claim:
+    return Claim(
+        text=text,
+        locator=Locator(line=1),
+        cited_refs=(),
+        paragraph=0,
+        sentence=0,
+        hypothesis=hypothesis,
+    )
+
+
+def test_underspecified_reads_the_english_hypothesis_when_there_is_one() -> None:
+    """The models check the translation, so the translation is what is counted: a
+    long Turkish sentence rendered as two English words is underspecified, and a short
+    one rendered specifically is not."""
+    long_turkish = "OpenAI 2026'da çok sayıda ödül kazandı."  # noqa: RUF001 - Turkish letters
+    assert underspecified(_claim(long_turkish, hypothesis="OpenAI won.")) is True
+    short_turkish = "OpenAI kazandı."  # noqa: RUF001 - a real Turkish letter
+    specific = "OpenAI won the 2026 Global Recognition Award."
+    assert underspecified(_claim(short_turkish, hypothesis=specific)) is False
+    assert underspecified(_claim("OpenAI won.")) is True  # no translation: the text
 
 
 def test_checkworthy_keeps_document_order_up_to_the_cap_and_counts_the_rest() -> None:

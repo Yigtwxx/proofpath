@@ -42,10 +42,18 @@ PRODUCT_TOKEN = "proofpath"  # what robots.txt rules are matched against
 RETRIES = 2  # same budget as PoliteClient: three attempts on 429/5xx
 
 # A 200 that is really a bot wall. Matched case-insensitively against HTML bodies.
-# Structural: Cloudflare puts ``cf-chl`` in form actions, widget ids and sometimes
-# only in its scripts, and no real page carries it, so it is matched against the
-# raw head, scripts included.
-CHALLENGE_STRUCTURAL_MARKERS = ("cf-chl",)
+# Structural: Cloudflare challenge machinery that only a live wall renders -- the
+# widget ids (#cf-chl-widget-...) and the challenge options object
+# (window._cf_chl_opt). They are trusted anywhere in the raw head, scripts
+# included, on a page of any size: on some walls a script is their only trace.
+CHALLENGE_STRUCTURAL_MARKERS = ("cf-chl", "_cf_chl_opt")
+# Cloudflare's challenge URL tokens (?__cf_chl_f_tk=, __cf_chl_rt_tk,
+# __cf_chl_jschl_tk__). A wall's form action carries them, but so do real pages
+# after the challenge was passed: the clearance redirect's URL echoed in og:url or
+# a canonical link, or an outbound link copied from a challenged address. So they
+# are matched against the raw head but count only like a phrase, on a page under
+# CHALLENGE_MAX_WORDS -- a wall is small, so no wall is lost to the gate.
+CHALLENGE_TOKEN_MARKERS = ("cf_chl",)
 # Phrases a wall shows its reader. Matched against the head with the *contents* of
 # every <script> and <style> removed, because real pages name these words in code
 # -- every Wikipedia page's inline MediaWiki config (RLCONF) says "hcaptcha", which
@@ -66,7 +74,8 @@ CHALLENGE_SCAN_BYTES = 200_000  # challenge pages are small; do not lowercase a 
 # legitimately say "CAPTCHA" or "access denied" in its prose (the GPT-4 TaskRabbit
 # story). Reading such an article as blocked would discard real content for a false
 # UNVERIFIED(blocked), so past this many extracted words a phrase is just text.
-# ``cf-chl`` is not bound by it. Well above any wall, well below an article.
+# The structural markers are not bound by it; the URL tokens are. Well above any
+# wall, well below an article.
 # Known gap, recorded rather than fixed: a wall served inside a site's full template
 # (menus not in <nav>) can pass this bar and read as ok.
 CHALLENGE_MAX_WORDS = 300
@@ -262,9 +271,10 @@ def _has_challenge(body: bytes) -> bool:
     if any(marker in head for marker in CHALLENGE_STRUCTURAL_MARKERS):
         return True
     visible = _CODE_ELEMENTS.sub(r"\1", head)
-    if not any(marker in visible for marker in CHALLENGE_PHRASE_MARKERS):
+    phrase = any(marker in visible for marker in CHALLENGE_PHRASE_MARKERS)
+    if not phrase and not any(marker in head for marker in CHALLENGE_TOKEN_MARKERS):
         return False
-    # Parsed only on a phrase hit: most pages never pay for it here.
+    # Parsed only on a phrase or token hit: most pages never pay for it here.
     return _html_words(body) < CHALLENGE_MAX_WORDS
 
 

@@ -65,7 +65,12 @@ from proofpath.tui.app import (
 from proofpath.tui.banner import split_hint
 from proofpath.tui.runs import Run, State
 from proofpath.tui.theme import PLAIN, RICH
-from proofpath.tui.widgets.config_panel import ConfigPanel, PanelLine
+from proofpath.tui.widgets.config_panel import (
+    KEY_NEEDED,
+    KEY_UNUSED,
+    ConfigPanel,
+    PanelLine,
+)
 from proofpath.tui.widgets.prompt import HELD_SUMMARY
 from proofpath.verify import Engine
 
@@ -3095,6 +3100,9 @@ async def test_the_rows_come_in_the_configs_order_and_the_selection_stays_inside
 
 TAVILY = "Tavily API:"
 PASTED = "tvly-secret-for-test"
+# A key with search off is found but unused; the row says so (saving never enables
+# search: setting search.provider is the user's consent to it).
+UNUSED = f" {PLAIN.glyphs.sep} {KEY_UNUSED}"
 
 
 def _key_note(verb: str, name: str = "TAVILY_API_KEY") -> str:
@@ -3149,7 +3157,8 @@ async def test_a_pasted_key_is_saved_to_the_config_dirs_env_and_never_shown(
         await until(pilot, lambda: _key_note("saved to") in _notes(app), "the saved note")
         assert not panel.editing and app.focused is panel
         row = _panel_row(panel, TAVILY)
-        assert row == f"> {TAVILY:<18}saved {PLAIN.glyphs.sep} {user_dotenv_path()}"
+        # Saved, and still unused: search.provider is off until the user sets it.
+        assert row == f"> {TAVILY:<18}saved {PLAIN.glyphs.sep} {user_dotenv_path()}{UNUSED}"
         shown = _panel_text(panel)
         # Enter again: the edit starts empty, not holding the key it just saved.
         again = await open_key_edit(pilot, panel)
@@ -3193,7 +3202,7 @@ async def test_backspace_on_the_key_row_removes_the_saved_key() -> None:
     app, _ = build_app()
     async with app.run_test(size=SIZE) as pilot:
         panel = await open_panel(pilot)
-        assert _panel_row(panel, TAVILY).endswith(f"saved {PLAIN.glyphs.sep} {path}")
+        assert f"saved {PLAIN.glyphs.sep} {path} " in _panel_row(panel, TAVILY)
         await select_key_row(pilot, panel)
         await pilot.press("backspace")
         await until(pilot, lambda: _key_note("removed from") in _notes(app), "the removed note")
@@ -3212,7 +3221,7 @@ async def test_a_key_in_the_environment_is_named_as_such_and_not_shown(
         panel = await open_panel(pilot)
         row = _panel_row(panel, TAVILY)
         text = _panel_text(panel)
-    assert row.endswith("set in the environment (it overrides the file)")
+    assert "set in the environment (it overrides the file)" in row
     assert PASTED not in text
 
 
@@ -3334,7 +3343,7 @@ async def test_a_saved_key_shadowed_by_the_project_env_says_so(
         row = _panel_row(panel, TAVILY)
         text = _panel_text(panel)
     sep = PLAIN.glyphs.sep
-    assert row.endswith(f"saved {sep} {user} {sep} overridden by {tmp_path / '.env'}")
+    assert f"saved {sep} {user} {sep} overridden by {tmp_path / '.env'} " in row
     assert PASTED not in text and "project-key-value" not in text
 
 
@@ -3350,10 +3359,79 @@ async def test_a_saved_key_shadowed_by_the_environment_says_so(
         panel = await open_panel(pilot)
         row = _panel_row(panel, TAVILY)
         text = _panel_text(panel)
-    assert row.endswith(
-        f"saved {PLAIN.glyphs.sep} {user} {PLAIN.glyphs.sep} overridden by the environment"
-    )
+    sep = PLAIN.glyphs.sep
+    assert f"saved {sep} {user} {sep} overridden by the environment " in row
     assert PASTED not in text and "env-key-value" not in text
+
+
+def _save_tavily_key() -> None:
+    user = user_dotenv_path()
+    user.parent.mkdir(parents=True, exist_ok=True)
+    user.write_text(f"TAVILY_API_KEY={PASTED}\n", encoding="utf-8")
+
+
+def _set_search_provider(provider: str) -> None:
+    path = config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f'[search]\nprovider = "{provider}"\n', encoding="utf-8")
+
+
+@pytest.mark.usefixtures("no_keys")
+async def test_a_saved_key_with_search_off_says_the_provider_must_be_set() -> None:
+    _save_tavily_key()
+    app, _ = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        panel = await open_panel(pilot)
+        row = _panel_row(panel, TAVILY)
+        text = _panel_text(panel)
+    sep = PLAIN.glyphs.sep
+    assert row == f"  {TAVILY:<18}saved {sep} {user_dotenv_path()}{UNUSED}", row
+    assert PASTED not in text
+    assert load_config().search.provider == "off"  # saving never turned search on
+
+
+@pytest.mark.usefixtures("no_keys")
+async def test_a_saved_key_with_tavily_selected_carries_no_notice() -> None:
+    _save_tavily_key()
+    _set_search_provider("tavily")
+    app, _ = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        panel = await open_panel(pilot)
+        row = _panel_row(panel, TAVILY)
+    assert row == f"  {TAVILY:<18}saved {PLAIN.glyphs.sep} {user_dotenv_path()}", row
+
+
+@pytest.mark.usefixtures("no_keys")
+async def test_tavily_selected_without_a_key_says_search_needs_one() -> None:
+    _set_search_provider("tavily")
+    app, _ = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        panel = await open_panel(pilot)
+        row = _panel_row(panel, TAVILY)
+    sep = PLAIN.glyphs.sep
+    assert row == f"  {TAVILY:<18}(not set) {sep} {KEY_NEEDED}", row
+    assert len(row) <= 80 - 6, "the line fits an 80-column panel without wrapping"
+
+
+@pytest.mark.usefixtures("no_keys")
+async def test_cycling_the_search_provider_redraws_the_key_row() -> None:
+    _save_tavily_key()
+    app, _ = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        panel = await open_panel(pilot)
+        assert _panel_row(panel, TAVILY).endswith(UNUSED)
+        index = next(i for i, row in enumerate(panel.rows) if row.key == "search.provider")
+        await pilot.press(*["down"] * index)
+        await pilot.press("right")  # off -> tavily
+        await written(pilot, "search.provider", "tavily")
+        with_tavily = _panel_row(panel, TAVILY)
+        await pilot.press("right")  # tavily -> searxng
+        await written(pilot, "search.provider", "searxng")
+        with_searxng = _panel_row(panel, TAVILY)
+        text = _panel_text(panel)
+    assert with_tavily.endswith(f"saved {PLAIN.glyphs.sep} {user_dotenv_path()}"), with_tavily
+    assert with_searxng.endswith(f"saved {PLAIN.glyphs.sep} {user_dotenv_path()}{UNUSED}")
+    assert PASTED not in text
 
 
 @pytest.mark.usefixtures("no_keys")

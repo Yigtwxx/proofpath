@@ -99,6 +99,7 @@ from proofpath.report import (
     SEARCH_UNAVAILABLE,
     STATE_WORDS,
     SUMMARY,
+    UNDERSPECIFIED,
     ClaimResult,
     Coverage,
     Finding,
@@ -1627,6 +1628,11 @@ def _verdict_finding(claim: Claim, status: SourceStatus, verdict: Verdict) -> Fi
         # Rule 6: this row is shown on its own, apart from the source's abstract-only
         # row. After the numeric reason and ``CHECKED_AS``, before provenance.
         detail = (*detail, ABSTRACT_BASIS)
+    if claims_mod.underspecified(claim):
+        # OPEN-ITEMS 19.1: a claim this short is supported by many unrelated pages, so
+        # the row says so. A note only -- kind, level and tier stand. After the
+        # abstract line, before provenance.
+        detail = (*detail, UNDERSPECIFIED)
     return Finding(
         kind=kind,
         level=LEVELS[kind],

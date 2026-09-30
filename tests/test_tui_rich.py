@@ -937,6 +937,7 @@ async def test_the_config_panel_marks_the_row_badges_the_value_and_wears_the_acc
     # and looks for a real key, so both are pointed at the test's own directory.
     monkeypatch.setenv("PROOFPATH_CONFIG_DIR", str(tmp_path / "conf"))
     monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
     monkeypatch.chdir(tmp_path)
     app, _ = rich_app()
     async with app.run_test(size=SIZE) as pilot:

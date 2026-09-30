@@ -28,6 +28,7 @@ from proofpath.report import (
     FOUND_BY_PROOFPATH,
     LEVELS,
     STATE_WORDS,
+    UNDERSPECIFIED,
     Coverage,
     Finding,
     Kind,
@@ -250,9 +251,24 @@ def test_a_verdict_judged_against_an_abstract_says_so_in_its_message() -> None:
     assert FOUND_BY_PROOFPATH not in text
 
 
+def test_an_underspecified_claim_says_so_in_its_message_after_the_abstract_line() -> None:
+    # OPEN-ITEMS 19.1: a viewer shows only this line, so a verdict on a claim that
+    # states too little says so there, after the abstract line; provenance stays out.
+    item = dataclasses.replace(
+        finding(Kind.NOT_SUPPORTED, line=1),
+        detail=(ABSTRACT_BASIS, UNDERSPECIFIED, FOUND_BY_PROOFPATH),
+    )
+    text = to_sarif(report_with(item), artifact="draft.md")["runs"][0]["results"][0]["message"][
+        "text"
+    ]
+    assert text.endswith(f" — {ABSTRACT_BASIS} — {UNDERSPECIFIED}")
+    assert FOUND_BY_PROOFPATH not in text
+
+
 def test_a_full_text_verdict_message_has_no_abstract_marker() -> None:
     result = results_by_kind(to_sarif(full_report(), artifact="draft.md"))[Kind.NOT_SUPPORTED.value]
     assert ABSTRACT_BASIS not in result["message"]["text"]
+    assert UNDERSPECIFIED not in result["message"]["text"]
 
 
 # --- locations ----------------------------------------------------------------------

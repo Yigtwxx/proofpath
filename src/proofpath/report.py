@@ -58,6 +58,13 @@ FOUND_BY_PROOFPATH = "FOUND BY PROOFPATH (not cited by the author)"
 # that shows a verdict alone -- a diagnostic, a markdown bullet, a SARIF message --
 # would otherwise pass a partial read off as a full one.
 ABSTRACT_BASIS = "judged against the abstract only, not the full text"
+# The note a verdict on an underspecified claim carries (OPEN-ITEMS 19.1): "openai won"
+# matches any page about any win. Worded for every verdict kind, supported or not; the
+# verdict, tier and level stand (``claims.is_underspecified``).
+UNDERSPECIFIED = (
+    "underspecified claim: it names no object, time or scope, so many different events "
+    "match it; check that the passage is about the one meant"
+)
 SEARCH_UNAVAILABLE = f"{UNVERIFIED_PREFIX} (search unavailable)"
 # A claim in another language that no judge translated: the models read English only,
 # so it is not searched, and it is not called NEI either (OPEN-ITEMS 17.1a).

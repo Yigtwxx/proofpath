@@ -70,6 +70,27 @@ CF_CHL_IN_SCRIPT = (
     b"<html><head><script>turnstile.render('#cf-chl-widget-a1b2');</script></head>"
     b"<body><p>Checking your browser before accessing the site.</p></body></html>"
 )
+# Cloudflare's underscore forms of the same token: the challenge options object in
+# an inline script, and the challenge token in a form action.
+CF_CHL_OPT_SCRIPT = b"<html><head><script>window._cf_chl_opt={cvId:'3'};</script></head></html>"
+CF_CHL_FORM_TOKEN = (
+    b'<html><body><form action="/article?__cf_chl_f_tk=abc" method="POST">'
+    b"<p>One more step</p></form></body></html>"
+)
+# Real articles that still carry a Cloudflare URL token after the challenge was
+# passed: the clearance redirect echoed in og:url, and an outbound link copied
+# from a challenged URL. Long pages, so the token must not read as a wall.
+CF_CHL_RT_TOKEN_ARTICLE = (
+    b'<html><head><meta property="og:url" '
+    b'content="https://example.org/story?__cf_chl_rt_tk=abc123"></head>'
+    b"<body><article><h1>The strait</h1><p>" + ARTICLE_PROSE.encode() + b"</p></article>"
+    b"</body></html>"
+)
+CF_CHL_JSCHL_LINK_ARTICLE = (
+    b"<html><body><article><h1>The strait</h1><p>" + ARTICLE_PROSE.encode() + b"</p>"
+    b'<p>See <a href="https://example.net/page?__cf_chl_jschl_tk__=xyz">the source</a>.</p>'
+    b"</article></body></html>"
+)
 # Walls whose only marker trace is a script's src attribute (DataDome, reCAPTCHA):
 # the opening tag must survive the script-content removal.
 DATADOME_WALL = (
@@ -309,6 +330,10 @@ def test_corrupt_pdf_is_noted_not_crashed(client: httpx.Client) -> None:
         (200, "html", TITLE_ONLY_CHALLENGE, "blocked"),  # the phrase lives in <title>
         (200, "html", b"<noscript>Enable JavaScript and cookies</noscript>", "blocked"),
         (200, "html", CF_CHL_IN_SCRIPT, "blocked"),  # structural marker, scripts included
+        (200, "html", CF_CHL_OPT_SCRIPT, "blocked"),
+        (200, "html", CF_CHL_FORM_TOKEN, "blocked"),  # visible words: the marker decides
+        (200, "html", CF_CHL_RT_TOKEN_ARTICLE, "ok"),  # URL token on a long page
+        (200, "html", CF_CHL_JSCHL_LINK_ARTICLE, "ok"),
         (200, "html", DATADOME_WALL, "blocked"),  # marker in a script's src attribute
         (200, "html", RECAPTCHA_SRC_WALL, "blocked"),
         (200, "html", CUSTOM_ELEMENT_WALL, "blocked"),  # <style-guide> is not <style>
@@ -339,6 +364,8 @@ def test_classify(status: int | None, kind: fx.Kind, body: bytes, expected: str)
 def test_article_prose_is_past_the_challenge_word_limit() -> None:
     assert fx._html_words(WIKIPEDIA_PAGE) >= fx.CHALLENGE_MAX_WORDS
     assert fx._html_words(CAPTCHA_ARTICLE) >= fx.CHALLENGE_MAX_WORDS
+    assert fx._html_words(CF_CHL_RT_TOKEN_ARTICLE) >= fx.CHALLENGE_MAX_WORDS
+    assert fx._html_words(CF_CHL_JSCHL_LINK_ARTICLE) >= fx.CHALLENGE_MAX_WORDS
 
 
 def test_script_cut_by_the_scan_boundary_does_not_leak_a_marker() -> None:
@@ -368,6 +395,11 @@ def test_unterminated_script_at_the_end_is_ignored() -> None:
         (RECAPTCHA_SRC_WALL, True),
         (CUSTOM_ELEMENT_WALL, True),
         (b"<script-x></script-x><p>Access Denied</p>", True),
+        (CF_CHL_IN_SCRIPT, True),
+        (CF_CHL_OPT_SCRIPT, True),  # underscore form, inside a script
+        (CF_CHL_FORM_TOKEN, True),  # underscore form, in a form action
+        (CF_CHL_RT_TOKEN_ARTICLE, False),
+        (CF_CHL_JSCHL_LINK_ARTICLE, False),
         (WIKIPEDIA_PAGE, False),
         (CAPTCHA_ARTICLE, False),
     ],

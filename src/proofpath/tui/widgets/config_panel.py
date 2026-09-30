@@ -89,6 +89,11 @@ TITLE = "/config"
 #: asked for exactly this label; the padding to :data:`NAME_WIDTH` still lines the
 #: status up with every other row's value.
 TAVILY_LABEL = "Tavily API:"
+# What the key row adds when search will not use the key (a key found while
+# ``search.provider`` is not tavily), and its ``(not set)`` status when tavily is
+# chosen: without a key that search does not run. Short enough for 80 columns.
+KEY_UNUSED = "unused until search.provider = tavily"
+KEY_NEEDED = "tavily needs it: paste, enter to save"
 
 
 @dataclass(frozen=True)
@@ -679,7 +684,8 @@ class ConfigPanel(Vertical):
 
         Where the key would be found, in :func:`resolve_api_key`'s own order, so the
         row and a run can never disagree. Never the value, nor any part of it: even a
-        ``tvly-`` prefix says which provider's key sits in which file.
+        ``tvly-`` prefix says which provider's key sits in which file. A key that was
+        found is followed by :meth:`_key_unused` when search will not use it.
         """
         name, sep, user = self._key_env(), self._theme.glyphs.sep, user_dotenv_path()
         # A key saved here but read from somewhere else first is *shadowed*: the row
@@ -691,14 +697,31 @@ class ConfigPanel(Vertical):
                 line.append(f"saved {sep} {user} {sep} overridden by the environment")
             else:
                 line.append("set in the environment (it overrides the file)")
-            return line
+            return self._key_unused(line)
         found = resolve_api_key(name, environ={}, dotenv_paths=default_dotenv_paths())
         if found is None:
-            line.append(f"(not set) {sep} paste your key here, enter to save", style=self._muted())
-        elif saved and found.source != str(user):
+            # With tavily chosen, a missing key is why the next search will not run.
+            wants = KEY_NEEDED if self._tavily() else "paste your key here, enter to save"
+            line.append(f"(not set) {sep} {wants}", style=self._muted())
+            return line
+        if saved and found.source != str(user):
             line.append(f"saved {sep} {user} {sep} overridden by {found.source}")
         else:
             line.append(f"saved {sep} {found.source}")
+        return self._key_unused(line)
+
+    def _tavily(self) -> bool:
+        return self._view.config.search.provider == "tavily"
+
+    def _key_unused(self, line: Text) -> Text:
+        """``· unused until search.provider = tavily`` (:data:`KEY_UNUSED`).
+
+        A key found while ``search.provider`` is not ``tavily`` does nothing, and the
+        row says so rather than looking ready. Saving a key never turns search on:
+        setting the provider is the user's consent to search (spec 2026-09-28).
+        """
+        if not self._tavily():
+            line.append(f" {self._theme.glyphs.sep} {KEY_UNUSED}", style=self._muted())
         return line
 
     # --- folding --------------------------------------------------------------------

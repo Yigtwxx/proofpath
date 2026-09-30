@@ -38,6 +38,7 @@ from proofpath import __version__
 from proofpath.report import (
     ABSTRACT_BASIS,
     LEVELS,
+    UNDERSPECIFIED,
     Finding,
     Kind,
     Report,
@@ -208,6 +209,10 @@ def _message(item: Finding) -> str:
         # Rule 6: a verdict read from an abstract says so here, or a viewer shows it
         # as one read from full text. The other detail lines stay in the report.
         parts.append(ABSTRACT_BASIS)
+    if UNDERSPECIFIED in item.detail:
+        # OPEN-ITEMS 19.1: the same holds for a verdict on a claim that states too
+        # little for its support to mean much.
+        parts.append(UNDERSPECIFIED)
     return " — ".join(parts)
 
 

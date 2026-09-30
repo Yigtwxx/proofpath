@@ -22,6 +22,7 @@ from proofpath.report import (
     FOUND_BY_PROOFPATH,
     LANGUAGE_UNSUPPORTED,
     SEARCH_UNAVAILABLE,
+    UNDERSPECIFIED,
     Kind,
 )
 from proofpath.resolve import ResolveResult, State
@@ -266,6 +267,61 @@ def test_a_verdict_from_a_full_text_found_page_has_no_abstract_line() -> None:
 
     found = next(f for f in report.findings if f.kind is Kind.EVIDENCE_FOUND)
     assert found.detail == (FOUND_BY_PROOFPATH,)
+
+
+# --- OPEN-ITEMS 19.1: a claim that states too little -----------------------------
+
+WON = "openai won"
+AWARD = "OpenAI's recognition with a 2026 Global Recognition Award was announced."
+
+
+def test_a_found_verdict_on_an_underspecified_claim_says_so() -> None:
+    """The live case: the passage entails "openai won", but so would any win. The
+    verdict and its tier stand; the row says how little the claim pinned down."""
+    report = verify(
+        WON,
+        searching(
+            StubSearcher({"openai": [PAGE_A]}),
+            pages={PAGE_A: f"{AWARD} {FILLER}"},
+            table={AWARD: SUPPORTED_ROW},
+        ),
+    )
+    found = next(f for f in report.findings if f.kind is Kind.EVIDENCE_FOUND)
+    assert found.detail == (UNDERSPECIFIED, FOUND_BY_PROOFPATH)
+    assert found.verdict is not None and found.tier == found.verdict.tier
+
+
+def test_a_specific_claim_carries_no_underspecified_line() -> None:
+    report = verify(CLAIM, _supported_engine())
+    found = next(f for f in report.findings if f.kind is Kind.EVIDENCE_FOUND)
+    assert UNDERSPECIFIED not in found.detail
+
+
+def test_the_underspecified_line_sits_after_the_abstract_line_and_before_provenance() -> None:
+    report = verify(
+        WON,
+        searching(
+            StubSearcher({"openai": [PAGE_A]}),
+            pages={PAGE_A: AWARD},
+            table={AWARD: REFUTED_ROW},
+        ),
+    )
+    refuted = next(f for f in report.findings if f.kind is Kind.NOT_SUPPORTED)
+    assert refuted.detail == (ABSTRACT_BASIS, UNDERSPECIFIED, FOUND_BY_PROOFPATH)
+
+
+def test_a_translated_claim_is_judged_underspecified_on_its_english_form() -> None:
+    kazandi = "OpenAI kazandı."  # noqa: RUF001 - a real Turkish letter, not a typo
+    answer = json.dumps({"items": [{"id": 0, "english": "OpenAI won.", "queries": ["OpenAI won"]}]})
+    built = searching(
+        StubSearcher({"OpenAI won": [PAGE_A]}),
+        pages={PAGE_A: f"{AWARD} {FILLER}"},
+        table={AWARD: SUPPORTED_ROW},
+    )
+    built.judge = Judge(FakeJudgeClient([answer]))  # type: ignore[arg-type]
+    report = verify(kazandi, built)
+    found = next(f for f in report.findings if f.kind is Kind.EVIDENCE_FOUND)
+    assert found.detail == ("checked as: OpenAI won.", UNDERSPECIFIED, FOUND_BY_PROOFPATH)
 
 
 def own_page(url: str, text: str) -> Fetched:
