@@ -36,6 +36,7 @@ from proofpath.paths import config_path
 from proofpath.report import Coverage, Finding, Kind, Report, summary_silence
 from proofpath.resolve import Candidate, ResolveResult
 from proofpath.resolve import State as ResolveState
+from proofpath.secrets import read_dotenv, user_dotenv_path
 from proofpath.tui import commands, wordmark
 from proofpath.tui.app import (
     ANSWER_LABELS,
@@ -64,7 +65,12 @@ from proofpath.tui.app import (
 from proofpath.tui.banner import split_hint
 from proofpath.tui.runs import Run, State
 from proofpath.tui.theme import PLAIN, RICH
-from proofpath.tui.widgets.config_panel import ConfigPanel, PanelLine
+from proofpath.tui.widgets.config_panel import (
+    KEY_NEEDED,
+    KEY_UNUSED,
+    ConfigPanel,
+    PanelLine,
+)
 from proofpath.tui.widgets.prompt import HELD_SUMMARY
 from proofpath.verify import Engine
 
@@ -2950,7 +2956,7 @@ def no_keys(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """No API key anywhere the panel looks: not in the environment and not in a
     ``.env`` beside the working directory, which is ``tmp_path`` for the test. The
     config dir's ``.env`` is already the isolated one."""
-    for name in ("GROQ_API_KEY", "GEMINI_API_KEY"):
+    for name in ("GROQ_API_KEY", "GEMINI_API_KEY", "TAVILY_API_KEY"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.chdir(tmp_path)
 
@@ -3059,6 +3065,7 @@ async def test_the_rows_come_in_the_configs_order_and_the_selection_stays_inside
             "search.provider",
             "search.base_url",
             "search.api_key_env",
+            "search.api_key",
             "contact.email",
         ]
         assert [row.kind for row in panel.rows] == [
@@ -3074,18 +3081,357 @@ async def test_the_rows_come_in_the_configs_order_and_the_selection_stays_inside
             "choice",
             "text",
             "text",
+            "secret",
             "text",
         ]
         assert panel.selected == 0
         assert _panel_row(panel, "install_browser").startswith("> install_browser")
-        await pilot.press(*["down"] * 12)
-        assert panel.selected == 12
+        await pilot.press(*["down"] * 13)
+        assert panel.selected == 13
         assert _panel_row(panel, "email").startswith("> email")
         assert _panel_row(panel, "install_browser").startswith("  install_browser")
-        await pilot.press(*["up"] * 13)
+        await pilot.press(*["up"] * 14)
         assert panel.selected == 0
     # The file was only read: moving through the rows writes nothing.
     assert not config_path().exists()
+
+
+# --- the Tavily key row: pasted once, saved to the config dir's .env, never shown ------
+
+TAVILY = "Tavily API:"
+PASTED = "tvly-secret-for-test"
+# A key with search off is found but unused; the row says so (saving never enables
+# search: setting search.provider is the user's consent to it).
+UNUSED = f" {PLAIN.glyphs.sep} {KEY_UNUSED}"
+
+
+def _key_note(verb: str, name: str = "TAVILY_API_KEY") -> str:
+    return f"{name} {verb} {user_dotenv_path()}"
+
+
+async def select_key_row(pilot: Any, panel: ConfigPanel) -> None:
+    index = next(i for i, row in enumerate(panel.rows) if row.kind == "secret")
+    await pilot.press(*["down"] * index)
+    assert panel.selected == index
+    assert _panel_row(panel, TAVILY).startswith(f"> {TAVILY}")
+
+
+async def open_key_edit(pilot: Any, panel: ConfigPanel) -> Input:
+    await pilot.press("enter")
+    await until(pilot, lambda: isinstance(pilot.app.focused, Input), "the key edit to open")
+    edit = pilot.app.focused
+    assert isinstance(edit, Input) and panel.editing
+    return edit
+
+
+@pytest.mark.usefixtures("no_keys")
+async def test_the_key_row_says_not_set_and_opens_an_empty_password_edit() -> None:
+    app, _ = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        panel = await open_panel(pilot)
+        row = _panel_row(panel, TAVILY)
+        sep = PLAIN.glyphs.sep
+        assert row == f"  {TAVILY:<18}(not set) {sep} paste your key here, enter to save"
+        await select_key_row(pilot, panel)
+        edit = await open_key_edit(pilot, panel)
+        assert edit.password is True
+        assert edit.value == ""
+        assert edit.placeholder == "paste the key"
+        await pilot.press("escape")  # cancels the edit, writes nothing
+        await until(pilot, lambda: not panel.editing, "the edit to close")
+        assert app.focused is panel and not panel.collapsed
+    assert not user_dotenv_path().exists()
+    assert not config_path().exists()
+
+
+async def test_a_pasted_key_is_saved_to_the_config_dirs_env_and_never_shown(
+    tmp_path: Path, no_keys: None
+) -> None:
+    app, _ = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        panel = await open_panel(pilot)
+        await select_key_row(pilot, panel)
+        edit = await open_key_edit(pilot, panel)
+        edit.value = f"  {PASTED}\n"
+        await pilot.press("enter")
+        await until(pilot, lambda: _key_note("saved to") in _notes(app), "the saved note")
+        assert not panel.editing and app.focused is panel
+        row = _panel_row(panel, TAVILY)
+        # Saved, and still unused: search.provider is off until the user sets it.
+        assert row == f"> {TAVILY:<18}saved {PLAIN.glyphs.sep} {user_dotenv_path()}{UNUSED}"
+        shown = _panel_text(panel)
+        # Enter again: the edit starts empty, not holding the key it just saved.
+        again = await open_key_edit(pilot, panel)
+        assert again.value == ""
+        await pilot.press("escape")
+        await until(pilot, lambda: not panel.editing, "the edit to close")
+        await pilot.press("escape")  # folds the panel
+        await pilot.pause()
+        collapsed = _panel_text(panel)
+        notes, errors = _notes(app), _error_lines(app)
+    assert read_dotenv(user_dotenv_path()) == {"TAVILY_API_KEY": PASTED}
+    assert not (tmp_path / ".env").exists()  # never the project's .env
+    assert not config_path().exists()  # never the TOML config
+    for text in (shown, collapsed, notes, errors):
+        assert PASTED not in text
+    assert TAVILY not in collapsed
+
+
+async def test_the_key_row_uses_the_configured_variable_name(no_keys: None) -> None:
+    path = config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text('[search]\napi_key_env = "MY_SEARCH_KEY"\n', encoding="utf-8")
+    app, _ = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        panel = await open_panel(pilot)
+        await select_key_row(pilot, panel)
+        edit = await open_key_edit(pilot, panel)
+        edit.value = PASTED
+        await pilot.press("enter")
+        await until(
+            pilot, lambda: _key_note("saved to", "MY_SEARCH_KEY") in _notes(app), "the note"
+        )
+    assert read_dotenv(user_dotenv_path()) == {"MY_SEARCH_KEY": PASTED}
+
+
+@pytest.mark.usefixtures("no_keys")
+async def test_backspace_on_the_key_row_removes_the_saved_key() -> None:
+    path = user_dotenv_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"# mine\nTAVILY_API_KEY={PASTED}\nGROQ_API_KEY=other\n", encoding="utf-8")
+    app, _ = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        panel = await open_panel(pilot)
+        assert f"saved {PLAIN.glyphs.sep} {path} " in _panel_row(panel, TAVILY)
+        await select_key_row(pilot, panel)
+        await pilot.press("backspace")
+        await until(pilot, lambda: _key_note("removed from") in _notes(app), "the removed note")
+        assert "(not set)" in _panel_row(panel, TAVILY)
+        text = _panel_text(panel) + _notes(app)
+    assert path.read_text(encoding="utf-8") == "# mine\nGROQ_API_KEY=other\n"
+    assert PASTED not in text
+
+
+async def test_a_key_in_the_environment_is_named_as_such_and_not_shown(
+    monkeypatch: pytest.MonkeyPatch, no_keys: None
+) -> None:
+    monkeypatch.setenv("TAVILY_API_KEY", PASTED)
+    app, _ = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        panel = await open_panel(pilot)
+        row = _panel_row(panel, TAVILY)
+        text = _panel_text(panel)
+    assert "set in the environment (it overrides the file)" in row
+    assert PASTED not in text
+
+
+@pytest.mark.usefixtures("no_keys")
+async def test_a_refused_key_is_an_error_that_does_not_repeat_it() -> None:
+    app, _ = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        panel = await open_panel(pilot)
+        await select_key_row(pilot, panel)
+        edit = await open_key_edit(pilot, panel)
+        edit.value = "tvly-abc#refused-part"
+        await pilot.press("enter")
+        await until(pilot, lambda: bool(_error_lines(app)), "the error line")
+        errors = _error_lines(app)
+        text = _panel_text(panel) + _notes(app)
+        assert "(not set)" in _panel_row(panel, TAVILY)
+    assert "nothing was saved" in errors
+    assert "refused-part" not in errors + text and "tvly-abc" not in errors + text
+    assert not user_dotenv_path().exists()
+
+
+def _nowhere_else(app: ProofpathApp, secret: str) -> None:
+    """The secret is not in the bar, its history, the log's notes or its errors."""
+    assert secret not in app.query_one(Prompt).value
+    assert not any(secret in entry for entry in app._history.entries)
+    assert secret not in _notes(app) and secret not in _error_lines(app)
+
+
+@pytest.mark.usefixtures("no_keys")
+async def test_a_paste_on_the_key_row_opens_the_masked_edit_holding_it() -> None:
+    app, _ = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        panel = await open_panel(pilot)
+        await select_key_row(pilot, panel)
+        panel.post_message(tevents.Paste(f"  {PASTED}\n"))
+        await until(pilot, lambda: isinstance(app.focused, Input), "the edit to open")
+        edit = app.focused
+        assert isinstance(edit, Input)
+        assert edit.password is True and edit.value == PASTED
+        assert edit.cursor_position == len(PASTED)
+        _nowhere_else(app, PASTED)
+        await pilot.press("enter")
+        await until(pilot, lambda: _key_note("saved to") in _notes(app), "the saved note")
+        _nowhere_else(app, PASTED)
+        assert PASTED not in _panel_text(panel)
+    assert read_dotenv(user_dotenv_path()) == {"TAVILY_API_KEY": PASTED}
+
+
+@pytest.mark.usefixtures("no_keys")
+async def test_typing_on_the_key_row_goes_into_the_edit_never_the_bar() -> None:
+    """A paste without bracketed paste arrives as keys, as fast as a terminal sends
+    them: every one, the first included, lands in the masked edit."""
+    typed = "tvlyabc123"
+    app, _ = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        panel = await open_panel(pilot)
+        await select_key_row(pilot, panel)
+        await pilot.press(*typed)
+        await until(pilot, lambda: isinstance(app.focused, Input), "the edit to open")
+        edit = app.focused
+        assert isinstance(edit, Input) and edit.password
+        await until(pilot, lambda: edit.value == typed, "every key in the edit")
+        assert not panel.collapsed
+        _nowhere_else(app, typed)
+        _nowhere_else(app, "tvly")
+        await pilot.press("escape")  # cancelled: nothing is written
+        await until(pilot, lambda: not panel.editing, "the edit to close")
+    assert not user_dotenv_path().exists()
+
+
+@pytest.mark.usefixtures("no_keys")
+async def test_keys_before_the_edit_has_focus_are_the_edits() -> None:
+    """The window between ``Enter`` and the ``Input`` taking focus, made to happen:
+    the edit is opened as a task and a key arrives before its mount is done."""
+    app, _ = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        panel = await open_panel(pilot)
+        await select_key_row(pilot, panel)
+        row = panel.rows[panel.selected]
+        task = asyncio.create_task(panel._begin_edit(row))
+        await asyncio.sleep(0)
+        assert panel.editing and not isinstance(app.focused, Input)
+        await panel.on_key(tevents.Key("t", "t"))
+        await panel.on_paste(tevents.Paste("vly9"))
+        await task
+        await until(pilot, lambda: isinstance(app.focused, Input), "the edit to take focus")
+        edit = app.focused
+        assert isinstance(edit, Input)
+        assert edit.value == "tvly9"
+        assert app.query_one(Prompt).value == ""
+
+
+@pytest.mark.usefixtures("no_keys")
+async def test_clicking_away_drops_a_typed_key_unwritten() -> None:
+    app, _ = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        panel = await open_panel(pilot)
+        await select_key_row(pilot, panel)
+        edit = await open_key_edit(pilot, panel)
+        edit.value = PASTED
+        app.query_one(Prompt).focus()
+        await until(pilot, lambda: panel.collapsed, "the panel to fold")
+        assert not panel.editing
+        assert not panel.query(Input)
+        _nowhere_else(app, PASTED)
+    assert not user_dotenv_path().exists()
+
+
+async def test_a_saved_key_shadowed_by_the_project_env_says_so(
+    tmp_path: Path, no_keys: None
+) -> None:
+    user = user_dotenv_path()
+    user.parent.mkdir(parents=True, exist_ok=True)
+    user.write_text(f"TAVILY_API_KEY={PASTED}\n", encoding="utf-8")
+    (tmp_path / ".env").write_text("TAVILY_API_KEY=project-key-value\n", encoding="utf-8")
+    app, _ = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        panel = await open_panel(pilot)
+        row = _panel_row(panel, TAVILY)
+        text = _panel_text(panel)
+    sep = PLAIN.glyphs.sep
+    assert f"saved {sep} {user} {sep} overridden by {tmp_path / '.env'} " in row
+    assert PASTED not in text and "project-key-value" not in text
+
+
+async def test_a_saved_key_shadowed_by_the_environment_says_so(
+    monkeypatch: pytest.MonkeyPatch, no_keys: None
+) -> None:
+    user = user_dotenv_path()
+    user.parent.mkdir(parents=True, exist_ok=True)
+    user.write_text(f"TAVILY_API_KEY={PASTED}\n", encoding="utf-8")
+    monkeypatch.setenv("TAVILY_API_KEY", "env-key-value")
+    app, _ = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        panel = await open_panel(pilot)
+        row = _panel_row(panel, TAVILY)
+        text = _panel_text(panel)
+    sep = PLAIN.glyphs.sep
+    assert f"saved {sep} {user} {sep} overridden by the environment " in row
+    assert PASTED not in text and "env-key-value" not in text
+
+
+def _save_tavily_key() -> None:
+    user = user_dotenv_path()
+    user.parent.mkdir(parents=True, exist_ok=True)
+    user.write_text(f"TAVILY_API_KEY={PASTED}\n", encoding="utf-8")
+
+
+def _set_search_provider(provider: str) -> None:
+    path = config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f'[search]\nprovider = "{provider}"\n', encoding="utf-8")
+
+
+@pytest.mark.usefixtures("no_keys")
+async def test_a_saved_key_with_search_off_says_the_provider_must_be_set() -> None:
+    _save_tavily_key()
+    app, _ = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        panel = await open_panel(pilot)
+        row = _panel_row(panel, TAVILY)
+        text = _panel_text(panel)
+    sep = PLAIN.glyphs.sep
+    assert row == f"  {TAVILY:<18}saved {sep} {user_dotenv_path()}{UNUSED}", row
+    assert PASTED not in text
+    assert load_config().search.provider == "off"  # saving never turned search on
+
+
+@pytest.mark.usefixtures("no_keys")
+async def test_a_saved_key_with_tavily_selected_carries_no_notice() -> None:
+    _save_tavily_key()
+    _set_search_provider("tavily")
+    app, _ = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        panel = await open_panel(pilot)
+        row = _panel_row(panel, TAVILY)
+    assert row == f"  {TAVILY:<18}saved {PLAIN.glyphs.sep} {user_dotenv_path()}", row
+
+
+@pytest.mark.usefixtures("no_keys")
+async def test_tavily_selected_without_a_key_says_search_needs_one() -> None:
+    _set_search_provider("tavily")
+    app, _ = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        panel = await open_panel(pilot)
+        row = _panel_row(panel, TAVILY)
+    sep = PLAIN.glyphs.sep
+    assert row == f"  {TAVILY:<18}(not set) {sep} {KEY_NEEDED}", row
+    assert len(row) <= 80 - 6, "the line fits an 80-column panel without wrapping"
+
+
+@pytest.mark.usefixtures("no_keys")
+async def test_cycling_the_search_provider_redraws_the_key_row() -> None:
+    _save_tavily_key()
+    app, _ = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        panel = await open_panel(pilot)
+        assert _panel_row(panel, TAVILY).endswith(UNUSED)
+        index = next(i for i, row in enumerate(panel.rows) if row.key == "search.provider")
+        await pilot.press(*["down"] * index)
+        await pilot.press("right")  # off -> tavily
+        await written(pilot, "search.provider", "tavily")
+        with_tavily = _panel_row(panel, TAVILY)
+        await pilot.press("right")  # tavily -> searxng
+        await written(pilot, "search.provider", "searxng")
+        with_searxng = _panel_row(panel, TAVILY)
+        text = _panel_text(panel)
+    assert with_tavily.endswith(f"saved {PLAIN.glyphs.sep} {user_dotenv_path()}"), with_tavily
+    assert with_searxng.endswith(f"saved {PLAIN.glyphs.sep} {user_dotenv_path()}{UNUSED}")
+    assert PASTED not in text
 
 
 @pytest.mark.usefixtures("no_keys")
@@ -3205,7 +3551,9 @@ async def test_a_provider_without_a_key_variable_says_none_is_needed() -> None:
         await written(pilot, "judge.provider", "ollama")
         text = _panel_text(panel)
     assert " key      not needed" in text
-    assert "not set" not in text
+    # The judge's key line; the search key row below has a "(not set)" of its own.
+    key_line = next(line for line in text.split("\n") if line.startswith(" key "))
+    assert "not set" not in key_line
 
 
 @pytest.mark.usefixtures("no_keys")
@@ -3248,7 +3596,7 @@ async def test_an_empty_text_row_shows_unset_and_its_note() -> None:
         assert _panel_row(panel, "email") == (
             "  email             (unset) , optional, for the Crossref / OpenAlex polite pools"
         )
-        await pilot.press(*["down"] * 12, "enter")
+        await pilot.press(*["down"] * 13, "enter")
         await pilot.pause()
         await until(pilot, lambda: app.focused is panel.query_one(Input), "the edit")
         assert panel.query_one(Input).value == ""

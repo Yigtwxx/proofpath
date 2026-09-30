@@ -35,7 +35,16 @@ from proofpath import __version__
 # ``_one_line`` is private to ``report`` but it is *the* definition of flattening a
 # quoted passage onto one line, and the markdown renderer already uses it. Reusing it
 # keeps SARIF and markdown quoting the same passage the same way.
-from proofpath.report import LEVELS, Finding, Kind, Report, _one_line, search_experimental
+from proofpath.report import (
+    ABSTRACT_BASIS,
+    LEVELS,
+    UNDERSPECIFIED,
+    Finding,
+    Kind,
+    Report,
+    _one_line,
+    search_experimental,
+)
 
 SARIF_VERSION = "2.1.0"
 SCHEMA_URI = "https://json.schemastore.org/sarif-2.1.0.json"
@@ -186,7 +195,7 @@ def _message(item: Finding) -> str:
     finding carries one — it is never invented, and the two asserting kinds cannot
     exist without it (:class:`~proofpath.report.Finding` refuses). The exact
     ``UNVERIFIED (...)`` string is appended for that family, whose flavour is the
-    thing worth saying.
+    thing worth saying, and a verdict judged against an abstract says so (rule 6).
     """
     parts = [item.title]
     if item.verdict is not None and item.verdict.passage is not None:
@@ -196,6 +205,14 @@ def _message(item: Finding) -> str:
         parts.append(f'source says: "{_one_line(item.verdict.passage.text)}"')
     if item.kind is Kind.UNVERIFIED:
         parts.append(item.state)
+    if ABSTRACT_BASIS in item.detail:
+        # Rule 6: a verdict read from an abstract says so here, or a viewer shows it
+        # as one read from full text. The other detail lines stay in the report.
+        parts.append(ABSTRACT_BASIS)
+    if UNDERSPECIFIED in item.detail:
+        # OPEN-ITEMS 19.1: the same holds for a verdict on a claim that states too
+        # little for its support to mean much.
+        parts.append(UNDERSPECIFIED)
     return " — ".join(parts)
 
 

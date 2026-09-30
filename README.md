@@ -321,7 +321,11 @@ proofpath config set search.provider tavily
 echo 'TAVILY_API_KEY=tvly-…' >> .env
 ```
 
-or `search.provider searxng` plus `search.base_url` for your own instance. Setting
+In the TUI, `/config` does both: set `search.provider` to `tavily`, then paste the key
+into the `Tavily API:` row. It is saved to the `.env` in your config directory, never
+shown and never written to `config.toml`.
+
+Or use `search.provider searxng` plus `search.base_url` for your own instance. Setting
 the provider **is** the consent — search then runs automatically on source-less text;
 `--no-search` turns it off for one run, and `permissions.web_search = deny` turns it
 off for good.

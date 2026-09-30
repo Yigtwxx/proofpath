@@ -92,12 +92,14 @@ from proofpath.providers.academic import AcademicProvider
 from proofpath.providers.social import SocialProvider
 from proofpath.providers.web import WebProvider
 from proofpath.report import (
+    ABSTRACT_BASIS,
     FOUND_BY_PROOFPATH,
     LANGUAGE_UNSUPPORTED,
     LEVELS,
     SEARCH_UNAVAILABLE,
     STATE_WORDS,
     SUMMARY,
+    UNDERSPECIFIED,
     ClaimResult,
     Coverage,
     Finding,
@@ -1622,6 +1624,15 @@ def _verdict_finding(claim: Claim, status: SourceStatus, verdict: Verdict) -> Fi
     if claim.hypothesis:
         # A translated claim says what the models actually read (Amendment A).
         detail = (*detail, f"{CHECKED_AS}{claim.hypothesis}")
+    if status.text_kind == "abstract":
+        # Rule 6: this row is shown on its own, apart from the source's abstract-only
+        # row. After the numeric reason and ``CHECKED_AS``, before provenance.
+        detail = (*detail, ABSTRACT_BASIS)
+    if claims_mod.underspecified(claim):
+        # OPEN-ITEMS 19.1: a claim this short is supported by many unrelated pages, so
+        # the row says so. A note only -- kind, level and tier stand. After the
+        # abstract line, before provenance.
+        detail = (*detail, UNDERSPECIFIED)
     return Finding(
         kind=kind,
         level=LEVELS[kind],

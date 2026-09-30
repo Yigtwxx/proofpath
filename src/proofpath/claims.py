@@ -448,6 +448,120 @@ def is_checkworthy(text: str) -> bool:
     )
 
 
+# A claim that states too little to pin down (OPEN-ITEMS 19.1): "openai won" is entailed
+# by any page about any win, so its verdict weighs far less than a specific claim's.
+# Counted on content words -- every term left once hashtags, handles, punctuation and
+# function words are gone. A figure is one term ("12.5"), and so is a run of
+# capitalised words, which is a name ("Elon Musk", "Global Recognition Award"). Two or
+# fewer is underspecified: the same floor as ``CHECKWORTHY_MIN_WORDS``, but counted on
+# terms that say something, so "OpenAI has won" and "Elon Musk won" (two) are caught
+# while "OpenAI won the award" (three) is not. Deliberately blunt and explainable: it
+# only annotates a verdict, never changes one.
+UNDERSPECIFIED_MAX_WORDS = 2
+# A decimal or grouped figure is one term ("86.4", "1,000"); anything else is a word
+# as ``_WORDS`` reads it. The lookahead keeps "3rd" one word rather than "3" + "rd".
+_TERMS = re.compile(r"\d+(?:[.,]\d+)*(?!\w)|\w+(?:['’]\w+)*")  # noqa: RUF001 - a real apostrophe
+# What may stand between two capitalised words of one name: "Hewlett-Packard".
+_NAME_GAP = re.compile(r"[\s-]+")
+# A linking verb between two content words makes a complete predication: "The Earth is
+# flat" says all it means to say, where "OpenAI won" leaves out what was won. "It is
+# true" is still short: its subject is not a content word.
+_LINKING = frozenset(
+    {"is", "are", "was", "were", "be", "been", "being", "am", "isn't", "aren't", "wasn't",
+     "weren't"}
+)  # fmt: skip
+# Words that carry no content of their own: the sentence openers above, plus
+# auxiliaries, negation, prepositions and pronouns. A verb that is not an auxiliary
+# stays a content word: "won" is what the claim says happened.
+_FUNCTION_WORDS = (
+    _OPENERS
+    | _LINKING
+    | frozenset(
+        {
+            "has", "have", "had", "having", "do", "does", "did", "will", "would", "shall",
+            "should", "can", "could", "may", "might", "must", "not", "no", "never", "of",
+            "to", "from", "by", "with", "about", "into", "onto", "over", "under", "than",
+            "then", "or", "nor", "also", "just", "very", "really", "too", "which", "who",
+            "whom", "whose", "me", "him", "us", "them", "your", "itself", "themselves",
+            "hasn't", "haven't", "hadn't", "doesn't", "don't", "didn't", "won't",
+            "wouldn't", "can't", "cannot", "couldn't", "shouldn't", "it's", "that's",
+            "there's",
+        }
+    )
+)  # fmt: skip
+
+
+def _folded_term(term: str) -> str:
+    return term.casefold().replace("’", "'")  # noqa: RUF001 - a real apostrophe
+
+
+def _is_function(term: str) -> bool:
+    return _folded_term(term) in _FUNCTION_WORDS
+
+
+def _terms(text: str) -> list[str]:
+    """Words and figures in order, with a run of capitalised content words joined into
+    one term. A function word never joins a name, so a capitalised sentence opener
+    ("The Earth") stays out of it, and a capitalised first word followed by a
+    lowercase one is only the start of the sentence.
+
+    In title case or all caps ("OpenAI Wins The Global Award", "OPENAI WON THE AWARD")
+    a capital says nothing about names, and joining would swallow the verb; when every
+    content word is capitalised, no words are joined and each counts on its own.
+    """
+    words = [match.group() for match in _TERMS.finditer(text)]
+    content = [word for word in words if not _is_function(word)]
+    names = not all(word[:1].isupper() for word in content)
+    terms: list[str] = []
+    end = 0
+    for match in _TERMS.finditer(text):
+        term = match.group()
+        if (
+            names
+            and terms
+            and term[:1].isupper()
+            and terms[-1][:1].isupper()
+            and not _is_function(term)
+            and not _is_function(terms[-1])
+            and _NAME_GAP.fullmatch(text[end : match.start()])
+        ):
+            terms[-1] = f"{terms[-1]} {term}"
+        else:
+            terms.append(term)
+        end = match.end()
+    return terms
+
+
+def is_underspecified(text: str) -> bool:
+    """Whether ``text`` names at most ``UNDERSPECIFIED_MAX_WORDS`` content terms and is
+    not a complete predication (a linking verb between two content terms).
+
+    The rules read English. A claim that was not translated is counted as written: a
+    cited Turkish sentence, whose suffixes fold what English says in several words into
+    one, reads a little shorter than its translation would. Known, and small: a cited
+    sentence is rarely two words long.
+
+    Other known small misses, left as they are: a sentence-initial capitalised adverb
+    joins the name after it ("Yesterday Elon Musk won" is flagged), a dotted
+    abbreviation splits into letters ("U.S. won" is not flagged), and a "BREAKING:"
+    prefix counts as a content word.
+    """
+    terms = _terms(_TAGS.sub(" ", text))
+    content = [not _is_function(term) for term in terms]
+    if sum(content) > UNDERSPECIFIED_MAX_WORDS:
+        return False
+    return not any(
+        _folded_term(term) in _LINKING and any(content[:at]) and any(content[at + 1 :])
+        for at, term in enumerate(terms)
+    )
+
+
+def underspecified(claim: Claim) -> bool:
+    """``is_underspecified`` on the text the models check: the English rendering of a
+    translated claim, or the claim itself."""
+    return is_underspecified(claim.hypothesis or claim.text)
+
+
 def checkworthy(doc: Document, *, limit: int) -> Checkworthy:
     """Claims for a document that cites nothing, to be searched for.
 

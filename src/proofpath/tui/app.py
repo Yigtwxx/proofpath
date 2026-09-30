@@ -938,6 +938,13 @@ class ProofpathApp(App[None]):
         for key, value in event.pairs:
             self._note(f"{key} = {value}  ({event.path})", dim=False)
 
+    def on_config_panel_key_saved(self, event: ConfigPanel.KeySaved) -> None:
+        """The key row wrote a ``.env``: the variable and the file, never the value.
+        No reload -- the TOML file did not change, and the key is looked up afresh by
+        each search anyway."""
+        verb = "removed from" if event.removed else "saved to"
+        self._note(f"{event.name} {verb} {event.path}", dim=False)
+
     def on_config_panel_failed(self, event: ConfigPanel.Failed) -> None:
         self.query_one(RunLog).mount(KvLine(error_line(self._out, event.message)))
         self._scroll_log()
