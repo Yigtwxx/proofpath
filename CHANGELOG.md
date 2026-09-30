@@ -6,6 +6,12 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.9] - 2026-09-30
+
+Wikipedia can be read again, and a verdict now says more about how much it rests
+on: an abstract, or a claim too short to pin down. The Tavily key is pasted straight
+into `/config`.
+
 ### Added
 - **`Tavily API:` in `/config`.** The search section of the settings panel has a key
   row: press Enter, paste the key, Enter again. It is saved to the `.env` in your
