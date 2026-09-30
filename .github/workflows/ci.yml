@@ -14,8 +14,8 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           enable-cache: true
       - run: uv sync --extra dev
@@ -32,10 +32,39 @@ jobs:
         python-version: ["3.10", "3.13"]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           enable-cache: true
           python-version: ${{ matrix.python-version }}
       - run: uv sync --extra dev
       - run: uv run pytest
+
+  package:
+    # The release workflow hands its wheel and sdist from one job to the next as an
+    # artifact, and nothing exercises that path until a tag is pushed. This job
+    # does the same round trip on every change, so a broken build or an artifact
+    # action that unpacks somewhere else (dist/dist/) fails here, not mid-release.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          enable-cache: false
+      - run: uv build
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dist-check
+          path: dist/
+          retention-days: 1
+
+  package-roundtrip:
+    needs: package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: dist-check
+          path: dist/
+      - name: The wheel and the sdist land directly in dist/
+        run: ls dist/*.whl dist/*.tar.gz
