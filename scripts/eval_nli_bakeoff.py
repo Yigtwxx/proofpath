@@ -17,8 +17,9 @@ import argparse
 import platform
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 
 import numpy as np
@@ -30,6 +31,7 @@ from proofpath.eval.bakeoff_data import (
     Item,
     SnapshotClaim,
     load_items,
+    load_probs,
     load_snapshot,
     pending,
     save_items,
@@ -37,8 +39,9 @@ from proofpath.eval.bakeoff_data import (
     save_snapshot,
     source_from_fetched,
 )
-from proofpath.models import Passage
+from proofpath.models import Label, Passage
 from proofpath.paths import cache_dir, models_dir
+from proofpath.pipeline import Thresholds
 
 EMBEDDER = "BAAI/bge-small-en-v1.5"
 
@@ -199,9 +202,16 @@ def cmd_snapshot(args: argparse.Namespace) -> int:
     return 0
 
 
+def items_stale(items: Path, snapshot: Path) -> bool:
+    """True when the snapshot was written after ``items`` was built."""
+    return snapshot.stat().st_mtime > items.stat().st_mtime
+
+
 def _items(rebuild: bool) -> list[Item]:
     if items_path().exists() and not rebuild:
-        return load_items(items_path())
+        if not items_stale(items_path(), snapshot_path()):
+            return load_items(items_path())
+        print("items     the snapshot is newer than items.json; rebuilding")
     embedder = retrieval.FastEmbedder(EMBEDDER, cache_dir=models_dir())
     try:
         items = build_items(embedder)
@@ -252,9 +262,267 @@ def cmd_score(args: argparse.Namespace) -> int:
     return 0
 
 
+@dataclass(frozen=True)
+class ReportRow:
+    combo: bakeoff.Combo
+    large: bool
+    thresholds: Thresholds
+    scifact: bakeoff.SciFactResult
+    averitec: bakeoff.AveritecResult
+
+
+def model_size_mb(model: str) -> float | None:
+    """Size of the ONNX file the run used, or None when it is not in the cache."""
+    from huggingface_hub import try_to_load_from_cache
+
+    candidate = CANDIDATES[model]
+    found = try_to_load_from_cache(
+        candidate.repo,
+        candidate.onnx_file(platform.machine()),
+        cache_dir=str(models_dir()),
+        revision=candidate.revision,
+    )
+    return Path(found).stat().st_size / 1e6 if isinstance(found, str) else None
+
+
+def _md(*cells: object) -> str:
+    return "| " + " | ".join(str(c) for c in cells) + " |"
+
+
+def _tier_cell(tier: bakeoff.TierStat) -> str:
+    if tier.precision is None or tier.interval is None:
+        return f"{tier.n} · too few to judge"
+    low, high = tier.interval
+    return f"{tier.n} · {tier.precision:.3f} (Wilson {low:.2f}–{high:.2f})"  # noqa: RUF001
+
+
+def _without_passage_cell(count: int) -> str:
+    return f"**{count} — rule 1 violated**" if count else "0"
+
+
+def render_report(
+    rows: Sequence[ReportRow],
+    choice: bakeoff.Choice,
+    *,
+    speed: Mapping[str, float],
+    sizes: Mapping[str, float | None],
+    counts: Mapping[str, int],
+    today: str,
+    machine: str,
+) -> str:
+    scored = {row.combo.model for row in rows}
+    skipped = [m for m in CANDIDATES if m not in scored]
+    base_ave = rows[0].averitec if rows else None
+    counted = base_ave.counted if base_ave else 0
+    readable = base_ave.readable if base_ave else 0
+    baseline_ave = rows[0].averitec.majority_baseline if rows else 0.0
+    lines = [
+        f"# NLI bake-off — {today}",
+        "",
+        "- spec: `docs/superpowers/specs/2026-10-01-nli-bakeoff-design.md`",
+        f"- calibrated on SciFact train ({counts.get('scifact-train', 0)} pairs); reported on "
+        f"SciFact dev ({counts.get('scifact-dev', 0)} pairs) and AVeriTeC dev "
+        f"({counts.get('averitec', 0)} claims, {counted} answerable (3-way gold label), "
+        f"{readable} of those with a readable source; frozen snapshot, browser not permitted)",
+        f"- embedder `{EMBEDDER}`, top {bakeoff.TOP_N} passages per item, numeric layer on",
+        f"- machine: {machine}",
+        "- coverage: "
+        + (f"not scored: {', '.join(skipped)}" if skipped else "all candidate models were scored"),
+        "",
+        "## Decision rule (fixed before any number was seen)",
+        "",
+        bakeoff.DECISION_RULE,
+        "",
+        "## Result",
+        "",
+    ]
+    if choice.winner is None:
+        lines.append(f"**No change.** {choice.reason}")
+    else:
+        lines.append(f"**Winner:** {choice.winner.label()} — {choice.reason}")
+    lines.extend(
+        ["", "## Models", "", "| model | repo | size (MB) | ms/pair |", "|---|---|---|---|"]
+    )
+    for model in dict.fromkeys(row.combo.model for row in rows):
+        size = sizes.get(model)
+        lines.append(
+            _md(
+                model,
+                f"`{CANDIDATES[model].repo}`",
+                "—" if size is None else f"{size:.0f}",
+                f"{speed.get(model, 0.0):.0f}",
+            )
+        )
+    lines.extend(
+        [
+            "",
+            "## Every combination",
+            "",
+            f"AVeriTeC majority baseline: {baseline_ave:.3f}. Published numbers to compare: "
+            "0.270 (all) and 0.361 (readable), 2026-09-16.",
+            "",
+            "| model | k | aggregation | decide | medium | high | dev acc | dev macro-F1 "
+            "| F1 S / R / NEI | rationale F1 | AVeriTeC all | AVeriTeC readable | w/o passage |",
+            "|---|---|---|---|---|---|---|---|---|---|---|---|---|",
+        ]
+    )
+    for row in rows:
+        f1 = row.scifact.f1
+        lines.append(
+            _md(
+                row.combo.model,
+                row.combo.k,
+                row.combo.aggregation,
+                f"{row.thresholds.decide:.2f}",
+                f"{row.thresholds.medium:.6f}",
+                f"{row.thresholds.high:.6f}",
+                f"{row.scifact.accuracy:.3f}",
+                f"{row.scifact.macro_f1:.3f}",
+                f"{f1[Label.SUPPORTED]:.2f} / {f1[Label.REFUTED]:.2f} / {f1[Label.NEI]:.2f}",
+                f"{row.scifact.rationale_f1:.3f}",
+                f"{row.averitec.accuracy_all:.3f}",
+                f"{row.averitec.accuracy_readable:.3f}",
+                _without_passage_cell(
+                    row.scifact.asserted_without_passage + row.averitec.asserted_without_passage
+                ),
+            )
+        )
+    labels = sorted({label for row in rows for label in row.averitec.per_label})
+    lines.extend(
+        [
+            "",
+            "## AVeriTeC per label",
+            "",
+            "Cells are correct/n per gold label. `n (not scored)` marks a gold label with no "
+            "3-way verdict; it is not a model failure.",
+            "",
+            _md("model", "k", "aggregation", *labels),
+            _md(*(["---"] * (3 + len(labels)))),
+        ]
+    )
+    for row in rows:
+        cells = []
+        for label in labels:
+            seen, right = row.averitec.per_label.get(label, (0, 0))
+            cells.append(
+                f"{seen} (not scored)" if averitec.to_label(label) is None else f"{right}/{seen}"
+            )
+        lines.append(_md(row.combo.model, row.combo.k, row.combo.aggregation, *cells))
+    lines.extend(
+        [
+            "",
+            "## Tiers on SciFact dev",
+            "",
+            f"Cells are n · precision (95 % Wilson interval); n below {bakeoff.MIN_TIER_N} is "
+            "too few to judge.",
+            "",
+            "| model | k | aggregation | high | medium | low |",
+            "|---|---|---|---|---|---|",
+        ]
+    )
+    for row in rows:
+        tiers = {t.tier: t for t in row.scifact.tiers}
+        lines.append(
+            _md(
+                row.combo.model,
+                row.combo.k,
+                row.combo.aggregation,
+                *(_tier_cell(tiers[name]) for name in ("high", "medium", "low")),
+            )
+        )
+    return "\n".join(lines) + "\n"
+
+
 def cmd_report(args: argparse.Namespace) -> int:
-    print("error     report is implemented in Task 6", file=sys.stderr)
-    return 2
+    if not items_path().exists() or not snapshot_path().exists():
+        print("error     run `snapshot` and `score --model base` first", file=sys.stderr)
+        return 2
+    if items_stale(items_path(), snapshot_path()):
+        print(
+            "error     the snapshot is newer than items.json, so the stored items are stale.\n"
+            "          The next `score` run rebuilds items.json automatically; after that, "
+            "re-score every model with `score --model <name>`.",
+            file=sys.stderr,
+        )
+        return 2
+    items = load_items(items_path())
+    snapshot = load_snapshot(snapshot_path())
+    rows: list[ReportRow] = []
+    speed: dict[str, float] = {}
+    for model, candidate in CANDIDATES.items():
+        path = bakeoff_dir() / f"{model}.npz"
+        if not path.exists():
+            print(f"skip      {model}: not scored", file=sys.stderr)
+            continue
+        try:
+            probs, speed[model] = load_probs(path, items)
+        except ValueError as error:
+            print(
+                f"error     {model}: stored scores do not match the current items ({error}); "
+                f"run `score --model {model}`",
+                file=sys.stderr,
+            )
+            return 2
+        scored = [bakeoff.Scored(i, p) for i, p in zip(items, probs, strict=True)]
+        train = [s for s in scored if s.item.dataset == "scifact-train"]
+        dev = [s for s in scored if s.item.dataset == "scifact-dev"]
+        ave = [s for s in scored if s.item.dataset == "averitec"]
+        for k in bakeoff.KS:
+            for aggregation in bakeoff.AGGREGATIONS:
+                thresholds = bakeoff.calibrate(
+                    bakeoff.calibration_rows(train, k=k, aggregation=aggregation)
+                )
+                rows.append(
+                    ReportRow(
+                        bakeoff.Combo(model, k, aggregation),
+                        candidate.large,
+                        thresholds,
+                        bakeoff.evaluate_scifact(dev, thresholds, k=k, aggregation=aggregation),
+                        bakeoff.evaluate_averitec(
+                            snapshot, ave, thresholds, k=k, aggregation=aggregation
+                        ),
+                    )
+                )
+    if "base" not in speed:
+        print(
+            "error     the baseline model is not scored; run `score --model base`", file=sys.stderr
+        )
+        return 2
+    outcomes = [
+        bakeoff.Outcome(
+            r.combo,
+            r.large,
+            r.scifact.macro_f1,
+            r.averitec.accuracy_readable,
+            r.scifact.asserted_without_passage + r.averitec.asserted_without_passage,
+        )
+        for r in rows
+    ]
+    choice = bakeoff.choose(outcomes, baseline=BASELINE)
+    counts = {
+        "scifact-train": sum(i.dataset == "scifact-train" for i in items),
+        "scifact-dev": sum(i.dataset == "scifact-dev" for i in items),
+        "averitec": len(snapshot),
+    }
+    report = render_report(
+        rows,
+        choice,
+        speed=speed,
+        sizes={model: model_size_mb(model) for model in speed},
+        counts=counts,
+        today=date.today().isoformat(),
+        machine=f"{platform.system()} {platform.machine()}",
+    )
+    out = (
+        Path(args.out)
+        if args.out
+        else Path("docs/eval") / f"{date.today().isoformat()}-nli-bakeoff.md"
+    )
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(report, encoding="utf-8")
+    print(report)
+    print(f"written   {out}")
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
