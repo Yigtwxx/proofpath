@@ -8,6 +8,7 @@ from math import ceil
 from rich.text import Text
 from textual.content import Content
 from textual.style import Style
+from textual.widget import Widget
 from textual.widgets import Static
 
 from proofpath.tui.commands import DESCRIPTIONS, NEEDS_ARGUMENT
@@ -82,7 +83,10 @@ class Suggestions(Static):
         self._indicators: tuple[bool, bool] = (False, False)
 
     @property
-    def visible(self) -> bool:
+    def showing(self) -> bool:
+        """Whether the list is displayed. Not ``visible``: Textual's own property of
+        that name reads the ``visibility`` rule and is settable, and shadowing it with
+        a read-only ``display`` reading would change what Textual itself sees."""
         return self.display
 
     @property
@@ -247,7 +251,7 @@ class Suggestions(Static):
         # widget is still ``display: none``) the container's, less this widget's own
         # gutter, which is what the layout is about to give it.
         width = self.size.width
-        if not width and self.parent is not None:
+        if not width and isinstance(self.parent, Widget):
             width = self.parent.size.width - self.styles.gutter.width
         return width or DEFAULT_WIDTH
 

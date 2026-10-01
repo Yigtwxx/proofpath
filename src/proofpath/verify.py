@@ -518,7 +518,7 @@ def target_document(
     address = _bare_address(target)
     if address is not None:
         return _address_document(address, client, fetcher, network_allowed=network_allowed)[0]
-    if _is_file(target):
+    if isinstance(target, Path) or _is_file(target):
         return ingest.load(Path(target))
     return _pasted(target, name or "pasted text")
 
@@ -812,13 +812,13 @@ def prepare(
     # and some text to search. The three branches below all start from this same
     # question, so it is asked once instead of being spelled out three times.
     searchable = not document.references and unmarked and bool(document.paragraphs)
-    chosen: claims_mod.Checkworthy | None = None
+    worthy: claims_mod.Checkworthy | None = None
     if searchable and allowed and engine.search and engine.searcher is not None:
-        chosen = claims_mod.checkworthy(document, limit=engine.config.search.max_claims)
+        worthy = claims_mod.checkworthy(document, limit=engine.config.search.max_claims)
     # A text with no sentence to search ("???", a row of emoji) is not searched: a
     # Searching stage over nothing would end the run with no finding at all, which
     # reads as clean (product rule 6). It keeps the parse error below instead.
-    will_search = chosen is not None and bool(chosen.claims)
+    will_search = worthy is not None and bool(worthy.claims)
     if sourceless and not will_search:
         if searchable and engine.search and engine.search_problem and allowed:
             # A provider was configured and cannot run. The fix is one setting, so
@@ -931,10 +931,10 @@ def prepare(
     # found (``origin="search"``). From here on every stage runs exactly as it does
     # for a cited source.
     search: SearchSummary | None = None
-    if will_search and chosen is not None:
-        found = _search(
+    if will_search and worthy is not None:
+        searched = _search(
             document,
-            chosen,
+            worthy,
             engine,
             add=add,
             emit=emit,
@@ -942,7 +942,7 @@ def prepare(
             opened=opened,
             closed=closed,
         )
-        document, claims, search = found.document, found.claims, found.summary
+        document, claims, search = searched.document, searched.claims, searched.summary
 
     # --- 3. resolving -------------------------------------------------------
     began = opened(RESOLVING, RESOLVERS_BY)

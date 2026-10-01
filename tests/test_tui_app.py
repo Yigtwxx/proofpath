@@ -2069,7 +2069,7 @@ async def test_a_slash_lists_every_verb_in_order_with_the_first_selected() -> No
         await type_into(pilot, "/")
         prompt = app.query_one(Prompt)
         suggestions = app.query_one(Suggestions)
-        assert suggestions.visible
+        assert suggestions.showing
         assert prompt.value == "/"
         assert prompt.candidates == tuple(_completion(verb) for verb in commands.VERBS)
         assert prompt.selected == 0
@@ -2095,15 +2095,15 @@ async def test_the_list_narrows_per_keystroke_and_goes_when_nothing_matches() ->
     async with app.run_test(size=SIZE) as pilot:
         suggestions = app.query_one(Suggestions)
         await type_into(pilot, "/h")
-        assert suggestions.visible
+        assert suggestions.showing
         assert [row[2:].split("  ")[0] for row in suggestions.held] == ["/help"]
         await type_into(pilot, "e")
-        assert suggestions.visible
+        assert suggestions.showing
         assert app.query_one(Prompt).candidates == ("/help",)
         await pilot.press("backspace", "backspace")
         await type_into(pilot, "x")
         assert app.query_one(Prompt).value == "/x"
-        assert suggestions.visible is False
+        assert suggestions.showing is False
 
 
 async def test_a_verb_with_its_space_suggests_nothing_but_allow_and_cancel_do() -> None:
@@ -2111,10 +2111,10 @@ async def test_a_verb_with_its_space_suggests_nothing_but_allow_and_cancel_do() 
     async with app.run_test(size=SIZE) as pilot:
         suggestions = app.query_one(Suggestions)
         await type_into(pilot, "/check ")
-        assert suggestions.visible is False
+        assert suggestions.showing is False
         await pilot.press(*(["backspace"] * len("/check ")))
         await type_into(pilot, "/allow ")
-        assert suggestions.visible
+        assert suggestions.showing
         assert [row[2:].split("  ")[0] for row in suggestions.held] == [
             f"/allow {answer}" for answer in commands.ALLOW_ANSWERS
         ]
@@ -2125,7 +2125,7 @@ async def test_a_verb_with_its_space_suggests_nothing_but_allow_and_cancel_do() 
         await submit(pilot, "/check one.pdf")
         assert schedulers[0].runs[0].state == "queued"
         await type_into(pilot, "/cancel ")
-        assert suggestions.visible
+        assert suggestions.showing
         assert [row[2:].split("  ")[0] for row in suggestions.held] == ["/cancel #1"]
 
 
@@ -2149,7 +2149,7 @@ async def test_arrows_move_the_selection_and_tab_takes_the_selected_row() -> Non
         await pilot.press("tab")
         assert prompt.value == chosen
         # The cycle stays on show, with its siblings, so a further ``tab`` steps on.
-        assert suggestions.visible
+        assert suggestions.showing
         assert prompt.selected == 2 and suggestions.held[2].startswith("> ")
         await pilot.press("tab")
         assert prompt.value == _completion("config")
@@ -2165,12 +2165,12 @@ async def test_enter_runs_what_is_in_the_bar_and_the_list_goes() -> None:
     async with app.run_test(size=SIZE) as pilot:
         suggestions = app.query_one(Suggestions)
         await type_into(pilot, "/help")
-        assert suggestions.visible
+        assert suggestions.showing
         await pilot.press("enter")
         await pilot.pause()
         assert f"/check {commands.NEEDS_ARGUMENT['check']}" in _notes(app)
         assert app.query_one(Prompt).value == ""
-        assert suggestions.visible is False
+        assert suggestions.showing is False
 
 
 async def test_the_selection_never_walks_the_history_and_a_recalled_line_shows_no_list() -> None:
@@ -2186,12 +2186,12 @@ async def test_the_selection_never_walks_the_history_and_a_recalled_line_shows_n
         await pilot.press("up")
         assert prompt.value == "/"
         await pilot.press("backspace")
-        assert suggestions.visible is False
+        assert suggestions.showing is False
         # With the list hidden the keys are the walk again, and a recalled line does
         # not open the list over itself: the next ``up`` walks on.
         await pilot.press("up")
         assert prompt.value == "/cache"
-        assert suggestions.visible is False
+        assert suggestions.showing is False
         await pilot.press("up")
         assert prompt.value == "/help"
         await pilot.press("down", "down")
@@ -2200,10 +2200,10 @@ async def test_the_selection_never_walks_the_history_and_a_recalled_line_shows_n
         await pilot.press("up")
         await type_into(pilot, "x")
         assert prompt.value == "/cachex"
-        assert suggestions.visible is False
+        assert suggestions.showing is False
         await pilot.press("backspace", "backspace", "backspace")
         assert prompt.value == "/cac"
-        assert suggestions.visible
+        assert suggestions.showing
 
 
 async def test_tab_on_a_recalled_slash_line_brings_the_list_back() -> None:
@@ -2214,11 +2214,11 @@ async def test_tab_on_a_recalled_slash_line_brings_the_list_back() -> None:
         suggestions = app.query_one(Suggestions)
         await pilot.press("up")
         assert prompt.value == "/con"
-        assert suggestions.visible is False  # a recalled line shows no list over itself
+        assert suggestions.showing is False  # a recalled line shows no list over itself
         await pilot.press("tab")
         # "con" completes to one candidate; ``tab`` both takes it and reopens the list.
         assert prompt.value == "/config"
-        assert suggestions.visible
+        assert suggestions.showing
         assert prompt.candidates == ("/config",)
         assert prompt.selected == 0
         assert suggestions.held[0].endswith(commands.DESCRIPTIONS["config"])
@@ -2237,7 +2237,7 @@ async def test_the_list_never_covers_the_log_and_the_bottom_grows_by_its_rows() 
         log_height = log.region.height
         await type_into(pilot, "/c")
         await pilot.pause()
-        assert suggestions.visible
+        assert suggestions.showing
         assert len(suggestions.held) == 4
         assert suggestions.drawn == suggestions.held  # four candidates, nothing capped
         assert bottom.region.height == 4 + len(suggestions.drawn)
@@ -2271,7 +2271,7 @@ async def test_the_list_never_covers_the_log_and_the_bottom_grows_by_its_rows() 
         await pilot.pause()
         limit = 20 - banner - footer.rows - frame.rows - 1
         assert 0 < limit < len(commands.VERBS)
-        assert suggestions.visible
+        assert suggestions.showing
         first, last = suggestions.window
         assert (first, last) != (0, len(commands.VERBS))
         assert first == 0  # the selection (row 0) is still at the top
@@ -2311,7 +2311,7 @@ async def test_the_list_never_covers_the_log_and_the_bottom_grows_by_its_rows() 
 
         await pilot.press("backspace")
         await pilot.pause()
-        assert suggestions.visible is False
+        assert suggestions.showing is False
         assert bottom.region.height == 4
         assert log.region.height == log_height
 
@@ -2417,7 +2417,7 @@ async def test_a_held_paste_never_opens_the_list() -> None:
         assert prompt.held == "/help\n/config"
         assert prompt.value.startswith("pasted")
         assert HELD_SUMMARY.startswith("pasted")
-        assert app.query_one(Suggestions).visible is False
+        assert app.query_one(Suggestions).showing is False
 
 
 # --- the log from the keyboard ------------------------------------------------------
@@ -2604,7 +2604,7 @@ async def test_a_slash_after_clicking_a_finding_brings_the_list_up() -> None:
         prompt = app.query_one(Prompt)
         assert app.focused is prompt
         assert prompt.value == "/"
-        assert app.query_one(Suggestions).visible
+        assert app.query_one(Suggestions).showing
         assert len(app.query_one(Suggestions).held) == len(commands.VERBS)
 
 

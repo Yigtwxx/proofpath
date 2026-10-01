@@ -1484,8 +1484,8 @@ def _queries_from(text: str, count: int) -> dict[int, JudgedClaim]:
             if not isinstance(entry, dict):
                 continue
             try:
-                ident = int(entry.get("id"))
-            except (TypeError, ValueError):
+                ident = int(entry["id"])
+            except (KeyError, TypeError, ValueError):
                 continue
             if not 0 <= ident < count:
                 continue

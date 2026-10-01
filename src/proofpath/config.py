@@ -152,10 +152,10 @@ def _coerce(section: str, key: str, value: Any, expected: Any, path: Path) -> An
             return value
         raise ConfigError(f"{path}: {where} must be a string, got {value!r}")
     if get_origin(expected) is Literal:
-        choices = get_args(expected)
-        if isinstance(value, str) and value in choices:
+        options = get_args(expected)
+        if isinstance(value, str) and value in options:
             return value
-        raise ConfigError(f"{path}: {where} must be one of {', '.join(choices)}, got {value!r}")
+        raise ConfigError(f"{path}: {where} must be one of {', '.join(options)}, got {value!r}")
     if expected is int:
         # ``bool`` is an ``int`` to Python and a different answer to a reader.
         if isinstance(value, int) and not isinstance(value, bool) and value >= 1:
