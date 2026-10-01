@@ -69,7 +69,9 @@ RICH_WIDTH_FLOOR = MARK_WIDTH + banner.RIGHT_MARGIN + 1
 class ThemeLike(Protocol):
     """What :func:`render` needs of a theme: its name."""
 
-    name: str
+    # Read-only, so a frozen ``Theme`` with a ``Literal`` name satisfies it.
+    @property
+    def name(self) -> str: ...
 
 
 #: The three things :func:`rows` can decide: no mark at all (``narrow``), the texts

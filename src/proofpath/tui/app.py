@@ -426,7 +426,9 @@ class ProofpathApp(App[None]):
                 return "no"  # asked while the app was already leaving
             answer: Future[Answer] = Future()
             try:
-                self.call_from_thread(self._open_prompt, owner, host, status, answer)
+                # Textual types the callback as ``Callable[..., T | Awaitable[T]]``, and
+                # mypy solves ``T`` for a coroutine function as ``Never``: a stub limit.
+                self.call_from_thread(self._open_prompt, owner, host, status, answer)  # type: ignore[arg-type]
             except Exception:
                 return "no"
             return answer.result()
@@ -592,7 +594,7 @@ class ProofpathApp(App[None]):
     def on_resize(self, event: tevents.Resize) -> None:
         # The event's size, not ``self.size``: the app's own is a step behind here.
         self._fit_bottom(event.size.width)
-        if self.query_one(Suggestions).visible:
+        if self.query_one(Suggestions).showing:
             self._refresh_suggestions(event.size)
 
     def _fit_bottom(self, width: int | None = None) -> None:
