@@ -963,8 +963,15 @@ async def test_the_config_panel_marks_the_row_badges_the_value_and_wears_the_acc
     assert spans["allow"] == RICH.tone("muted")
     assert spans[marker] == ACCENT
     assert plain[-1] == " ↑↓ row   ←→ change   enter edit text   backspace default   esc close"
+    # The NLI profile row is a choice row like the rest: the default profile badged.
+    nli = next(line for line in lines if line.plain.startswith("  nli "))
+    assert nli.plain == "  nli               default   accurate"
+    nli_spans = {nli.plain[span.start : span.end]: str(span.style) for span in nli.spans}
+    assert nli_spans[" default "] == f"{BADGE_INK} on {ACCENT}"
+    assert nli_spans["accurate"] == RICH.tone("muted")
     # The marker moves with the selection and nothing else about the rows changes.
-    assert next(line for line in moved if "network" in line).startswith(f"{marker} network")
+    selected = next(line for line in moved if "install_model" in line)
+    assert selected.startswith(f"{marker} install_model")
     assert next(line for line in moved if "install_browser" in line).startswith("  install")
     # Single-cell glyphs throughout, and every row but the two that carry a path (the
     # machine's, as long as it is) fits inside the panel at 100 columns.

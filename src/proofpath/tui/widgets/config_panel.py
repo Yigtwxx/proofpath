@@ -42,12 +42,14 @@ from textual.widgets import Input, Static
 from proofpath import ui
 from proofpath.commands import ConfigView, config_set, config_view
 from proofpath.config import (
+    NLI_PROFILE_NAMES,
     PERMISSION_VALUES,
     SEARCH_PROVIDERS,
     ConfigError,
     Contact,
     FetchConfig,
     JudgeConfig,
+    ModelsConfig,
     Permissions,
     SearchConfig,
 )
@@ -128,7 +130,7 @@ def sections() -> tuple[Section, ...]:
     """The panel's rows in the config's own order. Built, not constant, because the
     provider list is the judge module's, and the defaults are the dataclasses' own."""
     permissions, fetch, judge, contact = Permissions(), FetchConfig(), JudgeConfig(), Contact()
-    search = SearchConfig()
+    search, models = SearchConfig(), ModelsConfig()
     return (
         Section(
             "permissions",
@@ -139,6 +141,13 @@ def sections() -> tuple[Section, ...]:
                     PERMISSION_VALUES,
                     "step 3 of the fetch ladder: a ~280 MB browser engine, spec section 7.1",
                     _default(permissions.install_browser),
+                ),
+                Row(
+                    "permissions.install_model",
+                    "choice",
+                    PERMISSION_VALUES,
+                    "the accurate NLI model, a 643 MB download; deny = the default profile",
+                    _default(permissions.install_model),
                 ),
                 Row(
                     "permissions.network",
@@ -228,6 +237,20 @@ def sections() -> tuple[Section, ...]:
                     (),
                     "optional, for the Crossref / OpenAlex polite pools",
                     _default(contact.email),
+                ),
+            ),
+        ),
+        Section(
+            "models",
+            (
+                # The measured gain, so the choice is made knowing what it buys and
+                # what it does not (spec 2026-10-01, "Why"): scientific sources only.
+                Row(
+                    "models.nli",
+                    "choice",
+                    NLI_PROFILE_NAMES,
+                    "accurate: 643 MB, on consent; SciFact F1 0.697 vs 0.580, not news",
+                    _default(models.nli),
                 ),
             ),
         ),
@@ -864,7 +887,11 @@ class ConfigPanel(Vertical):
         )
 
     def _draw_summary(self) -> Text:
-        """The one-line record: the settings a run decides by, as the file has them."""
+        """The one-line record: the settings a run decides by, as the file has them.
+
+        ``install_model`` is left out to keep it one line at 100 columns: it only matters
+        once ``nli=accurate`` is chosen, and the open panel shows it.
+        """
         config = self._view.config
         parts = (
             f"install_browser={config.permissions.install_browser}",
@@ -872,5 +899,6 @@ class ConfigPanel(Vertical):
             f"respect_robots={_default(config.fetch.respect_robots)}",
             f"judge={config.judge.provider}",
             f"search={config.search.provider}",
+            f"nli={config.models.nli}",
         )
         return Text("  config  " + "  ".join(parts))

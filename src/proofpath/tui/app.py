@@ -85,6 +85,7 @@ from proofpath.tui.widgets import (
     Suggestions,
     accent_for,
     panelled,
+    permission_question,
 )
 from proofpath.verify import Engine
 
@@ -414,21 +415,24 @@ class ProofpathApp(App[None]):
     # --- the section 7.1 prompt, inline ---------------------------------------------
 
     def _prompt_for(self, owner: int) -> Callable[[str, int | None], Answer]:
-        """The gate's prompt, for one asker. Runs on that asker's worker thread.
+        """The gates' prompt, for one asker. Runs on that asker's worker thread.
 
-        The thread blocks on a future while the event loop draws the question and
-        waits for a button or an ``/allow`` line. An app that is already gone answers
-        ``no``: nothing large is installed without an answer (rule 5).
+        One callable for both consent gates: the browser gate passes the host that
+        blocked a fetch, the model gate a ``model:<profile>`` subject, and
+        :func:`permission_question` draws whichever block that is. The thread blocks
+        on a future while the event loop draws the question and waits for a button
+        or an ``/allow`` line. An app that is already gone answers ``no``: nothing
+        large is installed or downloaded without an answer (rule 5).
         """
 
-        def ask(host: str, status: int | None) -> Answer:
+        def ask(subject: str, status: int | None) -> Answer:
             if self._quitting:
                 return "no"  # asked while the app was already leaving
             answer: Future[Answer] = Future()
             try:
                 # Textual types the callback as ``Callable[..., T | Awaitable[T]]``, and
                 # mypy solves ``T`` for a coroutine function as ``Never``: a stub limit.
-                self.call_from_thread(self._open_prompt, owner, host, status, answer)  # type: ignore[arg-type]
+                self.call_from_thread(self._open_prompt, owner, subject, status, answer)  # type: ignore[arg-type]
             except Exception:
                 return "no"
             return answer.result()
@@ -436,7 +440,7 @@ class ProofpathApp(App[None]):
         return ask
 
     async def _open_prompt(
-        self, owner: int, host: str, status: int | None, answer: Future[Answer]
+        self, owner: int, subject: str, status: int | None, answer: Future[Answer]
     ) -> None:
         """Mount the question where it happened. Loop thread only."""
         if self._quitting:
@@ -446,7 +450,8 @@ class ProofpathApp(App[None]):
             answer.set_result("no")
             return
         self.pending[owner] = answer
-        widget = PermissionPrompt(owner, host, status, self._out, self._theme)
+        question = permission_question(subject, status)
+        widget = PermissionPrompt(owner, question, self._out, self._theme)
         home: RunBlock | CommandBlock | None = (
             self._blocks.get(owner) if owner > 0 else self._command_blocks.get(owner)
         )
@@ -1038,7 +1043,8 @@ class ProofpathApp(App[None]):
         """
         if not self.pending:
             self._note(
-                "nothing to allow — the question appears under the stage a site blocks; "
+                "nothing to allow — the question appears under the stage that needs it "
+                "(a blocked site or a model download); "
                 "answer it there, or with /allow " + "|".join(commands.ALLOW_ANSWERS)
             )
             return

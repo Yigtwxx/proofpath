@@ -31,8 +31,10 @@ from proofpath.config import Config, ConfigError, JudgeConfig, Permissions, load
 from proofpath.document import Document, Locator, Reference
 from proofpath.events import Emitted, Event, Note, Progress, Prompted, StageEnd, StageStart
 from proofpath.judge import JudgeCost, JudgeError, provider_defaults
+from proofpath.model_gate import ModelGate, model_prompt_text, prompt_subject
 from proofpath.models import Label, Passage, Verdict
 from proofpath.paths import config_path
+from proofpath.profiles import ACCURATE_PROFILE
 from proofpath.report import Coverage, Finding, Kind, Report, summary_silence
 from proofpath.resolve import Candidate, ResolveResult
 from proofpath.resolve import State as ResolveState
@@ -1295,6 +1297,89 @@ async def test_allow_with_nothing_pending_says_so() -> None:
     # The note says where the question appears and what answers it (spec 13.1).
     assert "/allow " + "|".join(commands.ALLOW_ANSWERS) in note
     assert "/allow once|always|no|never" in note
+
+
+# --- the accurate NLI profile's download question, in the same widget --------------
+
+
+def ask_model_from_a_worker(app: ProofpathApp, owner: int) -> Future[Any]:
+    """Ask the app's prompt the way ``ModelGate`` asks it: the model subject, no status.
+
+    The engine hands both gates the same callable, so this is the one a run's model
+    gate blocks on when the accurate profile is not downloaded yet.
+    """
+    ask = app._prompt_for(owner)
+    return in_a_worker(lambda: ask(prompt_subject(ACCURATE_PROFILE), None))
+
+
+async def test_a_model_question_shows_the_models_own_text_and_a_click_settles_it() -> None:
+    app, schedulers = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "/check draft.md")
+        answer = ask_model_from_a_worker(app, schedulers[0].runs[0].id)
+        await until(pilot, lambda: app.query(PermissionPrompt), "the prompt to be mounted")
+        prompt = app.query_one(PermissionPrompt)
+        text = prompt.question
+        # The terminal's block word for word, with the bar's answers as the last line
+        # (rule 5: the size is on screen before anything is fetched).
+        assert text == model_prompt_text(ACCURATE_PROFILE, answers=browser.TUI_ANSWERS)
+        assert ACCURATE_PROFILE.repo in text
+        assert "643 MB" in text
+        # Not the browser's question about a blocked site.
+        assert browser.BROWSER_SIZE not in text
+        assert "model:" not in text
+        await click(pilot, "#allow-once")
+        assert await answered(pilot, answer) == "once"
+        assert prompt.answer == "once"
+        assert app.pending == {}
+
+
+async def test_allow_answers_a_model_question_like_a_browser_one() -> None:
+    app, schedulers = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "/check draft.md")
+        answer = ask_model_from_a_worker(app, schedulers[0].runs[0].id)
+        await until(pilot, lambda: app.query(PermissionPrompt), "the prompt")
+        await submit(pilot, "/allow always")
+        assert await answered(pilot, answer) == "always"
+        prompt = app.query_one(PermissionPrompt)
+        assert prompt.answer == "always"
+        assert all(button.disabled for button in prompt.query(Button))
+        assert app.pending == {}
+
+
+async def test_quitting_answers_an_open_model_question_with_no() -> None:
+    """Rule 5: an app on its way out installs nothing; "no" downloads nothing."""
+    app, schedulers = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "/check draft.md")
+        answer = ask_model_from_a_worker(app, schedulers[0].runs[0].id)
+        await until(pilot, lambda: app.query(PermissionPrompt), "the prompt")
+        await submit(pilot, "/quit")
+        await pilot.pause()
+    assert answer.result(timeout=15) == "no"
+
+
+async def test_the_tui_model_question_drives_the_real_gate_to_a_download() -> None:
+    """The gate's own prompt call reaches the widget, and its answer reaches the gate."""
+    downloaded: list[str] = []
+    app, schedulers = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "/check draft.md")
+        gate = ModelGate(
+            "ask",
+            interactive=True,
+            prompt=app._prompt_for(schedulers[0].runs[0].id),
+            download=lambda profile: downloaded.append(profile.name),
+            installed=lambda profile: False,
+        )
+        decision = in_a_worker(lambda: gate.ensure(ACCURATE_PROFILE))
+        await until(pilot, lambda: app.query(PermissionPrompt), "the prompt")
+        assert ACCURATE_PROFILE.repo in app.query_one(PermissionPrompt).question
+        await submit(pilot, "/allow once")
+        result = await answered(pilot, decision)
+    assert result.outcome == "allow" and result.reason == "user answered once"
+    assert downloaded == ["accurate"]
 
 
 def test_the_footer_hint_for_skipped_sources_names_the_setting() -> None:
@@ -3005,6 +3090,19 @@ async def written(pilot: Any, key: str, value: str) -> None:
     )
 
 
+async def select_row(pilot: Any, panel: ConfigPanel, key: str) -> None:
+    """Move the selection to ``key``'s row with the arrow keys, the way a user does.
+
+    By the row's key rather than a count of presses, so a row added to the panel
+    does not silently send every later test to the row above the one it meant.
+    """
+    index = next(i for i, row in enumerate(panel.rows) if row.key == key)
+    steps = index - panel.selected
+    if steps:
+        await pilot.press(*["down" if steps > 0 else "up"] * abs(steps))
+    assert panel.selected == index
+
+
 @pytest.mark.usefixtures("no_keys")
 async def test_config_opens_the_settings_panel_and_reads_the_file() -> None:
     app, _ = build_app()
@@ -3020,7 +3118,7 @@ async def test_config_opens_the_settings_panel_and_reads_the_file() -> None:
     assert "(not written yet, showing defaults)" in lines[0]
     assert lines[1].startswith(" key      GROQ_API_KEY")
     assert "not set" in lines[1] and "GROQ_API_KEY=" in lines[1]
-    for heading in ("permissions", "fetch", "judge", "contact"):
+    for heading in ("permissions", "fetch", "judge", "contact", "models"):
         assert f" {heading}" in lines
 
 
@@ -3054,6 +3152,7 @@ async def test_the_rows_come_in_the_configs_order_and_the_selection_stays_inside
         panel = await open_panel(pilot)
         assert [row.key for row in panel.rows] == [
             "permissions.install_browser",
+            "permissions.install_model",
             "permissions.network",
             "permissions.web_search",
             "fetch.respect_robots",
@@ -3067,8 +3166,10 @@ async def test_the_rows_come_in_the_configs_order_and_the_selection_stays_inside
             "search.api_key_env",
             "search.api_key",
             "contact.email",
+            "models.nli",
         ]
         assert [row.kind for row in panel.rows] == [
+            "choice",
             "choice",
             "choice",
             "choice",
@@ -3083,14 +3184,15 @@ async def test_the_rows_come_in_the_configs_order_and_the_selection_stays_inside
             "text",
             "secret",
             "text",
+            "choice",
         ]
         assert panel.selected == 0
         assert _panel_row(panel, "install_browser").startswith("> install_browser")
-        await pilot.press(*["down"] * 13)
-        assert panel.selected == 13
-        assert _panel_row(panel, "email").startswith("> email")
+        await pilot.press(*["down"] * 15)
+        assert panel.selected == 15
+        assert _panel_row(panel, "nli").startswith("> nli")
         assert _panel_row(panel, "install_browser").startswith("  install_browser")
-        await pilot.press(*["up"] * 14)
+        await pilot.press(*["up"] * 16)
         assert panel.selected == 0
     # The file was only read: moving through the rows writes nothing.
     assert not config_path().exists()
@@ -3464,13 +3566,71 @@ async def test_a_choice_row_writes_at_once_and_wraps() -> None:
 
 
 @pytest.mark.usefixtures("no_keys")
+async def test_the_model_rows_show_their_choices_and_meanings() -> None:
+    app, _ = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        panel = await open_panel(pilot)
+        rows = {row.key: row for row in panel.rows}
+        lines = _shown(panel)
+    install = rows["permissions.install_model"]
+    assert install.values == ("ask", "allow", "deny")
+    assert install.default == "ask"
+    nli = rows["models.nli"]
+    assert nli.values == ("default", "accurate")
+    assert nli.default == "default"
+    assert "  install_model     [ask]   allow   deny" in lines
+    assert "  nli               [default]   accurate" in lines
+    # Each meaning sits on the line under its row: the download it costs, and what
+    # the larger model buys (and does not).
+    install_meaning = lines[lines.index("  install_model     [ask]   allow   deny") + 1]
+    assert "643 MB" in install_meaning
+    nli_meaning = lines[lines.index("  nli               [default]   accurate") + 1]
+    for part in ("643 MB", "consent", "SciFact", "0.697", "0.580", "news"):
+        assert part in nli_meaning, part
+    # Both fit inside the panel's frame on an 80-column terminal.
+    assert len(install_meaning) <= SIZE[0] - 6 and len(nli_meaning) <= SIZE[0] - 6
+
+
+@pytest.mark.usefixtures("no_keys")
+async def test_the_model_rows_write_through_the_panel() -> None:
+    app, _ = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        panel = await open_panel(pilot)
+        await select_row(pilot, panel, "permissions.install_model")
+        await pilot.press("right")
+        await written(pilot, "permissions.install_model", "allow")
+        assert load_config().permissions.install_model == "allow"
+        assert app._config.permissions.install_model == "allow"
+        assert _panel_row(panel, "install_model") == "> install_model     ask   [allow]   deny"
+        await pilot.press("backspace")
+        await written(pilot, "permissions.install_model", "ask")
+        assert load_config().permissions.install_model == "ask"
+
+        await select_row(pilot, panel, "models.nli")
+        await pilot.press("right")
+        await written(pilot, "models.nli", "accurate")
+        assert load_config().models.nli == "accurate"
+        assert app._config.models.nli == "accurate"
+        assert panel.value("models.nli") == "accurate"
+        assert _panel_row(panel, "nli") == "> nli               default   [accurate]"
+        await pilot.press("right")  # wraps back to the first choice
+        await written(pilot, "models.nli", "default")
+        assert load_config().models.nli == "default"
+        await pilot.press("left", "escape")
+        await pilot.pause()
+        assert panel.collapsed
+        assert _panel_text(panel).endswith("  nli=accurate")
+
+
+@pytest.mark.usefixtures("no_keys")
 async def test_the_network_row_drives_the_banner() -> None:
     app, _ = build_app()
     async with app.run_test(size=SIZE) as pilot:
         row = wordmark.rows(80, version=__version__, context=run_context(Config()), hint=HINT)
         assert " online " in _banner_lines(app)[row.version]
-        await open_panel(pilot)
-        await pilot.press("down", "right")  # network: allow -> deny
+        panel = await open_panel(pilot)
+        await select_row(pilot, panel, "permissions.network")
+        await pilot.press("right")  # network: allow -> deny
         await written(pilot, "permissions.network", "deny")
         assert app._config.permissions.network == "deny"
         await until(
@@ -3493,7 +3653,8 @@ async def test_a_bool_row_round_trips_through_the_file() -> None:
     app, _ = build_app()
     async with app.run_test(size=SIZE) as pilot:
         panel = await open_panel(pilot)
-        await pilot.press("down", "down", "down", "right")
+        await select_row(pilot, panel, "fetch.respect_robots")
+        await pilot.press("right")
         await written(pilot, "fetch.respect_robots", "false")
         assert load_config().fetch.respect_robots is False
         assert panel.value("fetch.respect_robots") == "false"
@@ -3508,8 +3669,9 @@ async def test_a_provider_switch_writes_four_and_moves_the_key_line() -> None:
     app, _ = build_app()
     async with app.run_test(size=SIZE) as pilot:
         panel = await open_panel(pilot)
-        assert panel.rows[4].values == ("gemini", "groq", "ollama")
-        await pilot.press("down", "down", "down", "down", "left")  # groq -> gemini
+        await select_row(pilot, panel, "judge.provider")
+        assert panel.rows[panel.selected].values == ("gemini", "groq", "ollama")
+        await pilot.press("left")  # groq -> gemini
         await written(pilot, "judge.api_key_env", "GEMINI_API_KEY")
         gemini = provider_defaults("gemini")
         assert load_config().judge == gemini
@@ -3537,7 +3699,7 @@ async def test_a_provider_outside_the_known_choices_is_drawn_honestly() -> None:
         panel = await open_panel(pilot)
         row = _panel_row(panel, "provider")
         assert row == "  provider          gemini   groq   ollama   [openrouter]"
-        await pilot.press("down", "down", "down", "down")  # install_browser -> ... -> provider
+        await select_row(pilot, panel, "judge.provider")
         await pilot.press("right")  # cycles from the first choice, not from "nowhere"
         await written(pilot, "judge.provider", "gemini")
 
@@ -3547,7 +3709,8 @@ async def test_a_provider_without_a_key_variable_says_none_is_needed() -> None:
     app, _ = build_app()
     async with app.run_test(size=SIZE) as pilot:
         panel = await open_panel(pilot)
-        await pilot.press("down", "down", "down", "down", "right")  # groq -> ollama
+        await select_row(pilot, panel, "judge.provider")
+        await pilot.press("right")  # groq -> ollama
         await written(pilot, "judge.provider", "ollama")
         text = _panel_text(panel)
     assert " key      not needed" in text
@@ -3562,7 +3725,8 @@ async def test_a_text_row_is_edited_in_place() -> None:
     default = JudgeConfig().model
     async with app.run_test(size=SIZE) as pilot:
         panel = await open_panel(pilot)
-        await pilot.press("down", "down", "down", "down", "down", "enter")
+        await select_row(pilot, panel, "judge.model")
+        await pilot.press("enter")
         await pilot.pause()
         assert panel.editing
         edit = panel.query_one(Input)
@@ -3596,7 +3760,8 @@ async def test_an_empty_text_row_shows_unset_and_its_note() -> None:
         assert _panel_row(panel, "email") == (
             "  email             (unset) , optional, for the Crossref / OpenAlex polite pools"
         )
-        await pilot.press(*["down"] * 13, "enter")
+        await select_row(pilot, panel, "contact.email")
+        await pilot.press("enter")
         await pilot.pause()
         await until(pilot, lambda: app.focused is panel.query_one(Input), "the edit")
         assert panel.query_one(Input).value == ""
@@ -3617,7 +3782,8 @@ async def test_backspace_resets_a_row_to_its_default() -> None:
         await written(pilot, "permissions.install_browser", "ask")
         assert load_config().permissions.install_browser == "ask"
         assert panel.value("permissions.install_browser") == "ask"
-        await pilot.press("down", "down", "down", "down", "left")
+        await select_row(pilot, panel, "judge.provider")
+        await pilot.press("left")
         await written(pilot, "judge.provider", "gemini")
         before = _notes(app).count("judge.")
         await pilot.press("backspace")
@@ -3680,14 +3846,15 @@ async def test_escape_collapses_the_panel_to_one_line_and_focuses_the_bar() -> N
     app, _ = build_app()
     async with app.run_test(size=SIZE) as pilot:
         panel = await open_panel(pilot)
-        await pilot.press("down", "right", "right")  # network: allow -> deny -> ask
+        await select_row(pilot, panel, "permissions.network")
+        await pilot.press("right", "right")  # network: allow -> deny -> ask
         await written(pilot, "permissions.network", "ask")
         await pilot.press("escape")
         await pilot.pause()
         assert panel.collapsed
         assert _panel_text(panel) == (
-            "  config  install_browser=ask  network=ask  respect_robots=true"
-            "  judge=groq  search=off"
+            "  config  install_browser=ask  network=ask"
+            "  respect_robots=true  judge=groq  search=off  nli=default"
         )
         await until(pilot, lambda: app.focused is app.query_one(Prompt), "the bar to take focus")
         # A collapsed panel is a record: the keys do nothing to it any more.

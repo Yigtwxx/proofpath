@@ -17,6 +17,7 @@ from textual.widgets import Button, Input, Static
 
 from proofpath import ui
 from proofpath.browser import TUI_ANSWERS, Answer, prompt_text
+from proofpath.model_gate import model_prompt_text, subject_profile
 from proofpath.tui import wordmark
 from proofpath.tui.history import History
 from proofpath.tui.theme import Theme
@@ -55,8 +56,27 @@ def tinted(accent: str) -> Color:
     return Color(base.r, base.g, base.b, TINT_ALPHA)
 
 
+def permission_question(subject: str, status: int | None) -> str:
+    """The block a gate's question is drawn with, in the TUI's words.
+
+    Both consent gates ask through the same prompt callable: the browser gate with
+    the host that blocked a fetch, the model gate with a ``model:<profile>`` subject
+    (:func:`proofpath.model_gate.prompt_subject`). Each gets the block its terminal
+    prompt prints, so the two front ends ask the same question in the same words;
+    only the last line differs, naming the buttons and ``/allow`` instead of keys.
+    """
+    profile = subject_profile(subject)
+    if profile is not None:
+        return model_prompt_text(profile, answers=TUI_ANSWERS)
+    return prompt_text(subject, status, answers=TUI_ANSWERS)
+
+
 class PermissionPrompt(Vertical):
-    """The section 7.1 question, asked where it happened (spec section 13.1).
+    """A consent question, asked where it happened (spec section 13.1).
+
+    Either section 7.1's browser question or the accurate NLI profile's download
+    question: the widget takes the block ready-made (:func:`permission_question`)
+    and is the same four buttons and the same ``/allow`` answers for both.
 
     Never a modal: it is mounted inside the block of the run that hit the wall, under
     the stage that hit it, and the log keeps scrolling around it. The four buttons are
@@ -71,14 +91,14 @@ class PermissionPrompt(Vertical):
     thing that may act on it, and the install still happens behind it (rule 5).
     """
 
-    def __init__(self, owner: int, host: str, status: int | None, out: ui.Ui, theme: Theme) -> None:
+    def __init__(self, owner: int, question: str, out: ui.Ui, theme: Theme) -> None:
         super().__init__(classes="permission")
         #: The run this question belongs to, or the negative id of a ``/fetch`` block.
         self.owner = owner
-        #: The section 7.1 block, verbatim: the terminal and the TUI ask the same
+        #: The gate's block, verbatim: the terminal and the TUI ask the same
         #: question, in the same words, about the same download. Only the last line
         #: differs: it names the buttons and the ``/allow`` answers, not the keys.
-        self.question = prompt_text(host, status, answers=TUI_ANSWERS)
+        self.question = question
         self._out = out
         self._theme = theme
         #: The answer once it was given, so a scrolled-back log still says what was

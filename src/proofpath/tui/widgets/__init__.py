@@ -21,6 +21,7 @@ from proofpath.tui.widgets.prompt import (
     PermissionPrompt,
     Prompt,
     PromptFrame,
+    permission_question,
 )
 from proofpath.tui.widgets.run_block import (
     CommandBlock,
@@ -58,5 +59,6 @@ __all__ = [
     "Suggestions",
     "accent_for",
     "panelled",
+    "permission_question",
     "textual_colour",
 ]
