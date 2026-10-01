@@ -10,23 +10,25 @@ cache contract that makes a second run of the same document free (spec section 1
 from __future__ import annotations
 
 import json
+import platform
 import re
 import sqlite3
 import threading
 from collections.abc import Callable, Sequence
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import NoReturn
+from typing import Any, ClassVar, NoReturn
 
 import pytest
 
 from proofpath import ingest as ingest_mod
 from proofpath import oa, pipeline, retrieval
-from proofpath.browser import ConsentGate
+from proofpath import verify as verify_mod
+from proofpath.browser import Answer, ConsentGate
 from proofpath.cache import Cache
-from proofpath.config import Config, Permissions
+from proofpath.config import Config, ModelsConfig, Permission, Permissions
 from proofpath.document import Claim, Document, Locator, PageError
-from proofpath.entailment import Scorer
+from proofpath.entailment import Scorer, pick_onnx_file
 from proofpath.events import (
     Cancelled,
     Emitted,
@@ -38,10 +40,12 @@ from proofpath.events import (
 )
 from proofpath.fetch import Fetched, FetchStats, Outcome
 from proofpath.judge import Completion, Judge, JudgeCost, JudgeUnavailable
+from proofpath.model_gate import ModelGate
 from proofpath.models import Label, Passage, Verdict
 from proofpath.oa import ABSTRACT_ONLY, Attempt, Evidence, Location
 from proofpath.pipeline import Thresholds
 from proofpath.polite import ProviderError
+from proofpath.profiles import ACCURATE_PROFILE, DEFAULT_PROFILE, NliProfile
 from proofpath.report import (
     ABSTRACT_BASIS,
     JUDGE_DETAIL_PREFIX,
@@ -55,7 +59,7 @@ from proofpath.report import (
 )
 from proofpath.resolve import Candidate, ResolveResult, Retraction, State
 from proofpath.retrieval import Embedder
-from proofpath.settings_hints import BROWSER_SETTING
+from proofpath.settings_hints import BROWSER_SETTING, MODEL_ALLOW_SETTING, MODEL_SETTING
 from proofpath.ui import json_text
 from proofpath.verify import (
     CACHE_BY,
@@ -927,6 +931,133 @@ def test_engine_default_never_builds_a_model() -> None:
         assert callable(built.scorer)
 
 
+def test_engine_default_never_builds_a_model_nor_asks_for_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Building the engine for the accurate profile neither reads the model cache nor
+    # asks: both wait for the verifying stage, which a document may never reach.
+    monkeypatch.setattr(verify_mod, "profile_installed", never_called)
+    monkeypatch.setattr(verify_mod, "OnnxNli", never_called)
+    with Engine.default(Config(), interactive=False, no_cache=True, nli="accurate") as built:
+        assert built.nli_requested == "accurate"
+        assert built.nli_profile is None
+        assert built.k == 1
+
+
+def never_called(*_args: object, **_kwargs: object) -> NoReturn:
+    raise AssertionError("nothing may be loaded or checked while the engine is built")
+
+
+class RecordedNli:
+    """Stands in for ``OnnxNli``: records how it was built, scores nothing."""
+
+    built: ClassVar[list[dict[str, object]]] = []
+    name = "recorded"
+
+    def __init__(self, **kwargs: object) -> None:
+        RecordedNli.built.append(kwargs)
+
+
+@pytest.fixture
+def recorded_nli(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, object]]:
+    RecordedNli.built = []
+    monkeypatch.setattr(verify_mod, "OnnxNli", RecordedNli)
+    return RecordedNli.built
+
+
+def test_engine_default_builds_the_accurate_scorer_when_it_is_installed(
+    monkeypatch: pytest.MonkeyPatch, recorded_nli: list[dict[str, object]]
+) -> None:
+    monkeypatch.setattr(verify_mod, "profile_installed", lambda *_args: True)
+    with Engine.default(Config(), interactive=False, no_cache=True, nli="accurate") as built:
+        built.get_scorer()
+        assert built.nli_profile is ACCURATE_PROFILE
+        assert (built.k, built.thresholds) == (2, ACCURATE_PROFILE.thresholds)
+
+    [kwargs] = recorded_nli
+    assert kwargs["repo_id"] == ACCURATE_PROFILE.repo
+    assert kwargs["revision"] == ACCURATE_PROFILE.revision
+    assert kwargs["onnx_file"] == "onnx/model_quantized.onnx"
+
+
+def test_engine_default_builds_today_s_scorer_for_the_default_profile(
+    monkeypatch: pytest.MonkeyPatch, recorded_nli: list[dict[str, object]]
+) -> None:
+    # The default profile never asks: not even the cache is checked for it.
+    monkeypatch.setattr(verify_mod, "profile_installed", never_called)
+    with Engine.default(Config(), interactive=False, no_cache=True) as built:
+        built.get_scorer()
+        assert built.nli_profile is DEFAULT_PROFILE
+        assert (built.k, built.thresholds) == (1, DEFAULT_PROFILE.thresholds)
+
+    [kwargs] = recorded_nli
+    assert kwargs["repo_id"] == DEFAULT_PROFILE.repo
+    assert kwargs["revision"] == DEFAULT_PROFILE.revision
+    # The file ``OnnxNli`` would have picked by itself, so nothing changes for it.
+    assert kwargs["onnx_file"] == pick_onnx_file(platform.machine())
+
+
+def test_engine_default_reads_the_profile_from_the_config_unless_told(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    configured = Config(models=ModelsConfig(nli="accurate"))
+    with Engine.default(configured, interactive=False, no_cache=True) as built:
+        assert built.nli_requested == "accurate"
+    with Engine.default(configured, interactive=False, no_cache=True, nli="default") as built:
+        assert built.nli_requested == "default"
+    with Engine.default(Config(), interactive=False, no_cache=True, nli="accurate") as built:
+        assert built.nli_requested == "accurate"
+
+
+def test_engine_default_explicit_k_and_thresholds_outlive_the_profile(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(verify_mod, "profile_installed", lambda *_args: True)
+    pinned = Thresholds(decide=0.5, high=0.99, medium=0.6)
+    with Engine.default(
+        Config(), interactive=False, no_cache=True, nli="accurate", k=3, thresholds=pinned
+    ) as built:
+        assert built.resolve_nli() is ACCURATE_PROFILE
+        assert (built.k, built.thresholds) == (3, pinned)
+    # One pinned, the other still the profile's.
+    with Engine.default(Config(), interactive=False, no_cache=True, nli="accurate", k=3) as built:
+        built.resolve_nli()
+        assert (built.k, built.thresholds) == (3, ACCURATE_PROFILE.thresholds)
+
+
+def test_engine_default_hands_the_model_gate_the_caller_s_prompt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The TUI's prompt, not the terminal one: a TUI run must never read stdin.
+    asked: list[tuple[str, int | None]] = []
+
+    def prompt(subject: str, port: int | None) -> Answer:
+        asked.append((subject, port))
+        return "no"
+
+    monkeypatch.setattr(verify_mod, "profile_installed", lambda *_args: False)
+    monkeypatch.setattr(verify_mod, "download_profile", never_called)
+    with Engine.default(
+        Config(), interactive=True, no_cache=True, prompt=prompt, nli="accurate"
+    ) as built:
+        assert built.resolve_nli() is DEFAULT_PROFILE
+        assert built.nli_fallback == "user answered no"
+    assert asked == [("model:accurate", None)]
+
+
+def test_engine_default_downloads_into_the_models_dir_on_consent(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    fetched: list[tuple[NliProfile, Path, str]] = []
+    monkeypatch.setattr(verify_mod, "models_dir", lambda: tmp_path)
+    monkeypatch.setattr(verify_mod, "profile_installed", lambda *_args: False)
+    monkeypatch.setattr(verify_mod, "download_profile", lambda *args: fetched.append(args))
+    allowed = Config(permissions=Permissions(install_model="allow"))
+    with Engine.default(allowed, interactive=False, no_cache=True, nli="accurate") as built:
+        assert built.resolve_nli() is ACCURATE_PROFILE
+    assert fetched == [(ACCURATE_PROFILE, tmp_path, platform.machine())]
+
+
 def test_prepare_is_typed_as_it_is_declared() -> None:
     text, doc = drafted("A claim [1].", [REAL])
     ready = prepare(text, engine(resolver=StubResolver({"Vaswani": resolved()})))
@@ -1273,6 +1404,7 @@ def test_the_verifying_stage_names_the_device_and_counts_the_verdicts() -> None:
         "device": "cpu",
         # The calibrated defaults, spelled out rather than derived: a recalibration
         # has to come past this line and past docs/eval/2026-09-12-tiers.md together.
+        "k": "1",
         "thresholds": "decide=0.45;high=0.99933;medium=0.457948",
     }
 
@@ -1318,6 +1450,290 @@ def test_no_source_text_loads_no_model_at_all() -> None:
     assert report.models["nli"] == NO_MODEL
     assert report.models["embedder"] == NO_MODEL
     assert report.models["device"] == "cpu"
+
+
+# --- the NLI profile ---------------------------------------------------------
+#
+# The default profile is today's model and never asks; the accurate one sits behind
+# ``ModelGate`` (product rule 5) and falls back, saying so, when it may not be used
+# (product rule 6). Every gate here is a real ``ModelGate`` with its two side effects
+# injected, so nothing touches the Hugging Face cache or the network.
+
+PROFILE_TABLE = {SUPPORTING: SUPPORTED_ROW, FIGURE: NEI_ROW, FILLER: NEI_ROW}
+
+
+def never(_profile: NliProfile) -> NoReturn:
+    raise AssertionError("the model gate may not be consulted on this path")
+
+
+def model_gate(
+    permission: Permission = "deny",
+    *,
+    installed: bool = False,
+    download: Callable[[NliProfile], None] = never,
+) -> ModelGate:
+    return ModelGate(
+        permission,
+        interactive=False,
+        installed=lambda _profile: installed,
+        download=download,
+    )
+
+
+def accurate(built: Engine, gate: ModelGate) -> Engine:
+    """``built`` set up the way ``Engine.default(..., nli="accurate")`` sets one up."""
+    built.nli_requested = "accurate"
+    built.model_gate = gate
+    built.k_from_profile = True
+    built.thresholds_from_profile = True
+    return built
+
+
+@dataclass
+class Spied:
+    """What the verifying stage handed ``cache.model_id`` and ``decide_indexed``."""
+
+    keys: list[tuple[int, Thresholds]]
+    decided: list[tuple[int, Thresholds]]
+
+
+@pytest.fixture
+def spied(monkeypatch: pytest.MonkeyPatch) -> Spied:
+    seen = Spied(keys=[], decided=[])
+    real_key, real_decide = verify_mod.cache_mod.model_id, verify_mod.pipeline.decide_indexed
+
+    def model_id(*, nli: str, embedder: str, k: int, thresholds: Thresholds) -> str:
+        seen.keys.append((k, thresholds))
+        return real_key(nli=nli, embedder=embedder, k=k, thresholds=thresholds)
+
+    def decide_indexed(*args: Any, k: int, thresholds: Thresholds, **kwargs: Any) -> Verdict:
+        seen.decided.append((k, thresholds))
+        return real_decide(*args, k=k, thresholds=thresholds, **kwargs)
+
+    monkeypatch.setattr(verify_mod.cache_mod, "model_id", model_id)
+    monkeypatch.setattr(verify_mod.pipeline, "decide_indexed", decide_indexed)
+    return seen
+
+
+def test_an_installed_accurate_profile_decides_at_its_own_k_and_cuts(spied: Spied) -> None:
+    built = accurate(paper_engine(table=PROFILE_TABLE), model_gate(installed=True))
+    events, listener = collected()
+    report = verify(draft(ONE_SOURCE_BODY, [REAL]), built, on_event=listener)
+
+    wanted = (ACCURATE_PROFILE.k, ACCURATE_PROFILE.thresholds)
+    assert spied.keys == [wanted]
+    assert spied.decided and set(spied.decided) == {wanted}
+    assert report.models["k"] == "2"
+    assert report.models["thresholds"] == "decide=0.25;high=0.999142;medium=0.252721"
+    assert "nli_requested" not in report.models
+    assert report.tier_note == pipeline.tier_note(ACCURATE_PROFILE.thresholds)
+    # The gate's own line is passed on, and nothing says the profile was not used.
+    assert Note("model accurate: installed") in events
+    assert not any(isinstance(e, Note) and "not used" in e.text for e in events)
+
+
+def test_the_profile_is_resolved_before_the_models_load() -> None:
+    built = accurate(paper_engine(table=PROFILE_TABLE), model_gate(installed=True))
+    events, listener = collected()
+    verify(draft(ONE_SOURCE_BODY, [REAL]), built, on_event=listener)
+
+    notes = [e for e in events if isinstance(e, Note)]
+    assert notes.index(Note("model accurate: installed")) < notes.index(
+        Note(LOADING_MODELS, transient=True)
+    )
+
+
+def test_a_denied_accurate_profile_falls_back_and_says_why(spied: Spied) -> None:
+    # No terminal, permission ``ask``: rule 4 makes it a denial, and the run goes on
+    # with the default profile rather than stopping or claiming the large model.
+    built = accurate(paper_engine(table=PROFILE_TABLE), model_gate("ask"))
+    events, listener = collected()
+    report = verify(draft(ONE_SOURCE_BODY, [REAL]), built, on_event=listener)
+
+    reason = "permission is set to ask but there is no interactive terminal"
+    default = (DEFAULT_PROFILE.k, DEFAULT_PROFILE.thresholds)
+    assert spied.keys == [default]
+    assert set(spied.decided) == {default}
+    assert report.models["nli_requested"] == f"accurate ({reason})"
+    assert report.models["k"] == "1"
+    assert report.models["thresholds"] == "decide=0.45;high=0.99933;medium=0.457948"
+    assert Note(f"model accurate: not downloaded ({reason})") in events
+    assert (
+        Note(
+            f"accurate NLI model not used: {reason} — using the default model."
+            f" To download it, run in a terminal or set {MODEL_ALLOW_SETTING}"
+        )
+        in events
+    )
+
+
+def answered(answer: Answer, config_path: Path) -> ModelGate:
+    """A gate with a terminal whose user answers ``answer``; any save lands in tmp."""
+    return ModelGate(
+        "ask",
+        interactive=True,
+        prompt=lambda _subject, _status: answer,
+        config_path=config_path,
+        installed=lambda _profile: False,
+        download=never,
+    )
+
+
+def broken_download(_profile: NliProfile) -> None:
+    raise OSError("offline")
+
+
+REFUSED_HINT = (
+    f" To allow the download: {MODEL_SETTING} (asks in a terminal) or {MODEL_ALLOW_SETTING}"
+)
+
+
+@pytest.mark.parametrize(
+    ("build", "advice"),
+    [
+        # Nobody can be asked: ``ask`` changes nothing there, ``allow`` or a terminal does.
+        (
+            lambda _tmp: model_gate("ask"),
+            f" To download it, run in a terminal or set {MODEL_ALLOW_SETTING}",
+        ),
+        # Refused by the setting, or for good: ``ask`` changes it where a terminal can
+        # answer, ``allow`` anywhere.
+        (
+            lambda _tmp: model_gate("deny"),
+            REFUSED_HINT,
+        ),
+        (
+            lambda tmp: answered("never", tmp / "config.toml"),
+            REFUSED_HINT,
+        ),
+        # "No" holds for this run only, so there is nothing to change.
+        (lambda tmp: answered("no", tmp / "config.toml"), " The next run asks again."),
+        # Permitted, and the network let it down: a setting would not help.
+        (lambda _tmp: model_gate("allow", download=broken_download), " Retry when online."),
+    ],
+    ids=["no-terminal", "deny", "never", "no", "download-failed"],
+)
+def test_the_fallback_note_gives_the_advice_that_fits_the_refusal(
+    build: Callable[[Path], ModelGate], advice: str, tmp_path: Path
+) -> None:
+    built = accurate(paper_engine(table=PROFILE_TABLE), build(tmp_path))
+    events, listener = collected()
+    verify(draft(ONE_SOURCE_BODY, [REAL]), built, on_event=listener)
+
+    [line] = [e.text for e in events if isinstance(e, Note) and "NLI model not used" in e.text]
+    assert line == (
+        f"accurate NLI model not used: {built.nli_fallback} — using the default model.{advice}"
+    )
+
+
+def test_without_a_gate_the_fallback_note_gives_no_advice() -> None:
+    built = paper_engine(table=PROFILE_TABLE)
+    built.nli_requested = "accurate"
+    events, listener = collected()
+    report = verify(draft(ONE_SOURCE_BODY, [REAL]), built, on_event=listener)
+
+    assert report.models["nli_requested"] == "accurate (no consent gate on this engine)"
+    assert (
+        Note(
+            "accurate NLI model not used: no consent gate on this engine — using the default model."
+        )
+        in events
+    )
+
+
+def test_the_download_is_announced_before_it_starts() -> None:
+    # The gate's lines go out as they are written: a 643 MB wait is explained first.
+    events, listener = collected()
+
+    def download(_profile: NliProfile) -> None:
+        assert any(isinstance(e, Note) and "downloading" in e.text for e in events)
+
+    gate = model_gate("allow", download=download)
+    built = accurate(paper_engine(table=PROFILE_TABLE), gate)
+    report = verify(draft(ONE_SOURCE_BODY, [REAL]), built, on_event=listener)
+
+    assert report.models["k"] == "2"
+    notes = [e.text for e in events if isinstance(e, Note)]
+    assert notes.count("model accurate: downloaded") == 1  # said once, not twice
+    assert gate.on_log is None  # handed back once the profile is resolved
+
+
+def test_a_failed_download_falls_back_with_a_short_reason() -> None:
+    def broken(_profile: NliProfile) -> None:
+        raise RuntimeError("the server said something long and private")
+
+    built = accurate(paper_engine(table=PROFILE_TABLE), model_gate("allow", download=broken))
+    report = verify(draft(ONE_SOURCE_BODY, [REAL]), built)
+
+    assert report.models["nli_requested"] == "accurate (model download failed: RuntimeError)"
+    assert report.models["k"] == "1"
+    assert "private" not in json_text(report)
+
+
+def test_the_default_profile_never_consults_the_model_gate(spied: Spied) -> None:
+    built = paper_engine(table=PROFILE_TABLE)
+    built.model_gate = ModelGate("ask", interactive=True, installed=never, download=never)
+    built.k_from_profile = built.thresholds_from_profile = True
+    events, listener = collected()
+    report = verify(draft(ONE_SOURCE_BODY, [REAL]), built, on_event=listener)
+
+    assert spied.keys == [(1, DEFAULT_PROFILE.thresholds)]
+    assert "nli_requested" not in report.models
+    assert built.model_gate.log == []
+    assert not any(
+        isinstance(e, Note) and ("NLI" in e.text or e.text.startswith("model ")) for e in events
+    )
+
+
+def test_explicit_k_and_thresholds_win_over_the_profile(spied: Spied) -> None:
+    # What ``Engine.default(k=..., thresholds=...)`` leaves behind: both pinned.
+    built = accurate(paper_engine(table=PROFILE_TABLE), model_gate(installed=True))
+    built.k_from_profile = built.thresholds_from_profile = False
+    pinned = Thresholds(decide=0.5, high=0.99, medium=0.6)
+    built.k, built.thresholds = 3, pinned
+    verify(draft(ONE_SOURCE_BODY, [REAL]), built)
+
+    assert spied.keys == [(3, pinned)]
+
+
+def test_a_run_with_nothing_to_verify_does_not_ask_for_the_model() -> None:
+    # A gate that fails the test if it is asked anything: no claim reached a source.
+    built = accurate(engine(), ModelGate("ask", interactive=True, installed=never, download=never))
+    report = verify(draft("A claim [1].", [GHOSTLY]), built)
+
+    assert report.models["nli"] == NO_MODEL
+    assert built.nli_profile is None
+    # Nothing was resolved, so the report states the requested profile's own k and
+    # cuts -- not the default's, which nothing in this run chose.
+    assert report.models["k"] == "2"
+    assert report.models["thresholds"] == "decide=0.25;high=0.999142;medium=0.252721"
+    assert report.tier_note == pipeline.tier_note(ACCURATE_PROFILE.thresholds)
+    assert "nli_requested" not in report.models
+
+
+def test_nothing_to_verify_still_reports_pinned_values() -> None:
+    built = accurate(engine(), ModelGate("ask", interactive=True, installed=never, download=never))
+    built.k_from_profile = built.thresholds_from_profile = False
+    built.k = 3
+    report = verify(draft("A claim [1].", [GHOSTLY]), built)
+    assert report.models["k"] == "3"
+    assert report.models["thresholds"] == "decide=0.45;high=0.99933;medium=0.457948"
+
+
+def test_the_two_profiles_never_share_cached_verdicts(tmp_path: Path) -> None:
+    text = draft(ONE_SOURCE_BODY, [REAL])
+    with Cache(tmp_path / "c.sqlite3") as cache:
+        default = paper_engine(table=PROFILE_TABLE, cache=cache)
+        ready = prepare(text, default)
+        source_row(cache, f"doi:{DOI}", PAPER)
+        first = decide_all(ready, default)
+        assert [item.from_cache for item in first.results] == [False, False]
+
+        large = accurate(paper_engine(table=PROFILE_TABLE, cache=cache), model_gate(installed=True))
+        second = decide_all(ready, large)
+        # Same text, same embedder, same scorer name: only k and the cuts differ, and
+        # that alone keeps the default model's answers out of the accurate run.
+        assert [item.from_cache for item in second.results] == [False, False]
 
 
 # --- the cache ---------------------------------------------------------------

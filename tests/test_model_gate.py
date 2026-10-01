@@ -6,13 +6,14 @@ injected, ``hf_hub_download`` is monkeypatched, and the config lives under tmp_p
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
 
 from proofpath import model_gate as mg
 from proofpath.browser import TERMINAL_ANSWERS, TUI_ANSWERS, Answer
-from proofpath.config import load_config
+from proofpath.config import Permission, load_config
 from proofpath.profiles import ACCURATE_PROFILE, DEFAULT_PROFILE, NliProfile
 
 
@@ -346,3 +347,78 @@ def test_download_profile_fetches_the_three_files(
     assert {c[2] for c in calls} == {ACCURATE_PROFILE.revision}
     assert {c[3] for c in calls} == {str(cache)}
     assert cache.is_dir()
+
+
+# --- why a profile was refused, and the log as it is written -----------------------
+
+
+def answering(answer: Answer) -> Callable[[str, int | None], Answer]:
+    return lambda _subject, _status: answer
+
+
+@pytest.mark.parametrize(
+    ("permission", "interactive", "answer", "expected"),
+    [
+        ("ask", False, None, "no_terminal"),
+        ("deny", True, None, "refused"),
+        ("ask", True, "never", "refused"),
+        ("ask", True, "no", "declined"),
+    ],
+)
+def test_a_refusal_is_recorded_as_its_kind(
+    permission: Permission,
+    interactive: bool,
+    answer: Answer | None,
+    expected: mg.Refusal,
+) -> None:
+    gate = mg.ModelGate(
+        permission,
+        interactive=interactive,
+        prompt=raising_prompt if answer is None else answering(answer),
+        download=raising_download,
+        installed=missing,
+    )
+    assert gate.ensure(ACCURATE_PROFILE).outcome == "deny"
+    assert gate.refusal(ACCURATE_PROFILE) == expected
+
+
+def test_a_failed_download_is_recorded_as_its_kind() -> None:
+    def broken(profile: NliProfile) -> None:
+        raise OSError("offline")
+
+    gate = mg.ModelGate("allow", interactive=False, download=broken, installed=missing)
+    assert gate.ensure(ACCURATE_PROFILE).outcome == "deny"
+    assert gate.refusal(ACCURATE_PROFILE) == "download_failed"
+
+
+@pytest.mark.parametrize("answer", ["once", "always"])
+def test_an_allowed_profile_has_no_refusal(answer: Answer) -> None:
+    gate = mg.ModelGate(
+        "ask",
+        interactive=True,
+        prompt=answering(answer),
+        download=Recorder(),
+        installed=missing,
+    )
+    assert gate.ensure(ACCURATE_PROFILE).outcome == "allow"
+    assert gate.refusal(ACCURATE_PROFILE) is None
+
+
+def test_on_log_hears_each_line_before_the_download_starts() -> None:
+    # "downloading ... 643 MB" has to reach the user before the wait, not after it.
+    order: list[str] = []
+    gate = mg.ModelGate(
+        "allow",
+        interactive=False,
+        download=lambda _profile: order.append("download"),
+        installed=missing,
+        on_log=lambda line: order.append(line),
+    )
+    gate.ensure(ACCURATE_PROFILE)
+
+    downloading = next(i for i, item in enumerate(order) if "downloading" in item)
+    assert "643 MB" in order[downloading]
+    assert downloading < order.index("download")
+    assert order[-1] == "model accurate: downloaded"
+    # ``log`` still holds every line, in the same order.
+    assert gate.log == [item for item in order if item != "download"]

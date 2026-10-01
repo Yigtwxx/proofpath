@@ -33,6 +33,7 @@ from proofpath.report import (
     judge_detail,
     judge_unavailable,
     judge_unavailable_line,
+    nli_fallback_line,
     no_bibliography,
     reason_label,
     render_diagnostics,
@@ -1061,6 +1062,31 @@ def test_markdown_carries_the_model_preamble() -> None:
     assert "- nli: cross-encoder" in text
     assert "- device: mps" in text
     assert "- thresholds: decide=0.5" in text
+
+
+def test_markdown_preamble_states_k_and_a_profile_that_was_not_used() -> None:
+    # A run that wanted the accurate model and fell back says so beside the model that
+    # did run (product rule 6), and the k it decided at travels with the cuts.
+    models = {
+        "nli": "cross-encoder",
+        "nli_requested": "accurate (user answered no)",
+        "k": "1",
+        "thresholds": "decide=0.45",
+    }
+    text = render_markdown(dataclasses.replace(report_with(), models=models), written_at=WHEN)
+    assert "- nli: cross-encoder\n- nli_requested: accurate (user answered no)\n" in text
+    assert "- k: 1" in text
+
+
+def test_the_nli_line_is_there_only_when_the_requested_profile_was_not_used() -> None:
+    assert nli_fallback_line(report_with()) is None
+    fell_back = dataclasses.replace(
+        report_with(), models={"nli": "x", "nli_requested": "accurate (user answered no)"}
+    )
+    assert (
+        nli_fallback_line(fell_back)
+        == "default model chosen; requested accurate (user answered no)"
+    )
 
 
 def test_markdown_preamble_states_the_tier_note() -> None:

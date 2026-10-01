@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
+from typing import Literal
 
 import typer
 
@@ -25,6 +26,15 @@ from proofpath.profiles import PROFILES, NliProfile
 
 #: The key "always" and "never" are saved under.
 PERMISSION_KEY = "permissions.install_model"
+
+#: Why ``ensure`` did not allow a profile, as data rather than as the reason's words,
+#: so the fallback line can give advice that fits it:
+#:
+#: * ``no_terminal`` -- the permission is ``ask`` and nobody can be asked (rule 4);
+#: * ``refused`` -- the permission is ``deny``, or the user answered "never";
+#: * ``declined`` -- the user answered "no", for this run only;
+#: * ``download_failed`` -- consent was given and the download did not finish.
+Refusal = Literal["no_terminal", "refused", "declined", "download_failed"]
 
 # What a model question passes as the ``host`` argument of a gate prompt. The prompt
 # callable is the browser gate's, shared so the TUI answers both through one widget;
@@ -138,6 +148,7 @@ class ModelGate:
         config_path: Path | None = None,
         download: Callable[[NliProfile], None],
         installed: Callable[[NliProfile], bool],
+        on_log: Callable[[str], None] | None = None,
     ) -> None:
         self._permission = permission
         self._interactive = interactive
@@ -147,11 +158,26 @@ class ModelGate:
         self._download = download
         self._installed = installed
         self.log: list[str] = []
+        # Called with each ``log`` line as it is written, so a caller can say
+        # "downloading ... 643 MB" before the download rather than after it. Public
+        # and reassignable: the verifying stage points it at the run's listener.
+        self.on_log = on_log
         # True once the user was shown the question this run.
         self.asked = False
         # By profile name: a second ``ensure`` neither asks nor downloads again, and
         # a failed download is not retried within the run.
         self._decided: dict[str, Decision] = {}
+        self._refusals: dict[str, Refusal] = {}
+
+    def _log(self, line: str) -> None:
+        self.log.append(line)
+        if self.on_log is not None:
+            self.on_log(line)
+
+    def refusal(self, profile: NliProfile) -> Refusal | None:
+        """Why ``ensure`` did not allow ``profile`` this run, or ``None`` if it did (or
+        has not been asked)."""
+        return self._refusals.get(profile.name)
 
     def _ask(self, profile: NliProfile) -> Answer:
         if self._prompt is None:
@@ -164,10 +190,14 @@ class ModelGate:
         try:
             set_value(PERMISSION_KEY, value, self._config_path)
         except (ConfigError, OSError) as exc:
-            self.log.append(f"could not save permission: {exc}")
+            self._log(f"could not save permission: {exc}")
 
     def _consent(self, profile: NliProfile) -> Decision:
         decision = resolve_permission(self._permission, interactive=self._interactive)
+        if decision.outcome == "deny":
+            # ``ask`` only resolves to ``deny`` when there is no terminal to ask on.
+            no_terminal = self._permission == "ask"
+            self._refusals[profile.name] = "no_terminal" if no_terminal else "refused"
         if decision.outcome != "prompt":
             return decision
         self.asked = True
@@ -178,8 +208,10 @@ class ModelGate:
             self._persist("allow")
             return Decision("allow", "user answered always")
         if answer == "no":
+            self._refusals[profile.name] = "declined"
             return Decision("deny", "user answered no")
         self._persist("deny")  # "never"
+        self._refusals[profile.name] = "refused"
         return Decision("deny", "user answered never")
 
     def ensure(self, profile: NliProfile) -> Decision:
@@ -192,15 +224,15 @@ class ModelGate:
 
     def _ensure(self, profile: NliProfile) -> Decision:
         if self._installed(profile):
-            self.log.append(f"model {profile.name}: installed")
+            self._log(f"model {profile.name}: installed")
             return Decision("allow", "installed")
 
         decision = self._consent(profile)
         if decision.outcome != "allow":
-            self.log.append(f"model {profile.name}: not downloaded ({decision.reason})")
+            self._log(f"model {profile.name}: not downloaded ({decision.reason})")
             return decision
 
-        self.log.append(
+        self._log(
             f"model {profile.name}: downloading {profile.repo} ({profile.size_mb} MB;"
             f" {decision.reason})"
         )
@@ -208,7 +240,8 @@ class ModelGate:
             self._download(profile)
         except Exception as exc:  # a failed download falls back, it never crashes
             failed = Decision("deny", f"model download failed: {_failure_reason(exc)}")
-            self.log.append(f"model {profile.name}: {failed.reason}")
+            self._refusals[profile.name] = "download_failed"
+            self._log(f"model {profile.name}: {failed.reason}")
             return failed
-        self.log.append(f"model {profile.name}: downloaded")
+        self._log(f"model {profile.name}: downloaded")
         return decision

@@ -582,6 +582,20 @@ def summary_unavailable(report: Report) -> str | None:
     return f"{JUDGE} {found.removeprefix(f'{SUMMARY} ')}"
 
 
+def nli_fallback_line(report: Report) -> str | None:
+    """The ``nli`` line's value when the requested NLI profile was not the one used.
+
+    ``models["nli_requested"]`` is only there on a fallback. The run's Note says the
+    same thing, but notes are dropped under ``-q``, and a run that decided with
+    another model than the one asked for must not read like one that did not
+    (product rule 6), so the terminal prints this whatever the verbosity.
+    """
+    requested = report.models.get("nli_requested")
+    if requested is None:
+        return None
+    return f"default model chosen; requested {requested}"
+
+
 # ``pipeline.py`` writes this reason when a rule, not the model, refuted a claim. It
 # is parsed back out rather than re-derived, so the caret line and the verdict can
 # never disagree about which figure was wrong.

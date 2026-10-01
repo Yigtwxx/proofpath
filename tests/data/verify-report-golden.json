@@ -637,6 +637,7 @@
     "nli": "keyword",
     "embedder": "words",
     "device": "cpu",
+    "k": "1",
     "thresholds": "decide=0.45;high=0.99933;medium=0.457948"
   },
   "api_calls": 0,
