@@ -832,3 +832,38 @@ def test_migrating_a_v4_file_forgets_every_cached_ghost_and_keeps_the_rest(
         )
         assert db.get_resolution(GHOST_REFERENCE, now=NOW) is None
         assert db.get_resolution(RAW_REFERENCE, now=NOW) == RESOLVED
+
+
+@pytest.mark.parametrize(
+    ("machine", "expected"),
+    [
+        (
+            "arm64",
+            "cross-encoder/nli-deberta-v3-base@6c749ce:model_qint8_arm64|BAAI/bge-small-en-v1.5"
+            "|k=1|decide=0.450000|high=0.999330|medium=0.457948",
+        ),
+        (
+            "x86_64",
+            "cross-encoder/nli-deberta-v3-base@6c749ce:model_quint8_avx2|BAAI/bge-small-en-v1.5"
+            "|k=1|decide=0.450000|high=0.999330|medium=0.457948",
+        ),
+    ],
+)
+def test_default_profile_verdict_cache_key_is_pinned(machine: str, expected: str) -> None:
+    """The default profile's key must equal what main produced, byte for byte.
+
+    A change here silently invalidates every user's cached verdicts. If this test has
+    to change on purpose, that is a cache-schema decision, not a test fix.
+    """
+    from pathlib import Path
+
+    from proofpath.entailment import DEFAULT_REPO, DEFAULT_REVISION, pick_onnx_file
+    from proofpath.pipeline import DEFAULT_THRESHOLDS
+    from proofpath.verify import EMBEDDING_MODEL
+
+    # Built the way ``OnnxNli.__init__`` builds its ``name``.
+    nli_name = f"{DEFAULT_REPO}@{DEFAULT_REVISION[:7]}:{Path(pick_onnx_file(machine)).stem}"
+    key = cache_mod.model_id(
+        nli=nli_name, embedder=EMBEDDING_MODEL, k=1, thresholds=DEFAULT_THRESHOLDS
+    )
+    assert key == expected

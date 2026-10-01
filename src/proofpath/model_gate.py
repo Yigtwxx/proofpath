@@ -133,9 +133,9 @@ class ModelGate:
     permission is ``ask`` and there is a terminal, and downloads on "allow". Every
     decision, and the download itself, is written to ``log`` for the report.
 
-    ``override`` records that ``--accurate`` chose the profile. It is not consent:
-    the flag says which model, not that 643 MB may be fetched, so it never changes
-    the decision.
+    ``--accurate`` picks the profile but is not consent: the flag says which model,
+    not that 643 MB may be fetched, so the gate takes no flag and the permission
+    alone decides.
     """
 
     def __init__(
@@ -143,7 +143,6 @@ class ModelGate:
         permission: Permission,
         *,
         interactive: bool,
-        override: bool | None = None,
         prompt: Callable[[str, int | None], Answer] | None = None,
         config_path: Path | None = None,
         download: Callable[[NliProfile], None],
@@ -152,7 +151,6 @@ class ModelGate:
     ) -> None:
         self._permission = permission
         self._interactive = interactive
-        self.override = override
         self._prompt = prompt
         self._config_path = config_path
         self._download = download
@@ -162,8 +160,6 @@ class ModelGate:
         # "downloading ... 643 MB" before the download rather than after it. Public
         # and reassignable: the verifying stage points it at the run's listener.
         self.on_log = on_log
-        # True once the user was shown the question this run.
-        self.asked = False
         # By profile name: a second ``ensure`` neither asks nor downloads again, and
         # a failed download is not retried within the run.
         self._decided: dict[str, Decision] = {}
@@ -200,7 +196,6 @@ class ModelGate:
             self._refusals[profile.name] = "no_terminal" if no_terminal else "refused"
         if decision.outcome != "prompt":
             return decision
-        self.asked = True
         answer = self._ask(profile)
         if answer == "once":
             return Decision("allow", "user answered once")

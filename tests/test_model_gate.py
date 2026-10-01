@@ -104,19 +104,6 @@ def test_ask_without_tty_denies_and_reports() -> None:
     assert any("no interactive terminal" in line for line in gate.log)
 
 
-def test_override_does_not_grant_consent() -> None:
-    """``--accurate`` picks the profile; the 643 MB still needs a yes (rule 5)."""
-    gate = mg.ModelGate(
-        "ask",
-        interactive=False,
-        override=True,
-        prompt=raising_prompt,
-        download=raising_download,
-        installed=missing,
-    )
-    assert gate.ensure(ACCURATE_PROFILE).outcome == "deny"
-
-
 # --- ask with a TTY: each answer ----------------------------------------------------
 
 

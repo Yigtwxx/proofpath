@@ -49,7 +49,7 @@ accurate model, so it is recommended for scientific sources, not for news.
 
 ## Profiles
 
-An `NliProfile` (in `entailment.py`) has these fields:
+An `NliProfile` (in `profiles.py`, not `entailment.py`: that would be an import cycle with `pipeline`) has these fields:
 
 - `name`: `"default"` or `"accurate"`.
 - `repo` and `revision`: the revision is the full SHA.

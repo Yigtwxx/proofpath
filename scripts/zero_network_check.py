@@ -64,11 +64,14 @@ def main(argv: list[str]) -> int:
     httpx.Client.send = guard  # type: ignore[method-assign]
     curl_cffi.requests.get = guard  # type: ignore[assignment]
 
-    with verify.Engine.default(load_config(), interactive=False) as engine:
+    # Pinned to the default profile: the check describes the default install, not
+    # whatever ``models.nli`` the user has set.
+    with verify.Engine.default(load_config(), interactive=False, nli="default") as engine:
         report = verify.verify(target, engine)
 
     full, abstract, unverified = report.coverage.pct()
     print(f"target       {target}")
+    print(f"nli          {engine.nli_requested} profile (pinned)")
     print(f"exit code    {report.exit_code()}")
     print(f"coverage     fulltext {full}% / abstract {abstract}% / unverified {unverified}%")
     for stage in report.stages:

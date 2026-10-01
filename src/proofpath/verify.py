@@ -428,7 +428,6 @@ class Engine:
             model_gate = ModelGate(
                 config.permissions.install_model,
                 interactive=interactive,
-                override=None if nli is None else True,
                 prompt=prompt,
                 download=lambda profile: download_profile(profile, models_dir(), machine),
                 installed=lambda profile: profile_installed(profile, models_dir(), machine),
@@ -1852,7 +1851,9 @@ def _resolve_nli(engine: Engine, emit: Listener) -> None:
         engine.resolve_nli()
     else:
         before = gate.on_log
-        gate.on_log = lambda line: emit(Note(line))
+        # "installed" stays in the gate's log only: it is the normal case, not news.
+        # Only lines about asking, downloading or failing are worth a Note.
+        gate.on_log = lambda line: None if line.endswith(": installed") else emit(Note(line))
         try:
             engine.resolve_nli()
         finally:

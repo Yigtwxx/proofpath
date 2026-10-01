@@ -1527,8 +1527,8 @@ def test_an_installed_accurate_profile_decides_at_its_own_k_and_cuts(spied: Spie
     assert report.models["thresholds"] == "decide=0.25;high=0.999142;medium=0.252721"
     assert "nli_requested" not in report.models
     assert report.tier_note == pipeline.tier_note(ACCURATE_PROFILE.thresholds)
-    # The gate's own line is passed on, and nothing says the profile was not used.
-    assert Note("model accurate: installed") in events
+    # "installed" is the normal case: it stays in the gate's log, it is not a Note.
+    assert not any(isinstance(e, Note) and "installed" in e.text for e in events)
     assert not any(isinstance(e, Note) and "not used" in e.text for e in events)
 
 
@@ -1537,10 +1537,10 @@ def test_the_profile_is_resolved_before_the_models_load() -> None:
     events, listener = collected()
     verify(draft(ONE_SOURCE_BODY, [REAL]), built, on_event=listener)
 
-    notes = [e for e in events if isinstance(e, Note)]
-    assert notes.index(Note("model accurate: installed")) < notes.index(
-        Note(LOADING_MODELS, transient=True)
-    )
+    assert Note(LOADING_MODELS, transient=True) in events
+    assert built.nli_profile is ACCURATE_PROFILE
+    assert built.model_gate is not None
+    assert built.model_gate.log == ["model accurate: installed"]
 
 
 def test_a_denied_accurate_profile_falls_back_and_says_why(spied: Spied) -> None:
