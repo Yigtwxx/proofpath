@@ -6,6 +6,21 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Measured
+- **An NLI bake-off** (`scripts/eval_nli_bakeoff.py`, report in
+  `docs/eval/2026-10-01-nli-bakeoff.md`). It compares three NLI models, three
+  values of k and three aggregation rules, 27 combinations in all. Each combination
+  is calibrated on SciFact train and scored on SciFact dev and a frozen AVeriTeC
+  snapshot. The winner is picked by a rule written down before any number was
+  seen.
+  - **Winner:** `MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli` with
+    k=2. SciFact dev macro-F1 is 0.697, against 0.580 for today's default and 0.608
+    for the best configuration of the default model.
+  - **AVeriTeC** stays below its majority baseline: 0.475 on claims with a readable
+    source, against 0.708.
+  - The report lists its own limits. The main one is that dev both chose the winner
+    and reports its score.
+
 ## [0.4.9] - 2026-09-30
 
 Wikipedia can be read again, and a verdict now says more about how much it rests
