@@ -7,6 +7,7 @@ import pytest
 
 from proofpath import pipeline
 from proofpath.eval import bakeoff
+from proofpath.eval.bakeoff_data import Item, SnapshotClaim, SnapshotSource
 from proofpath.models import Label, Passage
 from proofpath.pipeline import Thresholds
 from proofpath.retrieval import Hit
@@ -149,3 +150,81 @@ def test_decide_at_the_cut_asserts_and_keeps_a_refuted_signal() -> None:
     assert bakeoff.decide(bakeoff.Signal(Label.REFUTED, 0.5, P[0]), cuts) is Label.REFUTED
     assert bakeoff.decide(bakeoff.Signal(Label.REFUTED, 0.49, P[0]), cuts) is Label.NEI
     assert bakeoff.decide(bakeoff.NOTHING, cuts) is Label.NEI
+
+
+def _scored(
+    key: str,
+    dataset: str,
+    gold: str,
+    row: tuple[float, float, float],
+    *,
+    group: str | None = None,
+    rationale: frozenset[int] = frozenset({0}),
+) -> bakeoff.Scored:
+    item = Item(key, dataset, group or key, "a claim", gold, (Passage("p", key, 0),), rationale)
+    return bakeoff.Scored(item, _probs(row))
+
+
+def test_calibration_refuses_anything_but_scifact_train() -> None:
+    dev = [_scored("d", "scifact-dev", "SUPPORTED", (0.9, 0.0, 0.1))]
+    with pytest.raises(ValueError, match="scifact-train"):
+        bakeoff.calibration_rows(dev, k=1, aggregation="max")
+
+
+def test_evaluation_refuses_the_calibration_split() -> None:
+    train = [_scored("t", "scifact-train", "SUPPORTED", (0.9, 0.0, 0.1))]
+    cuts = Thresholds(decide=0.5, high=0.9, medium=0.7)
+    with pytest.raises(ValueError, match="scifact-dev"):
+        bakeoff.evaluate_scifact(train, cuts, k=1, aggregation="max")
+
+
+def test_calibrate_picks_a_cut_that_separates_right_from_wrong() -> None:
+    rows = [(Label.SUPPORTED, Label.SUPPORTED, 0.9)] * 5 + [(Label.NEI, Label.SUPPORTED, 0.3)] * 5
+    cuts = bakeoff.calibrate(rows)
+    assert 0.3 < cuts.decide <= 0.9
+    assert cuts.decide <= cuts.medium <= cuts.high
+
+
+def test_tier_stats_hide_precision_below_the_minimum_n() -> None:
+    assert bakeoff.TierStat("high", 19, 19).precision is None
+    assert bakeoff.TierStat("high", 19, 19).interval is None
+    assert bakeoff.TierStat("high", 20, 15).precision == pytest.approx(0.75)
+
+
+def test_evaluate_scifact_counts_verdicts_tiers_and_rationale() -> None:
+    cuts = Thresholds(decide=0.5, high=0.95, medium=0.7)
+    scored = [
+        _scored("a", "scifact-dev", "SUPPORTED", (0.97, 0.01, 0.02)),  # high, right
+        _scored("b", "scifact-dev", "REFUTED", (0.80, 0.10, 0.10)),  # medium, wrong
+        _scored("c", "scifact-dev", "NEI", (0.30, 0.10, 0.60)),  # below decide
+    ]
+    result = bakeoff.evaluate_scifact(scored, cuts, k=1, aggregation="max")
+    assert result.n == 3
+    assert result.accuracy == pytest.approx(2 / 3)
+    assert {t.tier: (t.n, t.correct) for t in result.tiers} == {
+        "high": (1, 1),
+        "medium": (1, 0),
+        "low": (0, 0),
+    }
+    assert result.asserted_without_passage == 0
+    assert 0.0 < result.rationale_f1 <= 1.0
+
+
+def test_evaluate_averitec_keeps_the_strongest_source_and_both_denominators() -> None:
+    cuts = Thresholds(decide=0.5, high=0.95, medium=0.7)
+    claims = [
+        SnapshotClaim(1, "c1", "Refuted", (SnapshotSource("u1", "ok", "t"),), 0),
+        SnapshotClaim(2, "c2", "Supported", (SnapshotSource("u2", "UNVERIFIED (x)", ""),), 0),
+        SnapshotClaim(3, "c3", "Conflicting Evidence/Cherrypicking", (), 0),
+    ]
+    scored = [
+        _scored("averitec:1:0", "averitec", "Refuted", (0.6, 0.1, 0.3), group="averitec:1"),
+        _scored("averitec:1:1", "averitec", "Refuted", (0.0, 0.9, 0.1), group="averitec:1"),
+    ]
+    result = bakeoff.evaluate_averitec(claims, scored, cuts, k=1, aggregation="max")
+    assert result.n == 3
+    assert result.counted == 2  # the Conflicting claim has no 3-way label
+    assert result.accuracy_all == pytest.approx(0.5)  # claim 1 right, claim 2 unread → NEI
+    assert result.readable == 1
+    assert result.accuracy_readable == pytest.approx(1.0)
+    assert result.majority_baseline == pytest.approx(0.5)

@@ -8,6 +8,7 @@ model (docs/superpowers/specs/2026-10-01-nli-bakeoff-design.md). A variant moves
 from __future__ import annotations
 
 import math
+from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 
@@ -15,6 +16,8 @@ import numpy as np
 
 from proofpath import numerics
 from proofpath.entailment import LABEL_ORDER
+from proofpath.eval import averitec, metrics
+from proofpath.eval.bakeoff_data import Item, SnapshotClaim
 from proofpath.models import Label, Passage
 from proofpath.pipeline import Thresholds
 
@@ -125,3 +128,209 @@ def wilson(correct: int, n: int, z: float = 1.96) -> tuple[float, float]:
     centre = (p + z * z / (2 * n)) / denominator
     half = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / denominator
     return max(0.0, centre - half), min(1.0, centre + half)
+
+
+# Wider than eval_scifact's 0.30-0.95 grid: a ``margin`` score is a difference of two
+# probabilities and lives much nearer 0. Every combination is swept on the same grid.
+GRID: tuple[float, ...] = tuple(round(0.05 * i, 2) for i in range(1, 20))
+HIGH_TARGET = 0.85
+MEDIUM_TARGET = 0.70
+# Below this many dev verdicts a tier's precision is reported as "too few to judge".
+MIN_TIER_N = 20
+CUT_DECIMALS = 6
+
+
+@dataclass(frozen=True)
+class Scored:
+    item: Item
+    probs: np.ndarray  # (len(item.passages), 3) in LABEL_ORDER
+
+
+def _require(scored: Sequence[Scored], dataset: str) -> None:
+    wrong = sorted({s.item.dataset for s in scored if s.item.dataset != dataset})
+    if wrong:
+        raise ValueError(f"expected only {dataset} items, got {', '.join(wrong)}")
+
+
+def ship_cut(value: float) -> float:
+    """Round a cut up to ``CUT_DECIMALS`` — the rule of ``eval_scifact.ship_cut``.
+
+    Up, never down: a cut rounded down would hand a tier to scores the calibration
+    split never showed were that good.
+    """
+    scale: int = 10**CUT_DECIMALS
+    return min(1.0, math.ceil(value * scale) / scale)
+
+
+def calibration_rows(scored: Sequence[Scored], *, k: int, aggregation: str) -> list[metrics.Row]:
+    """``(gold, proposed label, score)`` rows for calibration, SciFact train only."""
+    _require(scored, "scifact-train")
+    rows: list[metrics.Row] = []
+    for s in scored:
+        signal = signal_for(s.item.claim, s.item.passages, s.probs, k=k, aggregation=aggregation)
+        rows.append((Label(s.item.gold), signal.label, signal.score))
+    return rows
+
+
+def calibrate(rows: Sequence[metrics.Row]) -> Thresholds:
+    """Best-accuracy ``decide``, then the 0.85 / 0.70 precision cuts above it."""
+    best = metrics.sweep_decide(rows, grid=GRID)
+    raw_high, raw_medium = metrics.tier_cutpoints(
+        rows,
+        decide=best.threshold,
+        high_precision=HIGH_TARGET,
+        medium_precision=MEDIUM_TARGET,
+    )
+    high, medium = ship_cut(raw_high), ship_cut(raw_medium)
+    return Thresholds(decide=best.threshold, high=max(high, medium), medium=medium)
+
+
+@dataclass(frozen=True)
+class TierStat:
+    tier: str
+    n: int
+    correct: int
+
+    @property
+    def precision(self) -> float | None:
+        return self.correct / self.n if self.n >= MIN_TIER_N else None
+
+    @property
+    def interval(self) -> tuple[float, float] | None:
+        return wilson(self.correct, self.n) if self.n >= MIN_TIER_N else None
+
+
+@dataclass(frozen=True)
+class SciFactResult:
+    n: int
+    accuracy: float
+    macro_f1: float
+    f1: dict[Label, float]
+    rationale_f1: float
+    tiers: tuple[TierStat, ...]  # high, medium, low
+    asserted_without_passage: int
+
+
+def per_label_f1(gold: Sequence[Label], pred: Sequence[Label]) -> dict[Label, float]:
+    scores: dict[Label, float] = {}
+    for label in metrics.LABELS:
+        tp = sum(g is label and p is label for g, p in zip(gold, pred, strict=True))
+        fp = sum(g is not label and p is label for g, p in zip(gold, pred, strict=True))
+        fn = sum(g is label and p is not label for g, p in zip(gold, pred, strict=True))
+        scores[label] = 2 * tp / (2 * tp + fp + fn) if tp else 0.0
+    return scores
+
+
+def _unbacked(signal: Signal, thresholds: Thresholds) -> bool:
+    """An assertion over the cut with no passage under it (product rule 1)."""
+    return (
+        signal.label is not Label.NEI
+        and signal.score >= thresholds.decide
+        and signal.passage is None
+    )
+
+
+def evaluate_scifact(
+    scored: Sequence[Scored], thresholds: Thresholds, *, k: int, aggregation: str
+) -> SciFactResult:
+    _require(scored, "scifact-dev")
+    gold: list[Label] = []
+    pred: list[Label] = []
+    gold_rationale: list[frozenset[int]] = []
+    pred_rationale: list[frozenset[int]] = []
+    tiers = {"high": [0, 0], "medium": [0, 0], "low": [0, 0]}
+    unbacked = 0
+    for s in scored:
+        signal = signal_for(s.item.claim, s.item.passages, s.probs, k=k, aggregation=aggregation)
+        unbacked += _unbacked(signal, thresholds)
+        label = decide(signal, thresholds)
+        truth = Label(s.item.gold)
+        gold.append(truth)
+        pred.append(label)
+        gold_rationale.append(s.item.rationale)
+        if label is not Label.NEI and signal.passage is not None:
+            pred_rationale.append(frozenset({signal.passage.index}))
+            counts = tiers[thresholds.tier(signal.score)]
+            counts[0] += 1
+            counts[1] += label is truth
+        else:
+            pred_rationale.append(frozenset())
+    return SciFactResult(
+        n=len(scored),
+        accuracy=metrics.accuracy(gold, pred),
+        macro_f1=metrics.macro_f1(gold, pred),
+        f1=per_label_f1(gold, pred),
+        rationale_f1=metrics.rationale_f1(gold_rationale, pred_rationale),
+        tiers=tuple(TierStat(name, n, c) for name, (n, c) in tiers.items()),
+        asserted_without_passage=unbacked,
+    )
+
+
+@dataclass(frozen=True)
+class AveritecResult:
+    n: int
+    counted: int  # claims with a 3-way gold label
+    accuracy_all: float
+    readable: int  # counted claims with at least one readable source
+    accuracy_readable: float
+    majority_baseline: float
+    per_label: dict[str, tuple[int, int]]  # gold label -> (n, correct)
+    asserted_without_passage: int
+
+
+def evaluate_averitec(
+    claims: Sequence[SnapshotClaim],
+    scored: Sequence[Scored],
+    thresholds: Thresholds,
+    *,
+    k: int,
+    aggregation: str,
+) -> AveritecResult:
+    """Per claim, the rule of ``eval_averitec._decide_claim``.
+
+    The strongest decided non-NEI verdict across the claim's sources wins. A claim
+    with a readable source and no assertion is NEI. A claim with nothing readable is
+    unanswered, and is scored as NEI.
+    """
+    _require(scored, "averitec")
+    by_group: dict[str, list[Scored]] = {}
+    for s in scored:
+        by_group.setdefault(s.item.group, []).append(s)
+    per_label: dict[str, tuple[int, int]] = {}
+    golds: list[Label] = []
+    correct_all = readable = correct_readable = unbacked = 0
+    for claim in claims:
+        group = by_group.get(f"averitec:{claim.claim_id}", [])
+        best: Signal | None = None
+        for s in group:
+            signal = signal_for(
+                s.item.claim, s.item.passages, s.probs, k=k, aggregation=aggregation
+            )
+            unbacked += _unbacked(signal, thresholds)
+            if decide(signal, thresholds) is Label.NEI:
+                continue
+            if best is None or signal.score > best.score:
+                best = signal
+        predicted = best.label if best is not None else Label.NEI
+        gold = averitec.to_label(claim.gold)
+        correct = gold is not None and predicted is gold
+        seen, right = per_label.get(claim.gold, (0, 0))
+        per_label[claim.gold] = (seen + 1, right + int(correct))
+        if gold is None:
+            continue
+        golds.append(gold)
+        correct_all += correct
+        if group:
+            readable += 1
+            correct_readable += correct
+    majority = max(Counter(golds).values(), default=0)
+    return AveritecResult(
+        n=len(claims),
+        counted=len(golds),
+        accuracy_all=correct_all / len(golds) if golds else 0.0,
+        readable=readable,
+        accuracy_readable=correct_readable / readable if readable else 0.0,
+        majority_baseline=majority / len(golds) if golds else 0.0,
+        per_label=per_label,
+        asserted_without_passage=unbacked,
+    )
