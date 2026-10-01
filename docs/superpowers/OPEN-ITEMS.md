@@ -578,3 +578,33 @@ third needed a design decision and is now decided and implemented (19.1).
 | 19.1 | ~~Underspecified claims pass too easily~~ **Decided and implemented 2026-09-30** | "openai won" was `SUPPORTED (found by proofpath)`, medium, on a single vanity-award page ("OpenAI's recognition with a 2026 Global Recognition Award"). The passage does entail the claim, so rules 1–3 hold; but a claim with no object ("won *what*?") is satisfied by any win. **Decided (the user): rule-based, note only.** `claims.is_underspecified` counts content words in the text the models check (`claim.hypothesis or claim.text`, so a translated claim is counted in English): hashtags, handles, punctuation and function words (the sentence openers plus auxiliaries, negation, prepositions, pronouns) are dropped; a number is one term ("12.5") and so is a run of capitalised words, a name ("Elon Musk"). **≤ 2 content terms is underspecified** (`UNDERSPECIFIED_MAX_WORDS`), **unless a linking verb stands between two content terms** — a complete predication ("The Earth is flat", "Revenue was 12.5%"). "openai won", "Elon Musk won", "OpenAI failed" and "It is true" are underspecified; "OpenAI won the award" is not. Every verdict finding on such a claim (all kinds, cited or found) carries `report.UNDERSPECIFIED` in its detail, after `ABSTRACT_BASIS` and before `FOUND_BY_PROOFPATH`; the SARIF message appends it the same way. No judge, no new dependency, and kind, level, tier and exit code are unchanged. A supported *cited* claim still produces no finding, so it gets no note. Known limits: a passive with a linking verb ("OpenAI was acquired") counts as complete, and a cited Turkish sentence is counted untranslated, so it reads slightly shorter. In title case or all caps (every content word capitalised) no names are joined, so a verb is never swallowed into one. Known small misses, documented and left: a sentence-initial adverb joins the name after it ("Yesterday Elon Musk won" is flagged), a dotted abbreviation splits ("U.S. won" is not flagged), a "BREAKING:" prefix counts as a content word, and a two-word name in title case ("Elon Musk Won") is three terms, so it is not flagged. The note is worded for every verdict kind (`underspecified claim: it names no object, time or scope, so many different events match it; check that the passage is about the one meant`). Source credibility (vanity awards, content farms) stays out of scope (§3). Evidence-search spec §2 records the rule |
 | 19.2 | A bot wall inside a site's full template can read as `ok` | challenge *phrases* now count only on pages under `fetch.CHALLENGE_MAX_WORDS` (300) extracted words, so a long real article that says "CAPTCHA" is not blocked. A wall served inside the site's own layout, with menus not in `<nav>`, can exceed 300 words and be read as content (review, 2026-09-30: a 364-word probe). A title/h1 signal was considered and rejected: it would block real pages titled "CAPTCHA". `cf-chl` stays unconditional. Cloudflare's underscore traces (`_cf_chl_opt`, `__cf_chl_f_tk`) are not matched by `cf-chl` — a candidate structural marker |
 | 19.3 | The markdown `## Checked` table does not mark abstract-grade support | a cited claim SUPPORTED by an abstract produces no finding (by design), so its row in `report.py`'s Checked table is the only place it appears, and it carries no abstract mark. The source's own `LOW CONFIDENCE (abstract only)` finding and the coverage line still state it; a per-row mark would make the table honest on its own (review, 2026-09-30) |
+
+## 20. What to improve next — 2026-10-01
+
+Two read-only sweeps (OPEN-ITEMS plus `docs/eval`, and the pipeline code) were turned into
+five packages. The user's decisions:
+
+- **A starts first.** Its first plan was "k=1 → k=3" plus retrieval tweaks. That plan was
+  dropped once the 2026-09-12 sweep showed k=3 does not raise accuracy (0.603 against
+  0.609). A became a measured NLI bake-off with a decision rule fixed in advance
+  (`docs/superpowers/specs/2026-10-01-nli-bakeoff-design.md`). The candidates are the
+  current base model and the two large int8 exports, cross-encoder and MoritzLaurer
+  FEVER/ANLI, downloaded for the eval only.
+- **Calibration** is fitted on SciFact **train** and reported on dev.
+- **Wayback** is tried after 429/5xx only. A URL that robots.txt disallows is never read
+  from the archive.
+
+### Backlog (packages B–E)
+
+| # | Item | Note |
+|---|---|---|
+| 20.1 | Unpaywall never runs by default | `oa.py` skips Unpaywall without a contact email, and the default is `""` (`config.py`). Add a `/config` "Contact email" row, in the same pattern as the Tavily row |
+| 20.2 | Optional Semantic Scholar API key | lifts the 1.1 s/request throttle; same as 7.9 and 8.21 |
+| 20.3 | Web pages use the paper full-text bar | `FULLTEXT_MIN_WORDS=1500` labels a normal news article "abstract only". Web needs its own lower bar (see 8.16) |
+| 20.4 | Wayback after 429/5xx | `fetch.py` skips the archive on rate limits and server errors. Pick the snapshot nearest the citation year, not the newest |
+| 20.5 | Crossref `/works/{doi}` is fetched three times per source | in resolve, the retraction check and the OA chain; add an in-memory memo |
+| 20.6 | Concurrent cold resolve/OA | thread pool over the thread-safe `polite.py` throttle. Needs per-thread cache connections first (10.11). Same as 11.10 |
+| 20.7 | Skip model loads on a fully cached re-run | same as 10.2 |
+| 20.8 | Bibliography parsing that was measured but never shipped | two-column rejoin (9.10/12.1), multi-block headless fallback (11.11), more headings (16.5), `[1]-[3]` ranges (9.4) |
+| 20.9 | The judge's quote is never checked | `judge._collect` does not verify that the quoted span occurs in the passage. Checking it is a cheap way to enforce product rule 1 |
+| 20.10 | Eval honesty | add a `--judge` flag to `scripts/eval_averitec.py`; do one run with the browser allowed; show the 0.404 search score in the README "Measured" table |
