@@ -26,6 +26,7 @@ the two halves composed, for a caller that wants neither on its own.
 
 from __future__ import annotations
 
+import platform
 import re
 import sqlite3
 import threading
@@ -48,7 +49,7 @@ from proofpath import resolve as resolve_mod
 from proofpath.browser import Answer, ConsentGate
 from proofpath.cache import Cache
 from proofpath.claims import Claims
-from proofpath.config import Config
+from proofpath.config import Config, NliProfileName
 from proofpath.document import CitationMarker, Claim, Document, Locator, Reference
 from proofpath.entailment import OnnxNli, Scorer
 from proofpath.events import (
@@ -63,11 +64,13 @@ from proofpath.events import (
 )
 from proofpath.fetch import Fetched, Fetcher, Outcome
 from proofpath.judge import Judge, JudgeCost, JudgeItem, JudgeOpinion
+from proofpath.model_gate import ModelGate, Refusal, download_profile
 from proofpath.models import Label, Passage, Verdict
 from proofpath.oa import OpenAccess
 from proofpath.paths import models_dir
 from proofpath.pipeline import DEFAULT_THRESHOLDS, Thresholds
 from proofpath.polite import PoliteClient, ProviderError, user_agent
+from proofpath.profiles import DEFAULT_PROFILE, PROFILES, NliProfile, profile_installed
 from proofpath.providers import (  # noqa: F401 - two names re-exported, see below
     ARXIV_PREFIX,
     DOI_PREFIX,
@@ -119,7 +122,13 @@ from proofpath.search import Searcher, SearchKeyError, canonical, search_claim
 from proofpath.search.providers import build_searcher
 from proofpath.search.queries import plan_queries
 from proofpath.secrets import CREDENTIALS_MISSING
-from proofpath.settings_hints import BROWSER_SETTING, SEARCH_SETTING, SEARXNG_SETTING
+from proofpath.settings_hints import (
+    BROWSER_SETTING,
+    MODEL_ALLOW_SETTING,
+    MODEL_SETTING,
+    SEARCH_SETTING,
+    SEARXNG_SETTING,
+)
 
 # Stage names, as the report and the TUI print them (spec section 13.2).
 PARSING = "Parsing"
@@ -283,11 +292,31 @@ class Engine:
     gate: ConsentGate
     embedder: Callable[[], Embedder]
     scorer: Callable[[], Scorer]
-    # k=1 and the thresholds beside it are the SciFact dev calibration of 2026-09-12
-    # (spec section 14, docs/eval/2026-09-12-tiers.md): k=2 ties on accuracy and k=3
-    # is worse, so the cheapest of the tied settings is the one that ships.
+    # The k and the cuts this run decides with. The defaults are the default profile's
+    # (SciFact dev, 2026-09-12; docs/eval/2026-09-12-tiers.md: k=2 ties on accuracy and
+    # k=3 is worse, so the cheapest of the tied settings ships). ``resolve_nli`` replaces
+    # each one with the resolved profile's when its ``*_from_profile`` switch is on,
+    # which is how ``Engine.default`` builds an engine unless its caller pinned the
+    # value; an engine assembled by hand keeps what it was given (see ``resolve_nli``).
     k: int = 1
     thresholds: Thresholds = DEFAULT_THRESHOLDS
+    k_from_profile: bool = False
+    thresholds_from_profile: bool = False
+    # The NLI profile this run asked for (``models.nli`` or ``--accurate``) and the gate
+    # in front of a profile that has to be downloaded first (product rule 5). The
+    # default profile never goes through the gate; ``None`` here means a profile that
+    # needs it cannot be used, and the run falls back to the default and says so.
+    nli_requested: NliProfileName = "default"
+    model_gate: ModelGate | None = None
+    # Set once by ``resolve_nli``: the profile the run actually uses, and why it is not
+    # the requested one when it is not (empty otherwise). A report states both, since
+    # silently running another model would make it claim a model it did not run.
+    nli_profile: NliProfile | None = None
+    nli_fallback: str = ""
+    # The gate's ``Refusal`` behind ``nli_fallback``, so the line that reports it can
+    # give advice that fits (a failed download wants a retry, not a setting). ``None``
+    # with a fallback means there was no gate to ask.
+    nli_refusal: Refusal | None = None
     device: str = "cpu"
     # The opt-in second opinion. ``None`` is the default path, and the default path
     # makes zero LLM calls (spec section 11). Nothing downstream branches on it
@@ -339,17 +368,29 @@ class Engine:
         browser: bool | None = None,
         no_cache: bool = False,
         prompt: Callable[[str, int | None], Answer] | None = None,
-        k: int = 1,
-        thresholds: Thresholds = DEFAULT_THRESHOLDS,
+        k: int | None = None,
+        thresholds: Thresholds | None = None,
         judge: Judge | None = None,
         escalate: bool = True,
         search: bool = True,
+        nli: NliProfileName | None = None,
     ) -> Engine:
         """The real wiring: the same one ``proofpath fetch`` builds, one layer up.
 
         ``interactive`` is passed down rather than sniffed here, so a caller that
         knows it is in CI (or under a pipe) gets ``ask`` treated as ``deny`` all the
         way through — the gate never prompts without a terminal (product rule 4).
+
+        ``nli`` names the NLI profile for this run (``--accurate``); ``None`` leaves it
+        to ``config.models.nli``. Nothing about the profile is looked at here: the
+        model cache is checked, and the user asked, only when the verifying stage
+        needs the model (``resolve_nli``), so building an engine stays model-free and
+        network-free.
+
+        ``k`` and ``thresholds`` pin those values for tests and evaluations. Each one
+        given wins over the resolved profile's; each one left ``None`` follows the
+        profile the run resolves to. They are independent, so pinning ``k`` alone
+        still decides with the profile's cuts.
         """
         closers: list[Callable[[], None]] = []
         if judge is not None:
@@ -381,6 +422,16 @@ class Engine:
             closers.append(resolver_client.close)
             resolver = Resolver(contact_email=email, client=resolver_client)
             device_name = device_mod.onnx_device_name()
+            machine = platform.machine()
+            # The same ``prompt`` as the browser gate: in the TUI that is its own
+            # question block, so a model question never falls back to reading stdin.
+            model_gate = ModelGate(
+                config.permissions.install_model,
+                interactive=interactive,
+                prompt=prompt,
+                download=lambda profile: download_profile(profile, models_dir(), machine),
+                installed=lambda profile: profile_installed(profile, models_dir(), machine),
+            )
         except Exception:
             _close_all(closers)
             raise
@@ -393,12 +444,20 @@ class Engine:
             )
 
         def scorer() -> Scorer:
-            # No ``providers`` and no ``onnx_file``: ``entailment.providers_for``
-            # then picks them from the export it actually chose, which is what
-            # keeps CoreML out of the int8 path (measured 3x slower there).
-            return OnnxNli(cache_dir=models_dir())
+            # The profile the run resolved to; ``decide_all`` resolves it first, so this
+            # only ever reads the answer. The default profile's file is the one
+            # ``OnnxNli`` would pick by itself. No ``providers``:
+            # ``entailment.providers_for`` picks them from the export, which is what
+            # keeps CoreML out of the int8 and ``quantized`` paths (measured 3x slower).
+            profile = built.resolve_nli()
+            return OnnxNli(
+                cache_dir=models_dir(),
+                repo_id=profile.repo,
+                revision=profile.revision,
+                onnx_file=profile.onnx_file(machine),
+            )
 
-        return cls(
+        built = cls(
             config=config,
             cache=cache,
             resolver=resolver,
@@ -408,8 +467,12 @@ class Engine:
             client=client,
             embedder=embedder,
             scorer=scorer,
-            k=k,
-            thresholds=thresholds,
+            k=DEFAULT_PROFILE.k if k is None else k,
+            thresholds=DEFAULT_PROFILE.thresholds if thresholds is None else thresholds,
+            k_from_profile=k is None,
+            thresholds_from_profile=thresholds is None,
+            nli_requested=config.models.nli if nli is None else nli,
+            model_gate=model_gate,
             device=device_name,
             judge=judge,
             escalate=escalate,
@@ -419,6 +482,39 @@ class Engine:
             search=search and config.permissions.web_search == "allow",
             _closers=closers,
         )
+        return built
+
+    def resolve_nli(self) -> NliProfile:
+        """The NLI profile this run uses, decided once and then remembered.
+
+        The default profile is used as it is: it never asks and its first download
+        behaves as it always has. Any other profile goes through ``model_gate``, which
+        may find it installed, ask, download it, or refuse; a refusal or a failed
+        download falls back to the default profile and records why in
+        ``nli_fallback`` (product rule 6). After this, ``k`` and ``thresholds`` are the
+        resolved profile's unless they were pinned (``*_from_profile`` off), so the
+        cache key and every decision read the values of the model that actually runs.
+        """
+        if self.nli_profile is not None:
+            return self.nli_profile
+        profile = DEFAULT_PROFILE
+        wanted = PROFILES[self.nli_requested]
+        if wanted is not DEFAULT_PROFILE:
+            if self.model_gate is None:
+                self.nli_fallback = "no consent gate on this engine"
+            else:
+                decision = self.model_gate.ensure(wanted)
+                if decision.outcome == "allow":
+                    profile = wanted
+                else:
+                    self.nli_fallback = decision.reason
+                    self.nli_refusal = self.model_gate.refusal(wanted)
+        if self.k_from_profile:
+            self.k = profile.k
+        if self.thresholds_from_profile:
+            self.thresholds = profile.thresholds
+        self.nli_profile = profile
+        return profile
 
     def get_embedder(self) -> Embedder:
         """The run's embedder, built at most once and owned by this engine."""
@@ -1277,6 +1373,10 @@ def decide_all(
         if jobs:
             # A run told to stop before it started must not pay for two ONNX sessions.
             check()
+            # Before the models load: the profile decides which NLI model is built and
+            # the k and cuts the key below is made of, and its question (if any) comes
+            # before the wait for the models, not hidden behind it.
+            _resolve_nli(engine, emit)
             emit(Note(LOADING_MODELS, transient=True))
             # Built through the engine, not called as factories: the engine keeps
             # them, so nothing here outlives ``Engine.close()`` holding a session.
@@ -1371,7 +1471,7 @@ def decide_all(
         api_calls=0 if judge_cost is None else judge_cost.calls - judge_cost.local_calls,
         judge_cost=judge_cost,
         elapsed=time.monotonic() - prepared.started,
-        tier_note=pipeline.tier_note(engine.thresholds),
+        tier_note=pipeline.tier_note(_tuning(engine)[1]),
         cancelled=cancelled,
         search=prepared.search,
         # The hint (no fallback, but one is worth adding) rides the same one-line
@@ -1736,17 +1836,93 @@ def _coverage(prepared: Prepared, engine: Engine) -> Coverage:
     )
 
 
+def _resolve_nli(engine: Engine, emit: Listener) -> None:
+    """Resolve the run's NLI profile and say what that took, as Notes.
+
+    The gate's log lines go out as Notes the moment they are written, not after
+    ``ensure`` returns: "downloading ... 643 MB" is worth saying before the long wait,
+    not after it. The gate's ``on_log`` points at this run's listener for exactly as
+    long as the resolution takes, then goes back to what it was. A fallback adds one
+    line that says why and what would change it, so a run that wanted the accurate
+    model and did not get it never reads like one that did.
+    """
+    gate = engine.model_gate
+    if gate is None:
+        engine.resolve_nli()
+    else:
+        before = gate.on_log
+        # "installed" stays in the gate's log only: it is the normal case, not news.
+        # Only lines about asking, downloading or failing are worth a Note.
+        gate.on_log = lambda line: None if line.endswith(": installed") else emit(Note(line))
+        try:
+            engine.resolve_nli()
+        finally:
+            gate.on_log = before
+    if engine.nli_fallback:
+        emit(
+            Note(_nli_fallback_note(engine.nli_requested, engine.nli_fallback, engine.nli_refusal))
+        )
+
+
+def _nli_fallback_note(requested: str, reason: str, refusal: Refusal | None) -> str:
+    """The fallback line, with the advice that fits why the profile was not used.
+
+    Decided by the gate's ``Refusal``, never by the reason's wording: a failed download
+    is retried, not re-permitted; a run with no terminal cannot be asked, so ``ask``
+    would change nothing and only ``allow`` (or a terminal) can; a refused permission
+    is what the ``ask`` setting changes; a "no" for this run is asked again next time.
+    """
+    head = f"{requested} NLI model not used: {reason} — using the default model."
+    if refusal == "download_failed":
+        return f"{head} Retry when online."
+    if refusal == "no_terminal":
+        return f"{head} To download it, run in a terminal or set {MODEL_ALLOW_SETTING}"
+    if refusal == "refused":
+        # ``ask`` only helps where a terminal can answer; ``allow`` works anywhere.
+        return (
+            f"{head} To allow the download: {MODEL_SETTING} (asks in a terminal) "
+            f"or {MODEL_ALLOW_SETTING}"
+        )
+    if refusal == "declined":
+        return f"{head} The next run asks again."
+    return head
+
+
+def _tuning(engine: Engine) -> tuple[int, Thresholds]:
+    """The k and cuts a report states for this run.
+
+    After resolution they are the engine's own. A run that never reached the models
+    resolved nothing and asked nobody, so the values that follow the profile are the
+    requested profile's static ones: read from ``PROFILES``, with no gate call and no
+    I/O, rather than the default's, which nothing in the run chose.
+    """
+    if engine.nli_profile is not None:
+        return engine.k, engine.thresholds
+    planned = PROFILES[engine.nli_requested]
+    return (
+        planned.k if engine.k_from_profile else engine.k,
+        planned.thresholds if engine.thresholds_from_profile else engine.thresholds,
+    )
+
+
 def _models(embedder: Embedder | None, scorer: Scorer | None, engine: Engine) -> dict[str, str]:
     """What decided this run. ``NO_MODEL`` where none was loaded, never a name."""
-    thresholds = engine.thresholds
-    models = {
-        "nli": NO_MODEL if scorer is None else scorer.name,
-        "embedder": NO_MODEL if embedder is None else embedder.name,
-        "device": engine.device,
-        "thresholds": (
-            f"decide={thresholds.decide:g};high={thresholds.high:g};medium={thresholds.medium:g}"
-        ),
-    }
+    k, thresholds = _tuning(engine)
+    models = {"nli": NO_MODEL if scorer is None else scorer.name}
+    if engine.nli_fallback:
+        # Beside the model that did run, so the two are read together.
+        models["nli_requested"] = f"{engine.nli_requested} ({engine.nli_fallback})"
+    models.update(
+        {
+            "embedder": NO_MODEL if embedder is None else embedder.name,
+            "device": engine.device,
+            "k": str(k),
+            "thresholds": (
+                f"decide={thresholds.decide:g};high={thresholds.high:g};"
+                f"medium={thresholds.medium:g}"
+            ),
+        }
+    )
     if engine.judge is not None:
         # Only when one was asked. A ``NO_MODEL`` dash here would put a judge row in
         # every report, and a run that consulted nobody has no judge to name.

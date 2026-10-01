@@ -534,6 +534,16 @@ def check(
             help="Do not search the web for evidence when the text cites no source.",
         ),
     ] = False,
+    accurate: Annotated[
+        bool,
+        typer.Option(
+            "--accurate",
+            help=(
+                "Use the larger accurate NLI model for this run "
+                "(643 MB, downloaded once with consent)."
+            ),
+        ),
+    ] = False,
     out_path: Annotated[
         Path | None,
         typer.Option(
@@ -586,6 +596,9 @@ def check(
                 # nothing else; the escalation stage is what ``--judge`` buys.
                 escalate=judge,
                 search=not no_search,
+                # Which model, not consent to download it: the engine's model gate
+                # still asks. Without the flag ``models.nli`` in the config decides.
+                nli="accurate" if accurate else None,
             ) as engine,
             _interruptible(cancel),
         ):
@@ -640,6 +653,12 @@ def check(
         for item in report_mod.render_diagnostics(report):
             ui.diagnostic(out, item)
         ui.blank(out)
+        fallback = report_mod.nli_fallback_line(report)
+        if fallback is not None:
+            # Same rule as the ``judge`` and ``summary`` lines below: the note that says
+            # so is dropped under ``-q``, and a run that used another model than the
+            # one asked for must not read like one that did not (product rule 6).
+            ui.kv(out, "nli", fallback)
         unanswered = report_mod.judge_unavailable_line(report)
         if unanswered is not None:
             # Same rule as the ``summary`` line below: the stage row and the note are

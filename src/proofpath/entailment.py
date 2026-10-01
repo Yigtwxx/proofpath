@@ -62,12 +62,15 @@ def providers_for(onnx_file: str, available: Sequence[str]) -> list[str]:
 
     The project rule is CUDA -> CoreML -> CPU. For the int8 exports CoreML is
     skipped: measured 2026-09-11 on Apple Silicon, CoreML handles 880 of the 2,524
-    nodes and the partitioning makes it 3x slower than plain CPU.
+    nodes and the partitioning makes it 3x slower than plain CPU. ``quantized`` is the
+    same dynamic int8 under another repo's name (the accurate profile's only export),
+    and without it a Mac would run the large model on that slow path.
     """
     from proofpath.device import onnx_providers_from
 
     chosen = onnx_providers_from(available)
-    if "int8" in Path(onnx_file).stem:
+    stem = Path(onnx_file).stem
+    if "int8" in stem or "quantized" in stem:
         chosen = [p for p in chosen if p != "CoreMLExecutionProvider"]
     return chosen
 

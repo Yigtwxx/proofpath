@@ -47,7 +47,7 @@ TARGETS: tuple[tuple[float, float], ...] = ((0.85, 0.70), (0.80, 0.65))
 CUT_DECIMALS = pipeline.CUT_DECIMALS
 # How close `medium` may sit to `decide` before the `low` tier stops meaning
 # anything: inside this margin every asserted verdict is medium or better.
-LOW_TIER_MARGIN = 0.01
+LOW_TIER_MARGIN = pipeline.LOW_TIER_MARGIN
 PROVIDER_NAMES = {
     "cuda": "CUDAExecutionProvider",
     "coreml": "CoreMLExecutionProvider",

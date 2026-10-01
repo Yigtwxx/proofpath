@@ -7,7 +7,9 @@ import pytest
 from proofpath.models import Label, Passage
 from proofpath.pipeline import (
     DEFAULT_THRESHOLDS,
+    LOW_TIER_MARGIN,
     NO_HIGH_TIER,
+    NO_LOW_TIER,
     Thresholds,
     decide,
     decide_indexed,
@@ -157,7 +159,35 @@ def test_tier_note_is_written_exactly_when_no_high_tier_can_be_earned() -> None:
     # leave a report claiming a tier the split did not support — or apologising for
     # one it did.
     assert tier_note(Thresholds(decide=0.45, high=1.0, medium=0.5)) == NO_HIGH_TIER
-    assert tier_note(Thresholds(decide=0.45, high=0.99933, medium=0.457948)) == ""
+    assert tier_note(Thresholds(decide=0.45, high=0.99933, medium=0.5)) == ""
+
+
+def test_tier_note_admits_a_medium_cut_that_sits_on_decide() -> None:
+    # The shipped default: 0.457948 is 0.008 above 0.45, so `low` holds almost no
+    # asserted verdict, and the 2026-09-12 tier doc already says so.
+    assert LOW_TIER_MARGIN == 0.01
+    assert tier_note(Thresholds(decide=0.45, high=0.99933, medium=0.457948)) == NO_LOW_TIER
+    assert tier_note(DEFAULT_THRESHOLDS) == NO_LOW_TIER
+    # Exactly on decide is the extreme case of the same thing.
+    assert tier_note(Thresholds(decide=0.45, high=0.99933, medium=0.45)) == NO_LOW_TIER
+    # One margin or more above decide is a real band.
+    assert tier_note(Thresholds(decide=0.45, high=0.99933, medium=0.47)) == ""
+
+
+def test_tier_note_joins_both_notes_when_both_tiers_are_missing() -> None:
+    both = tier_note(Thresholds(decide=0.45, high=1.0, medium=0.455))
+    assert both == f"{NO_HIGH_TIER}; {NO_LOW_TIER}"
+
+
+def test_the_two_notes_read_as_one_sentence_each() -> None:
+    # Joined with "; " into one line of the footer and the markdown preamble, so
+    # neither may carry its own full stop or capital.
+    for note in (NO_HIGH_TIER, NO_LOW_TIER):
+        assert note == note.strip()
+        assert note[0].islower()
+        assert not note.endswith(".")
+        # A "; " inside one note would blur where it ends and the next begins.
+        assert "; " not in note
 
 
 def test_a_high_cut_of_one_leaves_medium_as_the_strongest_tier_a_score_can_reach() -> None:

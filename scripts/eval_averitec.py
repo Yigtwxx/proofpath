@@ -37,7 +37,7 @@ from urllib.parse import urlsplit
 
 from proofpath import claims as claims_mod
 from proofpath import ingest, pipeline, retrieval
-from proofpath.config import SearchConfig, load_config
+from proofpath.config import NliProfileName, SearchConfig, load_config
 from proofpath.eval import averitec
 from proofpath.fetch import Fetched
 from proofpath.models import Label, Passage
@@ -412,6 +412,9 @@ def _decide_claim(
     )
 
 
+NLI_PROFILE: NliProfileName = "default"
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--limit", type=int, default=100, help="first N dev claims")
@@ -456,7 +459,12 @@ def main(argv: list[str] | None = None) -> int:
     # ``interactive=False`` so an `ask` permission is denied and reported rather than
     # prompted for (product rule 4); ``--no-browser`` forces the browser step off
     # outright, otherwise the config's own permission decides.
-    engine = Engine.default(config, interactive=False, browser=False if args.no_browser else None)
+    # ``nli="default"`` is pinned: the published numbers describe the default install,
+    # so the user's ``models.nli`` must not change what this script measures.
+    engine = Engine.default(
+        config, interactive=False, browser=False if args.no_browser else None, nli=NLI_PROFILE
+    )
+    print(f"nli       {NLI_PROFILE} profile (pinned; ignores models.nli)")
     searcher: Searcher | None = None
     if args.search:
         # ``Engine.default`` already resolved the configured provider onto its own

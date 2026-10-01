@@ -345,8 +345,8 @@ class Report:
     models: dict[str, str]
     api_calls: int
     elapsed: float
-    # What this run's thresholds owe the reader about their top tier (spec section 14),
-    # from ``pipeline.tier_note``. Empty when the calibration earned a `high` band. It
+    # What this run's thresholds owe the reader about their tiers (spec section 14),
+    # from ``pipeline.tier_note``. Empty when every tier is reachable. It
     # belongs to the run and not to the process: two runs in one session may be
     # calibrated differently, and each report must say what its own numbers support.
     tier_note: str = ""
@@ -582,6 +582,20 @@ def summary_unavailable(report: Report) -> str | None:
     return f"{JUDGE} {found.removeprefix(f'{SUMMARY} ')}"
 
 
+def nli_fallback_line(report: Report) -> str | None:
+    """The ``nli`` line's value when the requested NLI profile was not the one used.
+
+    ``models["nli_requested"]`` is only there on a fallback. The run's Note says the
+    same thing, but notes are dropped under ``-q``, and a run that decided with
+    another model than the one asked for must not read like one that did not
+    (product rule 6), so the terminal prints this whatever the verbosity.
+    """
+    requested = report.models.get("nli_requested")
+    if requested is None:
+        return None
+    return f"default model chosen; requested {requested}"
+
+
 # ``pipeline.py`` writes this reason when a rule, not the model, refuted a claim. It
 # is parsed back out rather than re-derived, so the caret line and the verdict can
 # never disagree about which figure was wrong.
@@ -636,8 +650,8 @@ class Footer:
     # Citation markers left over when no bibliography was found at all: the
     # denominator is 0, so ``weak`` cannot speak for them (see ``_unchecked``).
     unchecked_markers: int = 0
-    # ``Report.tier_note`` when the calibration left no reachable ``high`` band, so
-    # a run never shows `medium` as if a stronger tier existed and was withheld.
+    # ``Report.tier_note`` when the calibration left a tier unreachable or empty, so a
+    # run never shows `medium` as if a stronger or weaker tier existed and was withheld.
     note: str | None = None
     # Sources that stopped at the section 7.1 consent gate, from
     # ``Coverage.browser_skipped``. The reason they are unread is a permission, not a

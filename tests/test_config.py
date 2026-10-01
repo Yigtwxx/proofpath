@@ -162,3 +162,62 @@ def test_set_value_takes_a_search_provider(tmp_path: Path) -> None:
     assert cfg.set_value("search.provider", "tavily", path).search.provider == "tavily"
     with pytest.raises(cfg.ConfigError, match=r"search\.provider"):
         cfg.set_value("search.provider", "bing", path)
+
+
+# --- the accurate NLI profile (docs/superpowers/specs/2026-10-01-accurate-nli-design.md)
+
+
+def test_the_default_model_is_the_default_profile_and_its_install_asks() -> None:
+    config = cfg.Config()
+    assert config.models == cfg.ModelsConfig()
+    assert config.models.nli == "default"
+    assert cfg.NLI_PROFILE_NAMES == ("default", "accurate")
+    # Rule 5: a 643 MB download is never made without consent.
+    assert config.permissions.install_model == "ask"
+
+
+def test_the_models_section_and_the_install_permission_load_from_toml(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text(
+        '[models]\nnli = "accurate"\n\n[permissions]\ninstall_model = "allow"\n',
+        encoding="utf-8",
+    )
+    config = cfg.load_config(path)
+    assert config.models.nli == "accurate"
+    assert config.permissions.install_model == "allow"
+
+
+@pytest.mark.parametrize("body", ['nli = "fast"', "nli = 1", 'nli = "Accurate"'])
+def test_an_unknown_nli_profile_is_refused_by_name(tmp_path: Path, body: str) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text(f"[models]\n{body}\n", encoding="utf-8")
+    with pytest.raises(cfg.ConfigError, match=r"models\.nli"):
+        cfg.load_config(path)
+
+
+def test_a_bad_install_model_permission_is_refused(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text('[permissions]\ninstall_model = "sometimes"\n', encoding="utf-8")
+    with pytest.raises(cfg.ConfigError, match=r"permissions\.install_model"):
+        cfg.load_config(path)
+
+
+def test_set_value_takes_the_nli_profile_and_round_trips_it(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    updated = cfg.set_value("models.nli", "accurate", path)
+    assert updated.models.nli == "accurate"
+    text = path.read_text(encoding="utf-8")
+    assert "[models]" in text.splitlines()
+    assert 'nli = "accurate"' in text.splitlines()
+    assert text == cfg.render_config(updated)
+    assert cfg.load_config(path) == updated
+    with pytest.raises(cfg.ConfigError, match=r"models\.nli"):
+        cfg.set_value("models.nli", "fast", path)
+    assert cfg.load_config(path).models.nli == "accurate"
+
+
+def test_set_value_takes_the_install_model_permission(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    assert cfg.set_value("permissions.install_model", "deny", path).permissions == (
+        cfg.Permissions(install_model="deny")
+    )

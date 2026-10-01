@@ -28,9 +28,11 @@ from proofpath.config import Config
 from proofpath.events import Cancelled
 from proofpath.fetch import Fetched, FetchStats, Outcome
 from proofpath.judge import Completion, Judge, JudgeCost, JudgeUnavailable
+from proofpath.model_gate import ModelGate
 from proofpath.oa import Attempt, Evidence, Location
 from proofpath.resolve import Candidate, ResolveResult, Retraction, State
 from proofpath.retrieval import Embedder
+from proofpath.settings_hints import MODEL_ALLOW_SETTING
 from proofpath.verify import Engine
 from tests.fakes import TableScorer, WordEmbedder
 
@@ -617,6 +619,75 @@ def test_no_cache_reaches_the_engine(monkeypatch: pytest.MonkeyPatch) -> None:
     result = runner.invoke(app, ["check", "-", "--no-cache"], input=draft(CLEAN_BODY))
     assert result.exit_code == 0, result.output
     assert seen["no_cache"] is True
+
+
+def test_accurate_reaches_the_engine_as_the_accurate_profile(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen = install(monkeypatch)
+    result = runner.invoke(app, ["check", "-", "--accurate"], input=draft(CLEAN_BODY))
+    assert result.exit_code == 0, result.output
+    assert seen["nli"] == "accurate"
+
+
+def test_without_accurate_the_config_decides_the_profile(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen = install(monkeypatch)
+    result = runner.invoke(app, ["check", "-"], input=draft(CLEAN_BODY))
+    assert result.exit_code == 0, result.output
+    assert seen["nli"] is None
+
+
+def test_a_refused_accurate_model_is_said_on_stderr_and_in_the_report(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Piped, so ``ask`` is a denial (rule 4); the run goes on with the default model
+    # and says so where a human reads it, leaving stdout one JSON document.
+    install(monkeypatch, refused_accurate_engine())
+    result = runner.invoke(
+        app, ["check", "-", "--accurate", "--format", "json"], input=draft(CLEAN_BODY)
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "accurate NLI model not used" in result.stderr
+    # No terminal: ``ask`` is already the setting, so the advice is ``allow``.
+    assert MODEL_ALLOW_SETTING in result.stderr
+    models = json.loads(result.stdout)["models"]
+    assert models["nli_requested"].startswith("accurate (permission is set to ask")
+
+
+def refused_accurate_engine() -> Engine:
+    """A stub engine asked for the accurate profile with no terminal to consent on."""
+    built = built_engine()
+    built.nli_requested = "accurate"
+    built.model_gate = ModelGate(
+        "ask", interactive=False, installed=lambda _p: False, download=lambda _p: None
+    )
+    return built
+
+
+def test_a_quiet_run_still_says_the_accurate_model_was_not_used(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # ``-q`` drops the note; the ``nli`` line is a state of the run and stays (rule 6).
+    install(monkeypatch, refused_accurate_engine())
+    result = runner.invoke(app, ["-q", "check", "-", "--accurate"], input=draft(CLEAN_BODY))
+
+    assert result.exit_code == 0, result.output
+    assert "NLI model not used" not in result.output
+    line = next(row for row in result.stdout.splitlines() if row.startswith("nli "))
+    assert line.split(maxsplit=1)[1] == (
+        "default model chosen; requested accurate"
+        " (permission is set to ask but there is no interactive terminal)"
+    )
+
+
+def test_a_run_that_used_the_model_it_asked_for_prints_no_nli_line(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    install(monkeypatch)
+    result = runner.invoke(app, ["-q", "check", "-"], input=draft(CLEAN_BODY))
+    assert result.exit_code == 0, result.output
+    assert not any(row.startswith("nli ") for row in result.stdout.splitlines())
 
 
 # --- --format json -------------------------------------------------------------------
