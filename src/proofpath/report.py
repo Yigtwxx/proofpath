@@ -345,8 +345,8 @@ class Report:
     models: dict[str, str]
     api_calls: int
     elapsed: float
-    # What this run's thresholds owe the reader about their top tier (spec section 14),
-    # from ``pipeline.tier_note``. Empty when the calibration earned a `high` band. It
+    # What this run's thresholds owe the reader about their tiers (spec section 14),
+    # from ``pipeline.tier_note``. Empty when every tier is reachable. It
     # belongs to the run and not to the process: two runs in one session may be
     # calibrated differently, and each report must say what its own numbers support.
     tier_note: str = ""
@@ -636,8 +636,8 @@ class Footer:
     # Citation markers left over when no bibliography was found at all: the
     # denominator is 0, so ``weak`` cannot speak for them (see ``_unchecked``).
     unchecked_markers: int = 0
-    # ``Report.tier_note`` when the calibration left no reachable ``high`` band, so
-    # a run never shows `medium` as if a stronger tier existed and was withheld.
+    # ``Report.tier_note`` when the calibration left a tier unreachable or empty, so a
+    # run never shows `medium` as if a stronger or weaker tier existed and was withheld.
     note: str | None = None
     # Sources that stopped at the section 7.1 consent gate, from
     # ``Coverage.browser_skipped``. The reason they are unread is a permission, not a

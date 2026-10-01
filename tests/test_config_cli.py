@@ -28,7 +28,7 @@ def test_config_prints_path_and_every_section_as_toml(config_dir: Path) -> None:
     assert result.exit_code == 0, result.output
     assert str(config_dir / "config.toml") in result.stdout
     assert "not written yet" in result.stdout
-    for section in ("[permissions]", "[fetch]", "[contact]", "[judge]", "[search]"):
+    for section in ("[permissions]", "[fetch]", "[contact]", "[judge]", "[search]", "[models]"):
         assert section in result.stdout
     assert 'install_browser = "ask"' in result.stdout
     assert "GROQ_API_KEY" in result.stdout
@@ -166,3 +166,37 @@ def test_the_search_provider_values_and_the_hinted_settings_are_the_real_ones(
         result = runner.invoke(app, ["config", "set", *setting.split()])
         assert result.exit_code == 0, result.output
         assert result.stdout.startswith(f"{setting.replace(' ', ' = ', 1)}  (")
+
+
+# --- the accurate NLI profile ---------------------------------------------------------
+
+
+def test_config_renders_the_models_section_and_the_install_model_permission(
+    config_dir: Path,
+) -> None:
+    lines = runner.invoke(app, ["config"]).stdout.splitlines()
+    assert 'nli = "default"' in lines
+    assert 'install_model = "ask"' in lines
+
+
+def test_config_set_models_nli_accurate_persists(config_dir: Path) -> None:
+    result = runner.invoke(app, ["config", "set", "models.nli", "accurate"])
+    assert result.exit_code == 0, result.output
+    assert result.stdout.startswith("models.nli = accurate  (")
+    assert 'nli = "accurate"' in runner.invoke(app, ["config"]).stdout.splitlines()
+
+
+def test_config_set_models_nli_refuses_an_unknown_profile(config_dir: Path) -> None:
+    result = runner.invoke(app, ["config", "set", "models.nli", "fast"])
+    assert result.exit_code == 2
+    assert "models.nli" in result.output
+    assert not (config_dir / "config.toml").exists()
+
+
+def test_the_model_setting_hint_is_a_command_config_set_accepts(config_dir: Path) -> None:
+    from proofpath.settings_hints import MODEL_SETTING
+
+    assert MODEL_SETTING == "permissions.install_model ask"
+    result = runner.invoke(app, ["config", "set", *MODEL_SETTING.split()])
+    assert result.exit_code == 0, result.output
+    assert result.stdout.startswith("permissions.install_model = ask  (")

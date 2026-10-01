@@ -1284,7 +1284,12 @@ def test_a_run_carries_the_tier_note_of_the_thresholds_it_used() -> None:
     no_high_tier = paper_engine()
     no_high_tier.thresholds = Thresholds(decide=0.45, high=1.0, medium=0.5)
     assert verify(text, no_high_tier).tier_note == pipeline.NO_HIGH_TIER
-    assert verify(text, paper_engine()).tier_note == ""
+    no_tier_gap = paper_engine()
+    no_tier_gap.thresholds = Thresholds(decide=0.45, high=0.99933, medium=0.5)
+    assert verify(text, no_tier_gap).tier_note == ""
+    # The shipped default's ``medium`` sits 0.008 above ``decide``, so its runs admit
+    # that ``low`` holds almost no asserted verdict.
+    assert verify(text, paper_engine()).tier_note == pipeline.NO_LOW_TIER
 
 
 def test_the_verifying_stage_emits_its_own_events() -> None:

@@ -641,7 +641,7 @@
   },
   "api_calls": 0,
   "elapsed": 0.0,
-  "tier_note": "",
+  "tier_note": "this model has no real low tier on SciFact, so an asserted verdict is almost always medium or better",
   "cancelled": false,
   "summary": null,
   "summary_model": null,

@@ -33,6 +33,9 @@ class ConfigError(ValueError):
 class Permissions:
     # Step 3 of the fetch ladder: ~280 MB browser engine. Never installed silently.
     install_browser: Permission = "ask"
+    # The accurate NLI profile: a 643 MB model, downloaded only on consent (rule 5).
+    # Denied or failed, the run falls back to the default profile and says so.
+    install_model: Permission = "ask"
     network: Permission = "allow"
     # Evidence search for a text that cites nothing (OPEN-ITEMS 17.1a). Only matters
     # once ``search.provider`` is set: configuring a provider is the consent. The
@@ -91,6 +94,20 @@ class SearchConfig:
     results_per_claim: int = 3
 
 
+NliProfileName = Literal["default", "accurate"]
+NLI_PROFILE_NAMES: tuple[str, ...] = get_args(NliProfileName)
+
+
+@dataclass(frozen=True)
+class ModelsConfig:
+    """Which NLI profile a run uses (``profiles.PROFILES``). ``default`` is the small
+    model every install ships with; ``accurate`` is the opt-in large one, better on
+    scientific sources and not on news (docs/superpowers/specs/
+    2026-10-01-accurate-nli-design.md)."""
+
+    nli: NliProfileName = "default"
+
+
 @dataclass(frozen=True)
 class Config:
     permissions: Permissions = field(default_factory=Permissions)
@@ -98,6 +115,7 @@ class Config:
     contact: Contact = field(default_factory=Contact)
     judge: JudgeConfig = field(default_factory=JudgeConfig)
     search: SearchConfig = field(default_factory=SearchConfig)
+    models: ModelsConfig = field(default_factory=ModelsConfig)
 
 
 _SECTIONS: dict[str, type] = {
@@ -106,6 +124,7 @@ _SECTIONS: dict[str, type] = {
     "contact": Contact,
     "judge": JudgeConfig,
     "search": SearchConfig,
+    "models": ModelsConfig,
 }
 
 
@@ -183,6 +202,7 @@ def _resolve_type(annotation: Any) -> Any:
         return {
             "Permission": Permission,
             "SearchProvider": SearchProvider,
+            "NliProfileName": NliProfileName,
             "bool": bool,
             "int": int,
             "str": str,

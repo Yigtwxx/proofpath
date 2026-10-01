@@ -59,20 +59,40 @@ DEFAULT_THRESHOLDS = Thresholds(decide=0.45, high=0.99933, medium=0.457948)
 
 # What a report has to admit when the calibration leaves no reachable ``high`` band.
 NO_HIGH_TIER = (
-    "this model earns no high tier on SciFact dev; medium is the strongest confidence shown"
+    "this model earns no high tier on SciFact dev, so medium is the strongest confidence shown"
 )
+# What it has to admit when ``medium`` sits on ``decide``: the ``low`` band between
+# them is too thin to hold an asserted verdict, so ``low`` is in practice the tier of
+# NEI alone. It names SciFact, not a split, because the two profiles were calibrated
+# on different ones (dev for the default, train for the accurate one).
+NO_LOW_TIER = (
+    "this model has no real low tier on SciFact, so an asserted verdict is almost always "
+    "medium or better"
+)
+# How close ``medium`` may sit to ``decide`` before ``low`` stops meaning anything.
+# The same margin ``scripts/eval_scifact.py`` warns at, so the harness and the report
+# agree on which calibrations have two tiers rather than three.
+LOW_TIER_MARGIN = 0.01
 
 
 def tier_note(thresholds: Thresholds) -> str:
-    """What a run using these thresholds owes its reader about its top tier.
+    """What a run using these thresholds owes its reader about its tiers.
 
-    Derived, never hand-set: a recalibration that loses the high tier starts saying so
-    on its own, and one that keeps it cannot leave a stale apology in every report. A
+    Derived, never hand-set: a recalibration that loses a tier starts saying so on its
+    own, and one that keeps it cannot leave a stale apology in every report. A ``high``
     cut of exactly 1.0 is ``eval.metrics.tier_cutpoints`` reporting that no score below
     1.0 held the precision target — only a rule-decided verdict (spec section 10, which
-    scores exactly 1.0) could reach it, and that is not the model earning a tier.
+    scores exactly 1.0) could reach it, and that is not the model earning a tier. A
+    ``medium`` cut within ``LOW_TIER_MARGIN`` of ``decide`` is the other end of the same
+    story (docs/eval/2026-09-12-tiers.md: ``low`` held 1 of 135 asserted verdicts). Both
+    can hold at once, and then both are said, joined with ``"; "``.
     """
-    return NO_HIGH_TIER if thresholds.high >= 1.0 else ""
+    notes: list[str] = []
+    if thresholds.high >= 1.0:
+        notes.append(NO_HIGH_TIER)
+    if thresholds.medium - thresholds.decide < LOW_TIER_MARGIN:
+        notes.append(NO_LOW_TIER)
+    return "; ".join(notes)
 
 
 _SUPPORTED = LABEL_ORDER.index(Label.SUPPORTED)
