@@ -6,6 +6,39 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- **An opt-in accurate NLI model.** The bake-off's winner,
+  `MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli`, runs at k=2 with cuts
+  calibrated on SciFact train. Its SciFact dev macro-F1 is 0.697, against 0.580 for
+  the default model. It is not better on news: on AVeriTeC claims with a readable
+  source it scores 0.475, against 0.537 for the default model at k=2. It is
+  recommended for scientific sources, not for news. It is 643 MB, against 244 MB,
+  and the default install does not change.
+- **`proofpath check --accurate`** uses the accurate model for one run.
+  **`[models] nli = "accurate"`** uses it for every run; set it with
+  `proofpath config set models.nli accurate` or in the `/config` panel.
+- **`permissions.install_model`** guards the 643 MB download. It is `ask` by
+  default: the run asks once, naming the model and its size, with the browser
+  question's answers (once, always, no, never), and "always" and "never" are saved.
+  With no terminal, `ask` is treated as `deny` and the denial is reported. A denied
+  or failed download falls back to the default model and says so in three places:
+  a note with the reason and what would change it (dropped by `-q`, and on stderr
+  under `--format json` or `sarif`); in text mode, an
+  `nli        default model chosen; requested accurate (<reason>)` line that `-q` keeps;
+  and `nli_requested: accurate (<reason>)` in the report's `models` block. That
+  block now also names the `k` that ran.
+
+### Changed
+- **A note when a run has no real low tier.** A run whose `medium` cut sits within
+  0.01 of `decide` now says "this model has no real low tier on SciFact, so an
+  asserted verdict is almost always medium or better". Default runs say it too: the
+  default's `medium` (0.457948) sits 0.008 above `decide` (0.45), which the
+  2026-09-12 tier sweep already measured. When the no-high-tier note also applies,
+  the two are joined with "; ".
+- **The no-high-tier note** now reads "this model earns no high tier on SciFact dev,
+  so medium is the strongest confidence shown".
+- **CI runs strict mypy** over the whole of `src/`.
+
 ### Measured
 - **An NLI bake-off** (`scripts/eval_nli_bakeoff.py`, report in
   `docs/eval/2026-10-01-nli-bakeoff.md`). It compares three NLI models, three

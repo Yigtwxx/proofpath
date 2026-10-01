@@ -202,6 +202,7 @@ settings:
 install_browser = "ask"      # step 3: playwright/patchright + chromium, ~280 MB
                              # default confirmed 2026-09-11: "deny" would hide that
                              # a blocked source was recoverable
+install_model   = "ask"      # the opt-in accurate NLI model, 643 MB (added 2026-10-01)
 network         = "allow"    # outbound HTTP at all
 
 [fetch]
@@ -244,6 +245,22 @@ Rules:
 The prompt appears at most once per run. A denied answer is not re-asked, and the
 report states plainly how many sources were skipped because of it, so a low-coverage
 run is never mistaken for a clean one.
+
+> *2026-10-01:* `install_model` guards the opt-in accurate NLI model
+> (`[models] nli = "accurate"` or `check --accurate`, §12) the same way, with the same
+> four answers. It differs in what a refusal costs: no source is skipped, the run
+> falls back to the default model and reports it
+> (`docs/superpowers/specs/2026-10-01-accurate-nli-design.md`).
+
+| `install_model` situation | Behaviour |
+|---|---|
+| files already cached | no prompt, whatever the setting |
+| `allow` | download once into the model cache, then use it |
+| `deny`, or the answer *never* | default model; a note, the text-mode line `nli        default model chosen; requested accurate (<reason>)` (kept under `-q`), and `nli_requested: accurate (<reason>)` in the report's `models` block |
+| `ask` + interactive TTY | prompt naming the model and its size (643 MB) |
+| `ask` + **no TTY** | **never prompt** — treat as `deny` and report it |
+| download fails | default model; the same note, `nli` line and `nli_requested` entry as a denial, with the failure as the reason |
+| `--accurate` flag | chooses the profile for that run; it is **not** consent |
 
 ## 8. Reference resolution — corrected
 
@@ -505,7 +522,7 @@ unsuppressed terminal line; `-q` cannot hide it. The SARIF log carries findings 
 | Scrapling | browser engines are heavy | core + `curl_cffi` bundled (2.7 MB); browser engine installed on demand with explicit consent (§7.1) |
 | **Inference runtime** | **`torch` + `sentence-transformers` is ~800 MB — larger than the browser engine we ask consent for** | **ONNX runtime by default (base install stays small). `torch` moves to an opt-in `[gpu]` extra.** |
 | Compute device | CUDA on Windows, MPS on Mac | preference order is always CUDA → MPS → CPU; under ONNX the equivalent is CUDA → CoreML → CPU |
-| **NLI model** | a ready-made ONNX cross-encoder had to exist for the "no torch" decision to hold | **verified 2026-09-11:** `cross-encoder/nli-deberta-v3-base` @ `6c749ce3425cd33b46d187e45b92bbf96ee12ec7` ships ONNX (`onnx/model.onnx` 739 MB, `model_O4` 388 MB, int8 variants 244 MB) and `tokenizer.json`. The int8 file is chosen by `platform.machine()` (`qint8_arm64` / `quint8_avx2`). `-small` / `-xsmall` ship the same layout as lighter fallbacks. No `optimum` export, no `transformers` |
+| **NLI model** | a ready-made ONNX cross-encoder had to exist for the "no torch" decision to hold | **verified 2026-09-11:** `cross-encoder/nli-deberta-v3-base` @ `6c749ce3425cd33b46d187e45b92bbf96ee12ec7` ships ONNX (`onnx/model.onnx` 739 MB, `model_O4` 388 MB, int8 variants 244 MB) and `tokenizer.json`. The int8 file is chosen by `platform.machine()` (`qint8_arm64` / `quint8_avx2`). `-small` / `-xsmall` ship the same layout as lighter fallbacks. No `optimum` export, no `transformers`. **2026-10-01:** an opt-in **accurate** profile, `MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli` @ `b3546ea6b0346eb6f8d5d68b13c7dc6d0376b3d7` (`onnx/model_quantized.onnx`, 643 MB, int8, so CoreML is skipped as for the default) at **k=2**, the NLI bake-off's winner (`docs/eval/2026-10-01-nli-bakeoff.md`). Downloaded only with `install_model` consent (§7.1); the default stays the base model |
 | Embedding model | must run under ONNX too | `fastembed` with a pinned model; first candidate `BAAI/bge-small-en-v1.5`, compared against one alternative in the Phase 1 results table |
 | Evaluation data | `allenai/scifact` on Hugging Face is a script-based loader that `datasets ≥ 4` refuses | the original AI2 tarball (`scifact.s3-us-west-2.amazonaws.com/release/latest/data.tar.gz`, verified live 2026-09-11) is downloaded with `httpx` and its sha256 pinned in the loader. No `datasets` dependency |
 | Model cache | different cache roots per OS | `platformdirs` |
@@ -916,6 +933,18 @@ harness asks whether **any verdict reaches the cut** (`n ≥ high == 0`), becaus
 rule-decided verdict scores exactly 1.0 (§10) and so a cut of 1.0 can be reached;
 `tier_note` asks whether **`high >= 1.0`**, because that is the shipped threshold and
 a tier only the numeric rule can enter is not the model earning one.
+
+> *2026-10-01:* the accurate profile (§12) has its own cuts — **k=2, `decide` 0.25,
+> `medium` 0.252721, `high` 0.999142** — fitted on SciFact **train**, not dev. Its
+> calibration leaves rule-decided rows (score exactly 1.0) out of the tier walk: the
+> numeric layer fired 4–6 times on train with none correct, and kept in, those rows
+> pinned `high` at 1.0. They still count toward `decide`. On SciFact dev these cuts
+> give `high` 15 of 15 (too few to judge), `medium` 114 of 151 (0.755), `low` empty.
+> `tier_note` now also derives the other end: when `medium - decide < 0.01` (the
+> margin the harness warns at) it returns `NO_LOW_TIER`, joined to `NO_HIGH_TIER` with
+> `"; "` when both hold. Both profiles meet it — the default's `medium` sits 0.008
+> above `decide` — so the default's reports now admit what the 2026-09-12 sweep found.
+> `docs/superpowers/specs/2026-10-01-accurate-nli-design.md`.
 
 ## 15. Error handling and honesty states
 

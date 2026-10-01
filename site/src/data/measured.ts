@@ -41,6 +41,17 @@ export const measures: readonly Measure[] = [
         doc: '2026-09-12-scifact-dev.md',
     },
     {
+        id: 'accurate',
+        figure: '0.697',
+        reading: 'macro-F1 · 0.697 accuracy',
+        against:
+            'against 0.580 macro-F1 for the default model in the same run, with cuts fitted on SciFact train',
+        what: 'Retrieval and entailment, accurate model (opt-in)',
+        set: 'SciFact dev, 340 pairs · 643 MB, two passages per claim',
+        doc: '2026-10-01-nli-bakeoff.md',
+        note: 'dev both chose this model and scores it, so 0.697 is optimistic · not better on news: AVeriTeC readable 0.475 against 0.537 for the default model at k=2 — for scientific sources, not news',
+    },
+    {
         id: 'nei',
         figure: '135 / 340',
         reading: 'pairs above the decision threshold',

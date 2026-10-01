@@ -155,6 +155,13 @@ was near-certain here", not as a guarantee of 85 % precision. And `medium` lands
 almost exactly on `decide`, so `low` is practically empty among asserted verdicts —
 the display is effectively **two tiers**: near-certain, and asserted at all.
 
+The report says this itself. A run whose `medium` cut sits within 0.01 of `decide` —
+the default model's does, and so does the [accurate model's](#accurate-model-opt-in) —
+prints `this model has no real low tier on SciFact, so an asserted verdict is almost
+always medium or better`. A calibration that leaves `high` out of reach prints `this
+model earns no high tier on SciFact dev, so medium is the strongest confidence shown`.
+When both hold, both are printed.
+
 ## Citations it reads
 
 Numeric markers — `[12]`, `[12,15]`, `[12-15]`, Nature-style superscripts — and, since
@@ -241,12 +248,60 @@ Apple Silicon Mac, models already downloaded:
 | 1-page markdown draft, 7 references | 79.3 s (v0.1 cold) | **1.35 s** ([v0.2](docs/eval/2026-09-15-v0.2-live.md)) — 15.8 s in v0.1 |
 | 19-page arXiv PDF, 68 references | 12 m 57 s | 3 m 42 s ([v0.1](docs/eval/2026-09-12-v0.1-live.md)) |
 
-The **first ever** run also downloads about 250 MB of ONNX models. Since v0.2 a
+The **first ever** run also downloads about 250 MB of ONNX models. The opt-in
+[accurate model](#accurate-model-opt-in) is a further one-time 643 MB download, asked
+before it starts. Since v0.2 a
 cached re-run asks the network for nothing: reference resolution and the retraction
 check are cached (resolutions 30 days; a retraction hit 30 days, a miss 7 days), the
 fetched text for 7 days, and chunks and verdicts for as long as the text is unchanged. The models are still loaded, and any source whose text
 has expired or was never read is fetched again — the PDF re-run above (v0.1) still
 spent 22 s fetching and re-scored 3 of 102 claims.
+
+## Accurate model (opt-in)
+
+The default entailment model is `cross-encoder/nli-deberta-v3-base` (244 MB). The
+**accurate** profile swaps it for `MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli`
+(643 MB), reads the top **two** passages per claim instead of one, and uses cuts
+calibrated for that pairing on SciFact train. The default install does not change.
+
+```bash
+proofpath check paper.pdf --accurate        # this run only
+proofpath config set models.nli accurate    # every run; or the models.nli row in /config
+```
+
+**What it buys.** On SciFact dev it scores **0.697 macro-F1, against 0.580** for the
+default model calibrated and scored the same way ([the bake-off](docs/eval/2026-10-01-nli-bakeoff.md)).
+Read 0.697 as optimistic: the same dev split chose this model out of 27 combinations and
+reports its score. With the cuts it ships with, its tiers on dev are `high` 15 of 15
+right (too few to judge), `medium` 114 of 151 (0.755) and `low` empty
+([design](docs/superpowers/specs/2026-10-01-accurate-nli-design.md)), so its reports
+carry the low-tier note above.
+
+**What it does not buy.** It is **not better on news and fact-check pages**. On
+AVeriTeC claims with a readable source it scores 0.475, against 0.537 for the default
+model at k=2 (the shipped default, at k=1, scores 0.438), and all of them are below the
+0.708 majority baseline. Use it for scientific sources, not for news.
+
+**What it costs.** A one-time 643 MB download, and 54 ms per claim–passage pair against
+19 ms (batched, in the eval harness) — with twice as many pairs per claim.
+
+**Consent.** The download is never silent. When the model is not cached yet, the run
+asks once, naming the model and its size, with the browser question's answers: once,
+always, no, never. "Always" and "never" are saved to `permissions.install_model`
+(`ask` by default; `allow` and `deny` skip the question). Piped or in CI there is no
+prompt: `ask` is treated as `deny` and reported. When the download is denied or fails,
+the run uses the default model and says so, so a report never names a model it did
+not run:
+
+- a note, `accurate NLI model not used: <reason> — using the default model.`, with what
+  would change it. It is printed with the run's other notes, so `-q` drops it; under
+  `--format json` or `sarif` it goes to stderr;
+- in text mode, a line that `-q` does not drop:
+  `nli        default model chosen; requested accurate (<reason>)`;
+- `nli_requested: accurate (<reason>)` in the report's `models` block, which also names
+  the `k` that ran.
+
+Once the files are cached, nothing is asked.
 
 ## Looking inside the cache
 
@@ -408,6 +463,7 @@ switch to, the run says so and tells you how to add one, on the same channels.
 | What | Set | Result |
 |---|---|---|
 | Retrieval + entailment | SciFact dev, 340 pairs | 0.609 accuracy, 0.597 macro-F1, against a 0.406 trivial baseline ([details](docs/eval/2026-09-12-scifact-dev.md)) |
+| Retrieval + entailment, [accurate model](#accurate-model-opt-in) (opt-in) | SciFact dev, 340 pairs | 0.697 accuracy, 0.697 macro-F1, against 0.591 / 0.580 for the default model in the same 2026-10-01 run. Cuts were fitted on SciFact train there, so the default's figures differ from the row above. Dev both chose this model and scores it, so 0.697 is optimistic; on AVeriTeC it is no better than the default model at k=2 (0.475 against 0.537) ([details](docs/eval/2026-10-01-nli-bakeoff.md)) |
 | Reference resolution | hand-built ghost set, 274 references | 0.0 % false-ghost, 99.1 % ghost recall ([details](docs/eval/2026-09-12-ghosts.md)) |
 | Source access | 50 DOIs | 72 % full text, 18 % abstract only, 10 % nothing ([details](docs/eval/2026-09-11-coverage.md)) — a real biomedical paper in the live runs reached 33 % full text |
 | Citation pairing, numeric | 61 hand-built passages | 0.99 ([details](docs/eval/2026-09-11-pairing.md)) |
