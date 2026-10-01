@@ -334,3 +334,112 @@ def evaluate_averitec(
         per_label=per_label,
         asserted_without_passage=unbacked,
     )
+
+
+TIE_MARGIN = 0.01
+LARGE_MARGIN = 0.03
+NO_CHANGE_MARGIN = 0.01
+# Absorbs float representation error only (0.627 - 0.597 is 0.02999999...), not display
+# rounding: a gap shown as 0.0295 must still fail a 0.03 margin.
+_EPS = 1e-9
+
+DECISION_RULE = """\
+The steps run in this order. Each one filters the rows the previous step left.
+
+1. **Eligible:** zero assertions without a passage, and AVeriTeC readable-subset accuracy
+   not below the `base` × k=1 × `max` row.
+2. **Beats the baseline:** a row stays only if its SciFact dev macro-F1 beats
+   `base` × k=1 × `max` by **≥ 0.01**. If no row stays, the result is "no change". It is
+   written up as such, and the next package (B, coverage) starts.
+3. **Size gate:** a `large*` row stays only if it beats the highest macro-F1 of any
+   eligible `base` row by **≥ 0.03**. That is the strongest eligible `base` row, not the
+   one the tie rule would pick.
+4. **Winner:** the highest SciFact dev macro-F1 among the rows left.
+5. **Tie:** rows left within 0.01 of the winner go to the smaller k, then to the simpler
+   aggregation, in the order `max`, `max_nei`, `margin`."""  # noqa: RUF001
+
+
+@dataclass(frozen=True)
+class Combo:
+    model: str
+    k: int
+    aggregation: str
+
+    def label(self) -> str:
+        return f"`{self.model}` × k={self.k} × `{self.aggregation}`"  # noqa: RUF001
+
+
+@dataclass(frozen=True)
+class Outcome:
+    combo: Combo
+    large: bool
+    macro_f1: float  # SciFact dev
+    averitec_readable: float
+    asserted_without_passage: int
+
+
+@dataclass(frozen=True)
+class Choice:
+    winner: Combo | None  # None means "no change"
+    reason: str
+
+
+def choose(outcomes: Sequence[Outcome], *, baseline: Combo) -> Choice:
+    """Apply ``DECISION_RULE`` step by step; each step filters the previous step's rows."""
+    by_combo = {row.combo: row for row in outcomes}
+    if baseline not in by_combo:
+        raise ValueError(f"the baseline {baseline.label()} is not among the outcomes")
+    base = by_combo[baseline]
+
+    # Step 1: eligible.
+    eligible = [
+        row
+        for row in outcomes
+        if row.asserted_without_passage == 0
+        and row.averitec_readable >= base.averitec_readable - _EPS
+    ]
+    if not eligible:
+        return Choice(None, "no change: no row is eligible under step 1")
+
+    # Step 2: beats the baseline.
+    beating = [row for row in eligible if row.macro_f1 - base.macro_f1 >= NO_CHANGE_MARGIN - _EPS]
+    if not beating:
+        best = max(eligible, key=lambda row: row.macro_f1)
+        gain = best.macro_f1 - base.macro_f1
+        return Choice(
+            None,
+            f"no change: the best eligible row, {best.combo.label()}, is {gain:+.3f} "
+            f"macro-F1 over the baseline, below {NO_CHANGE_MARGIN}",
+        )
+
+    # Step 3: size gate, measured against the best eligible base row (step 1 rows).
+    best_base = max((row.macro_f1 for row in eligible if not row.large), default=base.macro_f1)
+    left = [
+        row for row in beating if not row.large or row.macro_f1 - best_base >= LARGE_MARGIN - _EPS
+    ]
+    if not left:
+        return Choice(
+            None,
+            "no change: the only rows that beat the baseline were large rows, and none "
+            f"beat the best eligible base row ({best_base:.3f}) by {LARGE_MARGIN}",
+        )
+
+    # Steps 4 and 5: highest macro-F1, then the tie rule.
+    top = max(left, key=lambda row: row.macro_f1)
+    contenders = [row for row in left if top.macro_f1 - row.macro_f1 <= TIE_MARGIN + _EPS]
+    winner = min(
+        contenders,
+        key=lambda row: (
+            row.combo.k,
+            AGGREGATIONS.index(row.combo.aggregation),
+            -row.macro_f1,
+        ),
+    )
+    gain = winner.macro_f1 - base.macro_f1
+    reason = f"{winner.combo.label()} is {gain:+.3f} macro-F1 over {baseline.label()}"
+    if winner is not top:
+        reason += (
+            f"; the tie rule chose it over {top.combo.label()}, "
+            f"the top macro-F1 row ({top.macro_f1:.3f})"
+        )
+    return Choice(winner.combo, reason)

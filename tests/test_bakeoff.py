@@ -228,3 +228,127 @@ def test_evaluate_averitec_keeps_the_strongest_source_and_both_denominators() ->
     assert result.readable == 1
     assert result.accuracy_readable == pytest.approx(1.0)
     assert result.majority_baseline == pytest.approx(0.5)
+
+
+BASE = bakeoff.Combo("base", 1, "max")
+
+
+def _o(
+    model: str, k: int, agg: str, f1: float, *, readable: float = 0.40, unbacked: int = 0
+) -> bakeoff.Outcome:
+    return bakeoff.Outcome(bakeoff.Combo(model, k, agg), model != "base", f1, readable, unbacked)
+
+
+def test_no_change_when_nothing_beats_the_baseline_by_a_hundredth() -> None:
+    choice = bakeoff.choose(
+        [_o("base", 1, "max", 0.597), _o("base", 2, "max", 0.604)], baseline=BASE
+    )
+    assert choice.winner is None
+    assert "no change" in choice.reason
+
+
+def test_a_base_row_that_clears_the_margin_wins() -> None:
+    choice = bakeoff.choose(
+        [_o("base", 1, "max", 0.597), _o("base", 3, "margin", 0.630)], baseline=BASE
+    )
+    assert choice.winner == bakeoff.Combo("base", 3, "margin")
+
+
+def test_a_large_row_needs_three_hundredths_over_the_best_base_row() -> None:
+    rows = [
+        _o("base", 1, "max", 0.597),
+        _o("base", 2, "max_nei", 0.620),
+        _o("large", 1, "max", 0.645),
+    ]
+    assert bakeoff.choose(rows, baseline=BASE).winner == bakeoff.Combo("base", 2, "max_nei")
+    rows.append(_o("large-fever", 1, "max", 0.651))
+    assert bakeoff.choose(rows, baseline=BASE).winner == bakeoff.Combo("large-fever", 1, "max")
+
+
+def test_ties_go_to_the_smaller_k_then_the_simpler_aggregation() -> None:
+    rows = [
+        _o("base", 1, "max", 0.597),
+        _o("base", 3, "max", 0.640),
+        _o("base", 2, "margin", 0.635),
+        _o("base", 2, "max_nei", 0.632),
+    ]
+    assert bakeoff.choose(rows, baseline=BASE).winner == bakeoff.Combo("base", 2, "max_nei")
+
+
+def test_a_row_that_asserts_without_a_passage_is_never_eligible() -> None:
+    rows = [_o("base", 1, "max", 0.597), _o("base", 2, "max", 0.700, unbacked=1)]
+    assert bakeoff.choose(rows, baseline=BASE).winner is None
+
+
+def test_a_row_worse_on_averitec_readable_is_never_eligible() -> None:
+    rows = [_o("base", 1, "max", 0.597, readable=0.40), _o("base", 2, "max", 0.700, readable=0.39)]
+    assert bakeoff.choose(rows, baseline=BASE).winner is None
+
+
+def test_the_baseline_must_be_among_the_outcomes() -> None:
+    with pytest.raises(ValueError, match="baseline"):
+        bakeoff.choose([_o("base", 2, "max", 0.6)], baseline=BASE)
+
+
+def test_a_large_row_is_measured_against_the_best_base_row_not_the_tie_pick() -> None:
+    rows = [
+        _o("base", 1, "max", 0.597),
+        _o("base", 3, "max", 0.640),
+        _o("base", 1, "max_nei", 0.631),
+        _o("large", 1, "max", 0.662),
+    ]
+    choice = bakeoff.choose(rows, baseline=BASE)
+    assert choice.winner == bakeoff.Combo("base", 1, "max_nei")
+    assert "k=3" in choice.reason  # names the top-F1 row it did not pick
+
+
+def test_a_large_row_that_clears_the_gate_over_the_best_base_row_wins() -> None:
+    rows = [
+        _o("base", 1, "max", 0.597),
+        _o("base", 2, "max", 0.620),
+        _o("large", 1, "max", 0.645),
+        _o("large", 3, "max", 0.652),
+    ]
+    assert bakeoff.choose(rows, baseline=BASE).winner == bakeoff.Combo("large", 3, "max")
+
+
+def test_a_row_below_the_baseline_margin_is_dropped_before_the_tie_rule() -> None:
+    rows = [
+        _o("base", 1, "max", 0.597),
+        _o("base", 3, "max", 0.612),
+        _o("base", 1, "max_nei", 0.605),
+    ]
+    assert bakeoff.choose(rows, baseline=BASE).winner == bakeoff.Combo("base", 3, "max")
+
+
+def test_a_large_row_exactly_three_hundredths_over_the_best_base_row_passes() -> None:
+    rows = [
+        _o("base", 1, "max", 0.500),
+        _o("base", 2, "max", 0.560),
+        _o("large", 1, "max", 0.590),
+    ]
+    assert 0.590 - 0.560 < 0.03  # float error: the nominal margin is not met exactly
+    assert bakeoff.choose(rows, baseline=BASE).winner == bakeoff.Combo("large", 1, "max")
+
+
+def test_a_row_exactly_one_hundredth_over_the_baseline_passes() -> None:
+    rows = [_o("base", 1, "max", 0.553), _o("base", 2, "max", 0.563)]
+    assert 0.563 - 0.553 < 0.01  # float error: the nominal margin is not met exactly
+    assert bakeoff.choose(rows, baseline=BASE).winner == bakeoff.Combo("base", 2, "max")
+
+
+def test_an_ineligible_baseline_does_not_stop_another_eligible_row_from_winning() -> None:
+    rows = [_o("base", 1, "max", 0.597, unbacked=1), _o("base", 2, "max", 0.620)]
+    assert bakeoff.choose(rows, baseline=BASE).winner == bakeoff.Combo("base", 2, "max")
+
+
+def test_only_large_rows_beating_the_baseline_but_failing_the_size_gate_is_no_change() -> None:
+    rows = [
+        _o("base", 1, "max", 0.597),
+        _o("base", 2, "max", 0.600),
+        _o("large", 1, "max", 0.620),
+    ]
+    choice = bakeoff.choose(rows, baseline=BASE)
+    assert choice.winner is None
+    assert choice.reason.startswith("no change:")
+    assert "large" in choice.reason

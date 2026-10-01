@@ -109,15 +109,23 @@ For every combination:
 
 ## Decision rule (fixed before any number is seen)
 
+The steps run in this order. Each one filters the rows the previous step left.
+
 1. **Eligible:** zero assertions without a passage, and AVeriTeC readable-subset accuracy
    not below the `base` × k=1 × `max` row.
-2. **Winner:** the highest SciFact dev macro-F1 among eligible rows.
-3. **Size gate:** a `large*` row wins only if it beats the best eligible `base` row by
-   **≥ 0.03** macro-F1. Otherwise the best `base` row wins.
-4. **Tie:** two rows within 0.01 of each other go to the smaller k, then to the simpler
+2. **Beats the baseline:** a row stays only if its SciFact dev macro-F1 beats
+   `base` × k=1 × `max` by **≥ 0.01**. If no row stays, the result is "no change". It is
+   written up as such, and the next package (B, coverage) starts.
+3. **Size gate:** a `large*` row stays only if it beats the highest macro-F1 of any
+   eligible `base` row by **≥ 0.03**. That is the strongest eligible `base` row, not the
+   one the tie rule would pick.
+4. **Winner:** the highest SciFact dev macro-F1 among the rows left.
+5. **Tie:** rows left within 0.01 of the winner go to the smaller k, then to the simpler
    aggregation, in the order `max`, `max_nei`, `margin`.
-5. If nothing beats `base` × k=1 × `max` by ≥ 0.01 macro-F1, the result is "no change".
-   It is written up as such, and the next package (B, coverage) starts.
+
+Clarified on 2026-10-01, before any number was seen. The first wording did not fix the
+order of the steps. Read as "tie rule first", it let a `large` row through on a 0.022
+lead, because it was measured against a simpler but weaker `base` row.
 
 The rule is copied into the report verbatim, next to the numbers it chose.
 
