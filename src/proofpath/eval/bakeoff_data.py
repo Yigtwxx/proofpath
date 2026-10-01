@@ -171,6 +171,16 @@ def items_fingerprint(items: Sequence[Item]) -> str:
     return digest.hexdigest()
 
 
+def passage_offsets(items: Sequence[Item]) -> np.ndarray:
+    """Where each item's rows start in the flat ``(n_pairs, 3)`` array, plus the end."""
+    return np.cumsum([0, *(len(item.passages) for item in items)], dtype=np.int64)
+
+
+def split_at(flat: np.ndarray, offsets: np.ndarray) -> list[np.ndarray]:
+    """Cut ``flat`` into one block per pair of consecutive offsets. No validation."""
+    return [flat[offsets[n] : offsets[n + 1]] for n in range(len(offsets) - 1)]
+
+
 def save_probs(
     path: Path, items: Sequence[Item], probs: Sequence[np.ndarray], *, ms_per_pair: float
 ) -> None:
@@ -180,7 +190,7 @@ def save_probs(
     for item, block in zip(items, probs, strict=True):
         if np.asarray(block).shape != (len(item.passages), 3):
             raise ValueError(f"probability block for {item.key} has the wrong shape")
-    offsets = np.cumsum([0, *(len(item.passages) for item in items)], dtype=np.int64)
+    offsets = passage_offsets(items)
     flat = (
         np.concatenate([np.asarray(b, dtype=np.float32) for b in probs])
         if probs
@@ -208,4 +218,15 @@ def load_probs(path: Path, items: Sequence[Item]) -> tuple[list[np.ndarray], flo
         ms_per_pair = float(data["ms_per_pair"])
     if fingerprint != items_fingerprint(items):
         raise ValueError(f"{path.name} was scored on other items; run `score` again")
-    return [flat[offsets[n] : offsets[n + 1]] for n in range(len(items))], ms_per_pair
+    if len(offsets) != len(items) + 1:
+        raise ValueError(
+            f"{path.name} holds {len(offsets) - 1} blocks for {len(items)} items; run `score` again"
+        )
+    blocks = split_at(flat, offsets)
+    for item, block in zip(items, blocks, strict=True):
+        if len(block) != len(item.passages):
+            raise ValueError(
+                f"{path.name} holds {len(block)} rows for {item.key}, which has "
+                f"{len(item.passages)} passages; run `score` again"
+            )
+    return blocks, ms_per_pair

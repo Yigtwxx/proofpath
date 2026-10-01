@@ -33,11 +33,13 @@ from proofpath.eval.bakeoff_data import (
     load_items,
     load_probs,
     load_snapshot,
+    passage_offsets,
     pending,
     save_items,
     save_probs,
     save_snapshot,
     source_from_fetched,
+    split_at,
 )
 from proofpath.models import Label, Passage
 from proofpath.paths import cache_dir, models_dir
@@ -129,6 +131,7 @@ def build_items(embedder: retrieval.Embedder) -> list[Item]:
         for pair in data.pairs():
             doc = data.corpus[pair.doc_id]
             passages = [Passage(t, str(doc.doc_id), i) for i, t in enumerate(doc.sentences)]
+            # Keys are not unique (dev repeats the pair 1245:7662395); consumers are positional.
             key = f"scifact-{split}:{pair.claim_id}:{pair.doc_id}"
             items.append(
                 Item(
@@ -141,7 +144,14 @@ def build_items(embedder: retrieval.Embedder) -> list[Item]:
                     pair.rationale,
                 )
             )
-    for claim in load_snapshot(snapshot_path()):
+    items.extend(averitec_items(load_snapshot(snapshot_path()), embedder))
+    return items
+
+
+def averitec_items(snapshot: Sequence[SnapshotClaim], embedder: retrieval.Embedder) -> list[Item]:
+    """One item per readable source; the key carries the source's position in its claim."""
+    items: list[Item] = []
+    for claim in snapshot:
         for position, source in enumerate(claim.sources):
             sentences = retrieval.split_sentences(source.text) if source.text.strip() else []
             if not sentences:
@@ -158,6 +168,14 @@ def build_items(embedder: retrieval.Embedder) -> list[Item]:
                 )
             )
     return items
+
+
+def split_blocks(flat: np.ndarray, items: Sequence[Item]) -> list[np.ndarray]:
+    """Cut the flat ``(n_pairs, 3)`` scores into one block per item, in item order."""
+    offsets = passage_offsets(items)
+    if offsets[-1] != len(flat):
+        raise ValueError(f"{len(flat)} score rows for {offsets[-1]} passages")
+    return split_at(flat, offsets)
 
 
 def cmd_snapshot(args: argparse.Namespace) -> int:
@@ -197,6 +215,7 @@ def cmd_snapshot(args: argparse.Namespace) -> int:
             )
     except KeyboardInterrupt:
         print(f"\ninterrupted; {path} is usable with --resume", file=sys.stderr)
+        return 130
     finally:
         engine.close()
     return 0
@@ -253,8 +272,7 @@ def cmd_score(args: argparse.Namespace) -> int:
     finally:
         scorer.close()
     flat = np.concatenate(blocks) if blocks else np.zeros((0, 3), dtype=np.float32)
-    offsets = np.cumsum([0, *(len(item.passages) for item in items)])
-    probs = [flat[offsets[n] : offsets[n + 1]] for n in range(len(items))]
+    probs = split_blocks(flat, items)
     ms_per_pair = elapsed / max(len(pairs), 1) * 1000
     out = bakeoff_dir() / f"{args.model}.npz"
     save_probs(out, items, probs, ms_per_pair=ms_per_pair)
@@ -269,6 +287,28 @@ class ReportRow:
     thresholds: Thresholds
     scifact: bakeoff.SciFactResult
     averitec: bakeoff.AveritecResult
+
+
+@dataclass(frozen=True)
+class NumericLayer:
+    """Numeric-layer firings at one k, as ``(fired, correct)``; model-independent."""
+
+    train: tuple[int, int]
+    dev: tuple[int, int]
+
+
+def outcomes_for(rows: Sequence[ReportRow]) -> list[bakeoff.Outcome]:
+    """The numbers the decision rule reads, one per report row."""
+    return [
+        bakeoff.Outcome(
+            r.combo,
+            r.large,
+            r.scifact.macro_f1,
+            r.averitec.accuracy_readable,
+            r.scifact.asserted_without_passage + r.averitec.asserted_without_passage,
+        )
+        for r in rows
+    ]
 
 
 def model_size_mb(model: str) -> float | None:
@@ -300,6 +340,132 @@ def _without_passage_cell(count: int) -> str:
     return f"**{count} — rule 1 violated**" if count else "0"
 
 
+def on_grid_floor(decide: float) -> bool:
+    """True when ``decide`` is the lowest cut the sweep tried: the best may lie below."""
+    return decide == bakeoff.GRID[0]
+
+
+def _decide_cell(decide: float) -> str:
+    return f"{decide:.2f} (grid floor)" if on_grid_floor(decide) else f"{decide:.2f}"
+
+
+# The last AVeriTeC run before this one (docs/eval/2026-09-16-averitec.md): its snapshot,
+# its cuts and its denominators.
+PUBLISHED_AVERITEC = "2026-09-16"
+PUBLISHED_ANSWERABLE = 89
+PUBLISHED_READABLE = 61
+
+
+def _result_lines(rows: Sequence[ReportRow], choice: bakeoff.Choice) -> list[str]:
+    """The verdict of the rule, the winner named once, and its gain over the best base row."""
+    if choice.winner is None:
+        return [f"**No change.** {choice.reason}"]
+    label = choice.winner.label()
+    if choice.reason.startswith(label):
+        lines = [f"**Winner:** {choice.reason}."]
+    else:
+        lines = [f"**Winner:** {label} — {choice.reason}."]
+    outcomes = outcomes_for(rows)
+    winner = next(row for row in outcomes if row.combo == choice.winner)
+    best = bakeoff.best_eligible_base(outcomes, baseline=BASELINE)
+    if best is None:
+        lines.append("No `base` row is eligible under step 1, so the winner has no base bar.")
+    elif best.combo == winner.combo:
+        lines.append("The winner is itself the best eligible `base` row.")
+    else:
+        lines.append(
+            f"Over the best eligible `base` row, {best.combo.label()} "
+            f"({best.macro_f1:.3f}), the winner is {winner.macro_f1 - best.macro_f1:+.3f} "
+            "macro-F1."
+        )
+    return [lines[0], "", *lines[1:]]
+
+
+def _numeric_lines(rows: Sequence[ReportRow], numeric: Mapping[int, NumericLayer]) -> list[str]:
+    """Per-k firings, and how much of the `high` tier the rule rather than a model holds."""
+    lines = [
+        "## Numeric layer",
+        "",
+        "The numeric layer (spec §10) runs on the same top-k passages before any model. A "
+        "mismatch decides REFUTED by rule at score 1.0, and no model is credited with it. "
+        "It depends on k only, so one row per k covers every model and aggregation. A "
+        "firing is correct when the gold label is REFUTED.",
+        "",
+        "| k | SciFact train fired | train correct | SciFact dev fired | dev correct |",
+        "|---|---|---|---|---|",
+    ]
+    for k in sorted(numeric):
+        layer = numeric[k]
+        lines.append(_md(k, layer.train[0], layer.train[1], layer.dev[0], layer.dev[1]))
+    at_one = sum(row.thresholds.high >= 1.0 for row in rows)
+    rule_only = 0
+    for row in rows:
+        high = next(t for t in row.scifact.tiers if t.tier == "high")
+        fired = numeric[row.combo.k].dev[0] if row.combo.k in numeric else -1
+        rule_only += high.n > 0 and high.n == fired
+    lines.extend(
+        [
+            "",
+            "Rule-decided rows score exactly 1.0, the top of the scale, so they are among "
+            "the first rows the `high` cut's walk down SciFact train meets: a wrong firing "
+            "lowers the precision every lower cut is measured with, and a `high` cut of "
+            "1.000000 means no score below 1.0 held "
+            f"{bakeoff.HIGH_TARGET:.2f} precision, so only a score of 1.0 reaches the tier. "
+            f"The `high` cut is 1.000000 in {at_one} of {len(rows)} combinations. In "
+            f"{rule_only} of {len(rows)}, every SciFact dev `high` verdict is a rule firing "
+            "(the high-tier n equals the dev firings at that k): there the high tier on "
+            "dev comes from the rule, not the model.",
+        ]
+    )
+    return lines
+
+
+def _limits_lines(rows: Sequence[ReportRow], choice: bakeoff.Choice) -> list[str]:
+    outcomes = outcomes_for(rows)
+    top = max((row.macro_f1 for row in outcomes), default=0.0)
+    if choice.winner is None:
+        chosen = f"The best row's {top:.3f}"
+    else:
+        won = next(row for row in outcomes if row.combo == choice.winner).macro_f1
+        chosen = f"The winner's {won:.3f}"
+    base = next((row for row in rows if row.combo == BASELINE), None)
+    base_acc = f"dev accuracy {base.scifact.accuracy:.3f}" if base else "a lower dev accuracy"
+    counted = rows[0].averitec.counted if rows else 0
+    readable = rows[0].averitec.readable if rows else 0
+    floor = sum(on_grid_floor(row.thresholds.decide) for row in rows)
+    if floor:
+        floor_line = (
+            f"- **Grid floor.** {floor} of {len(rows)} combinations put `decide` on the grid "
+            f"floor ({bakeoff.GRID[0]:.2f}), marked `(grid floor)` above: SciFact train "
+            "accuracy was best at the lowest cut tried, so the best cut may lie below the grid."
+        )
+    else:
+        floor_line = (
+            f"- **Grid floor.** No combination puts `decide` on the grid floor "
+            f"({bakeoff.GRID[0]:.2f})."
+        )
+    return [
+        "## Limits",
+        "",
+        "- **Dev chooses and reports.** SciFact dev both picks the winner and reports it. "
+        f"{chosen} macro-F1 comes from the split that chose it, out of {len(rows)} "
+        f"combinations whose highest dev macro-F1 is {top:.3f}, so it is optimistic; a "
+        "held-out split would likely read lower.",
+        "- **int8 scores depend on the batch.** The candidate files are dynamically "
+        "quantised to int8, so a pair's probabilities depend on what else is in its batch. "
+        "Re-scoring 48 SciFact dev top-1 pairs one at a time moved probabilities by up to "
+        "0.197 (mean 0.008) and flipped 1 argmax (measured 2026-10-01 by the final review). "
+        f"That likely explains why `base` × k=1 × `max` reaches {base_acc} here "  # noqa: RUF001
+        "(0.597 even at decide 0.45) against the 0.609 published on 2026-09-12 with "
+        "dev-fitted cuts.",
+        "- **The AVeriTeC snapshot is new.** It is not the "
+        f"{PUBLISHED_AVERITEC} run's: coverage improved since (then {PUBLISHED_READABLE} of "
+        f"{PUBLISHED_ANSWERABLE} answerable claims were readable, now {readable} of "
+        f"{counted}), so AVeriTeC numbers here are not comparable with that run's.",
+        floor_line,
+    ]
+
+
 def render_report(
     rows: Sequence[ReportRow],
     choice: bakeoff.Choice,
@@ -307,6 +473,7 @@ def render_report(
     speed: Mapping[str, float],
     sizes: Mapping[str, float | None],
     counts: Mapping[str, int],
+    numeric: Mapping[int, NumericLayer],
     today: str,
     machine: str,
 ) -> str:
@@ -336,10 +503,7 @@ def render_report(
         "## Result",
         "",
     ]
-    if choice.winner is None:
-        lines.append(f"**No change.** {choice.reason}")
-    else:
-        lines.append(f"**Winner:** {choice.winner.label()} — {choice.reason}")
+    lines.extend(_result_lines(rows, choice))
     lines.extend(
         ["", "## Models", "", "| model | repo | size (MB) | ms/pair |", "|---|---|---|---|"]
     )
@@ -358,8 +522,11 @@ def render_report(
             "",
             "## Every combination",
             "",
-            f"AVeriTeC majority baseline: {baseline_ave:.3f}. Published numbers to compare: "
-            "0.270 (all) and 0.361 (readable), 2026-09-16.",
+            f"AVeriTeC majority baseline: {baseline_ave:.3f}. The {PUBLISHED_AVERITEC} run "
+            "reported 0.270 (all) and 0.361 (readable), but on a different snapshot with "
+            f"different cuts, over {PUBLISHED_ANSWERABLE} answerable / {PUBLISHED_READABLE} "
+            f"readable claims; this run counts {counted} answerable / {readable} readable. "
+            "A gap between the two runs is partly a coverage change, not only a model gain.",
             "",
             "| model | k | aggregation | decide | medium | high | dev acc | dev macro-F1 "
             "| F1 S / R / NEI | rationale F1 | AVeriTeC all | AVeriTeC readable | w/o passage |",
@@ -373,7 +540,7 @@ def render_report(
                 row.combo.model,
                 row.combo.k,
                 row.combo.aggregation,
-                f"{row.thresholds.decide:.2f}",
+                _decide_cell(row.thresholds.decide),
                 f"{row.thresholds.medium:.6f}",
                 f"{row.thresholds.high:.6f}",
                 f"{row.scifact.accuracy:.3f}",
@@ -430,6 +597,7 @@ def render_report(
                 *(_tier_cell(tiers[name]) for name in ("high", "medium", "low")),
             )
         )
+    lines.extend(["", *_numeric_lines(rows, numeric), "", *_limits_lines(rows, choice)])
     return "\n".join(lines) + "\n"
 
 
@@ -449,6 +617,7 @@ def cmd_report(args: argparse.Namespace) -> int:
     snapshot = load_snapshot(snapshot_path())
     rows: list[ReportRow] = []
     speed: dict[str, float] = {}
+    numeric: dict[int, NumericLayer] = {}
     for model, candidate in CANDIDATES.items():
         path = bakeoff_dir() / f"{model}.npz"
         if not path.exists():
@@ -468,6 +637,11 @@ def cmd_report(args: argparse.Namespace) -> int:
         dev = [s for s in scored if s.item.dataset == "scifact-dev"]
         ave = [s for s in scored if s.item.dataset == "averitec"]
         for k in bakeoff.KS:
+            # The rule reads the items only, so every model gives the same firings.
+            if k not in numeric:
+                numeric[k] = NumericLayer(
+                    bakeoff.numeric_firings(train, k=k), bakeoff.numeric_firings(dev, k=k)
+                )
             for aggregation in bakeoff.AGGREGATIONS:
                 thresholds = bakeoff.calibrate(
                     bakeoff.calibration_rows(train, k=k, aggregation=aggregation)
@@ -488,17 +662,7 @@ def cmd_report(args: argparse.Namespace) -> int:
             "error     the baseline model is not scored; run `score --model base`", file=sys.stderr
         )
         return 2
-    outcomes = [
-        bakeoff.Outcome(
-            r.combo,
-            r.large,
-            r.scifact.macro_f1,
-            r.averitec.accuracy_readable,
-            r.scifact.asserted_without_passage + r.averitec.asserted_without_passage,
-        )
-        for r in rows
-    ]
-    choice = bakeoff.choose(outcomes, baseline=BASELINE)
+    choice = bakeoff.choose(outcomes_for(rows), baseline=BASELINE)
     counts = {
         "scifact-train": sum(i.dataset == "scifact-train" for i in items),
         "scifact-dev": sum(i.dataset == "scifact-dev" for i in items),
@@ -510,6 +674,7 @@ def cmd_report(args: argparse.Namespace) -> int:
         speed=speed,
         sizes={model: model_size_mb(model) for model in speed},
         counts=counts,
+        numeric=numeric,
         today=date.today().isoformat(),
         machine=f"{platform.system()} {platform.machine()}",
     )

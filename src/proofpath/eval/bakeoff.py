@@ -105,11 +105,37 @@ def signal_for(
     A numeric mismatch decides by rule at score 1.0, as ``pipeline.decide_indexed``
     does, so no candidate model is credited with what the rule decided.
     """
-    top = list(passages[:k])
-    numeric = numerics.check(claim, top)
+    ruled = _rule_signal(claim, passages, k=k)
+    if ruled is not None:
+        return ruled
+    return AGGREGATORS[aggregation](passages[:k], probs[:k])
+
+
+def _rule_signal(claim: str, passages: Sequence[Passage], *, k: int) -> Signal | None:
+    """The numeric layer's REFUTED at score 1.0 over the first ``k`` hits, if it fires."""
+    if k < 1:
+        raise ValueError(f"k must be at least 1, got {k}")
+    numeric = numerics.check(claim, list(passages[:k]))
     if numeric is not None and numeric.mismatch:
         return Signal(Label.REFUTED, 1.0, numeric.passage)
-    return AGGREGATORS[aggregation](top, probs[:k])
+    return None
+
+
+def numeric_firings(scored: Sequence[Scored], *, k: int) -> tuple[int, int]:
+    """``(fired, correct)``: how often the numeric layer decides by rule at this k.
+
+    The same path as ``signal_for``, so these are exactly the verdicts scored 1.0 that
+    no model earned. A firing is correct when the gold label is REFUTED. It depends on
+    the items and k only, never on the model or the aggregation.
+    """
+    if k < 1:
+        raise ValueError(f"k must be at least 1, got {k}")
+    fired = correct = 0
+    for s in scored:
+        if _rule_signal(s.item.claim, s.item.passages, k=k) is not None:
+            fired += 1
+            correct += Label(s.item.gold) is Label.REFUTED
+    return fired, correct
 
 
 def decide(signal: Signal, thresholds: Thresholds) -> Label:
@@ -123,6 +149,8 @@ def wilson(correct: int, n: int, z: float = 1.96) -> tuple[float, float]:
     """95 % Wilson score interval for ``correct`` successes out of ``n``."""
     if n <= 0:
         raise ValueError("a Wilson interval needs at least one observation")
+    if not 0 <= correct <= n:
+        raise ValueError(f"correct must lie between 0 and n={n}, got {correct}")
     p = correct / n
     denominator = 1 + z * z / n
     centre = (p + z * z / (2 * n)) / denominator
@@ -271,7 +299,7 @@ class AveritecResult:
     n: int
     counted: int  # claims with a 3-way gold label
     accuracy_all: float
-    readable: int  # counted claims with at least one readable source
+    readable: int  # counted claims with a source whose snapshot text is not blank
     accuracy_readable: float
     majority_baseline: float
     per_label: dict[str, tuple[int, int]]  # gold label -> (n, correct)
@@ -291,11 +319,22 @@ def evaluate_averitec(
     The strongest decided non-NEI verdict across the claim's sources wins. A claim
     with a readable source and no assertion is NEI. A claim with nothing readable is
     unanswered, and is scored as NEI.
+
+    A claim is readable when any of its snapshot sources has non-blank text, as
+    ``_decide_claim``'s ``fetched_any`` has it, whether or not scored items exist.
+    Scored items whose group matches no snapshot claim are refused: a key-format drift
+    must not silently turn every claim into NEI (product rule 6).
     """
     _require(scored, "averitec")
     by_group: dict[str, list[Scored]] = {}
     for s in scored:
         by_group.setdefault(s.item.group, []).append(s)
+    known = {f"averitec:{claim.claim_id}" for claim in claims}
+    orphans = sorted(set(by_group) - known)
+    if orphans:
+        raise ValueError(
+            f"{len(orphans)} scored groups match no snapshot claim: {', '.join(orphans[:5])}"
+        )
     per_label: dict[str, tuple[int, int]] = {}
     golds: list[Label] = []
     correct_all = readable = correct_readable = unbacked = 0
@@ -320,7 +359,7 @@ def evaluate_averitec(
             continue
         golds.append(gold)
         correct_all += correct
-        if group:
+        if any(source.text.strip() for source in claim.sources):
             readable += 1
             correct_readable += correct
     majority = max(Counter(golds).values(), default=0)
@@ -385,8 +424,29 @@ class Choice:
 
 
 def choose(outcomes: Sequence[Outcome], *, baseline: Combo) -> Choice:
-    """Apply ``DECISION_RULE`` step by step; each step filters the previous step's rows."""
+    """Apply ``DECISION_RULE`` step by step; each step filters the previous step's rows.
+
+    When the baseline row itself fails step 1, the reason says so: every margin is still
+    measured against its numbers, and a reader must not take it for a clean baseline.
+    """
+    choice = _choose(outcomes, baseline=baseline)
+    base = next(row for row in outcomes if row.combo == baseline)
+    if base.asserted_without_passage:
+        return Choice(
+            choice.winner,
+            "the baseline itself is not eligible: it asserts without a passage "
+            f"{base.asserted_without_passage} times; {choice.reason}",
+        )
+    return choice
+
+
+def _choose(outcomes: Sequence[Outcome], *, baseline: Combo) -> Choice:
     by_combo = {row.combo: row for row in outcomes}
+    if len(by_combo) != len(outcomes):
+        duplicated = sorted(
+            combo.label() for combo, n in Counter(row.combo for row in outcomes).items() if n > 1
+        )
+        raise ValueError(f"duplicate combinations among the outcomes: {', '.join(duplicated)}")
     if baseline not in by_combo:
         raise ValueError(f"the baseline {baseline.label()} is not among the outcomes")
     base = by_combo[baseline]
@@ -443,3 +503,23 @@ def choose(outcomes: Sequence[Outcome], *, baseline: Combo) -> Choice:
             f"the top macro-F1 row ({top.macro_f1:.3f})"
         )
     return Choice(winner.combo, reason)
+
+
+def best_eligible_base(outcomes: Sequence[Outcome], *, baseline: Combo) -> Outcome | None:
+    """The highest-macro-F1 non-large row that passes step 1, or None when none does.
+
+    Step 1 as ``choose`` applies it: no assertion without a passage, and AVeriTeC
+    readable accuracy not below the baseline's. The report uses it to state a winner's
+    gain over the strongest eligible ``base`` row, the bar of the size gate.
+    """
+    base = next((row for row in outcomes if row.combo == baseline), None)
+    if base is None:
+        raise ValueError(f"the baseline {baseline.label()} is not among the outcomes")
+    eligible = [
+        row
+        for row in outcomes
+        if not row.large
+        and row.asserted_without_passage == 0
+        and row.averitec_readable >= base.averitec_readable - _EPS
+    ]
+    return max(eligible, key=lambda row: row.macro_f1, default=None)

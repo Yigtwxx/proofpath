@@ -73,6 +73,52 @@ def test_a_numeric_mismatch_decides_before_any_aggregation() -> None:
     assert signal == bakeoff.Signal(Label.REFUTED, 1.0, passages[0])
 
 
+def _numeric_item(key: str, dataset: str, gold: str, passage: str) -> bakeoff.Scored:
+    passages = (Passage(passage, key, 0), Passage("An unrelated sentence.", key, 1))
+    item = Item(key, dataset, key, "Mortality fell by 40% in the treated group.", gold, passages)
+    return bakeoff.Scored(item, _probs((0.99, 0.0, 0.01), (0.99, 0.0, 0.01)))
+
+
+def test_numeric_firings_count_rule_verdicts_and_the_refuted_ones_right() -> None:
+    scored = [
+        _numeric_item(
+            "a", "scifact-train", "REFUTED", "Mortality fell by 12% in the treated group."
+        ),
+        _numeric_item(
+            "b", "scifact-train", "SUPPORTED", "Mortality fell by 9% in the treated group."
+        ),
+        _numeric_item("c", "scifact-train", "SUPPORTED", "No figures here."),
+    ]
+    assert bakeoff.numeric_firings(scored, k=1) == (2, 1)
+
+
+def test_numeric_firings_agree_with_signal_for_at_every_k() -> None:
+    late = Item(
+        "d",
+        "scifact-dev",
+        "d",
+        "Mortality fell by 40% in the treated group.",
+        "REFUTED",
+        (Passage("No figures here.", "d", 0), Passage("Mortality fell by 12%.", "d", 1)),
+    )
+    scored = [bakeoff.Scored(late, _probs((0.2, 0.1, 0.7), (0.2, 0.1, 0.7)))]
+    for k in (1, 2):
+        ruled = sum(
+            bakeoff.signal_for(s.item.claim, s.item.passages, s.probs, k=k, aggregation="max")
+            == bakeoff.Signal(Label.REFUTED, 1.0, s.item.passages[1])
+            for s in scored
+        )
+        assert bakeoff.numeric_firings(scored, k=k) == (ruled, ruled)
+    assert bakeoff.numeric_firings(scored, k=1) == (0, 0)
+    assert bakeoff.numeric_firings(scored, k=2) == (1, 1)
+
+
+@pytest.mark.parametrize("k", [0, -1])
+def test_numeric_firings_refuse_a_k_below_one(k: int) -> None:
+    with pytest.raises(ValueError, match="at least 1"):
+        bakeoff.numeric_firings([], k=k)
+
+
 def test_decide_needs_the_cut_and_a_passage() -> None:
     cuts = Thresholds(decide=0.5, high=0.9, medium=0.7)
     assert bakeoff.decide(bakeoff.Signal(Label.SUPPORTED, 0.6, P[0]), cuts) is Label.SUPPORTED
@@ -92,6 +138,25 @@ def test_wilson_interval_matches_known_values() -> None:
 def test_wilson_refuses_an_empty_sample() -> None:
     with pytest.raises(ValueError):
         bakeoff.wilson(0, 0)
+
+
+@pytest.mark.parametrize(("correct", "n"), [(-1, 10), (11, 10)])
+def test_wilson_refuses_a_count_outside_the_sample(correct: int, n: int) -> None:
+    with pytest.raises(ValueError, match="between 0 and n"):
+        bakeoff.wilson(correct, n)
+
+
+@pytest.mark.parametrize("k", [0, -1])
+def test_signal_for_refuses_a_k_below_one(k: int) -> None:
+    with pytest.raises(ValueError, match="k must be at least 1"):
+        bakeoff.signal_for("a claim", P[:1], _probs((0.9, 0.0, 0.1)), k=k, aggregation="max")
+
+
+def test_ship_cut_rounds_up_at_six_decimals_and_caps_at_one() -> None:
+    assert bakeoff.ship_cut(0.4579471) == pytest.approx(0.457948)
+    assert bakeoff.ship_cut(0.4579470) == pytest.approx(0.457947)
+    assert bakeoff.ship_cut(0.9999999) == 1.0
+    assert bakeoff.ship_cut(1.0) == 1.0
 
 
 @pytest.mark.parametrize("name", bakeoff.AGGREGATIONS)
@@ -207,7 +272,8 @@ def test_evaluate_scifact_counts_verdicts_tiers_and_rationale() -> None:
         "low": (0, 0),
     }
     assert result.asserted_without_passage == 0
-    assert 0.0 < result.rationale_f1 <= 1.0
+    # Gold {0} for all three; predicted {0}, {0}, {}: tp 2, fp 0, fn 1 -> P 1, R 2/3, F1 0.8.
+    assert result.rationale_f1 == pytest.approx(0.8)
 
 
 def test_evaluate_averitec_keeps_the_strongest_source_and_both_denominators() -> None:
@@ -228,6 +294,38 @@ def test_evaluate_averitec_keeps_the_strongest_source_and_both_denominators() ->
     assert result.readable == 1
     assert result.accuracy_readable == pytest.approx(1.0)
     assert result.majority_baseline == pytest.approx(0.5)
+    assert result.per_label == {
+        "Refuted": (1, 1),
+        "Supported": (1, 0),
+        "Conflicting Evidence/Cherrypicking": (1, 0),
+    }
+    assert result.asserted_without_passage == 0
+
+
+def test_a_readable_claim_whose_only_signal_is_below_the_cut_is_nei_and_readable() -> None:
+    cuts = Thresholds(decide=0.5, high=0.95, medium=0.7)
+    claims = [SnapshotClaim(1, "c1", "Not Enough Evidence", (SnapshotSource("u", "ok", "t"),), 0)]
+    scored = [_scored("averitec:1:0", "averitec", "x", (0.3, 0.1, 0.6), group="averitec:1")]
+    result = bakeoff.evaluate_averitec(claims, scored, cuts, k=1, aggregation="max")
+    assert result.readable == 1
+    assert result.accuracy_readable == pytest.approx(1.0)
+    assert result.per_label == {"Not Enough Evidence": (1, 1)}
+
+
+def test_a_claim_with_readable_text_but_no_scored_items_is_still_readable() -> None:
+    cuts = Thresholds(decide=0.5, high=0.95, medium=0.7)
+    claims = [SnapshotClaim(1, "c1", "Refuted", (SnapshotSource("u", "ok", "text"),), 0)]
+    result = bakeoff.evaluate_averitec(claims, [], cuts, k=1, aggregation="max")
+    assert result.readable == 1
+    assert result.accuracy_readable == pytest.approx(0.0)
+
+
+def test_scored_items_matching_no_snapshot_claim_are_refused() -> None:
+    cuts = Thresholds(decide=0.5, high=0.95, medium=0.7)
+    claims = [SnapshotClaim(1, "c1", "Refuted", (SnapshotSource("u", "ok", "t"),), 0)]
+    scored = [_scored("averitec:9:0", "averitec", "Refuted", (0.0, 0.9, 0.1), group="avt:9")]
+    with pytest.raises(ValueError, match="avt:9"):
+        bakeoff.evaluate_averitec(claims, scored, cuts, k=1, aggregation="max")
 
 
 BASE = bakeoff.Combo("base", 1, "max")
@@ -352,3 +450,52 @@ def test_only_large_rows_beating_the_baseline_but_failing_the_size_gate_is_no_ch
     assert choice.winner is None
     assert choice.reason.startswith("no change:")
     assert "large" in choice.reason
+
+
+def test_the_reason_says_so_when_the_baseline_itself_is_not_eligible() -> None:
+    won = bakeoff.choose(
+        [_o("base", 1, "max", 0.597, unbacked=2), _o("base", 2, "max", 0.620)], baseline=BASE
+    )
+    assert won.winner == bakeoff.Combo("base", 2, "max")
+    assert won.reason.startswith("the baseline itself is not eligible:")
+    unchanged = bakeoff.choose(
+        [_o("base", 1, "max", 0.597, unbacked=2), _o("base", 2, "max", 0.600)], baseline=BASE
+    )
+    assert unchanged.winner is None
+    assert unchanged.reason.startswith("the baseline itself is not eligible:")
+    assert "no change" in unchanged.reason
+
+
+def test_an_eligible_baseline_is_not_called_ineligible() -> None:
+    choice = bakeoff.choose(
+        [_o("base", 1, "max", 0.597), _o("base", 2, "max", 0.620)], baseline=BASE
+    )
+    assert "not eligible" not in choice.reason
+
+
+def test_duplicate_combinations_among_the_outcomes_are_refused() -> None:
+    with pytest.raises(ValueError, match="duplicate"):
+        bakeoff.choose([_o("base", 1, "max", 0.597), _o("base", 1, "max", 0.600)], baseline=BASE)
+
+
+def test_best_eligible_base_skips_large_unbacked_and_averitec_worse_rows() -> None:
+    outcomes = [
+        _o("base", 1, "max", 0.597),
+        _o("base", 2, "max", 0.610),
+        _o("base", 3, "max", 0.640, readable=0.30),
+        _o("base", 2, "margin", 0.645, unbacked=1),
+        _o("large", 1, "max", 0.700),
+    ]
+    best = bakeoff.best_eligible_base(outcomes, baseline=BASE)
+    assert best is not None
+    assert best.combo == bakeoff.Combo("base", 2, "max")
+
+
+def test_best_eligible_base_is_none_when_no_base_row_is_eligible() -> None:
+    outcomes = [_o("base", 1, "max", 0.597, unbacked=2), _o("large", 1, "max", 0.700)]
+    assert bakeoff.best_eligible_base(outcomes, baseline=BASE) is None
+
+
+def test_best_eligible_base_needs_the_baseline() -> None:
+    with pytest.raises(ValueError, match="not among the outcomes"):
+        bakeoff.best_eligible_base([_o("base", 2, "max", 0.6)], baseline=BASE)
