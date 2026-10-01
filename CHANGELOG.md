@@ -6,6 +6,12 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.10] - 2026-10-01
+
+An opt-in, larger NLI model for scientific sources, chosen by a measured bake-off and
+downloaded only with your consent. Reports now admit when a model has no real low
+confidence tier, and CI type-checks the whole package.
+
 ### Added
 - **An opt-in accurate NLI model.** The bake-off's winner,
   `MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli`, runs at k=2 with cuts
