@@ -61,3 +61,17 @@ export const exitCodes: readonly { code: 0 | 1 | 2; meaning: string }[] = [
 export const version = '0.4.10';
 export const repo = 'https://github.com/Yigtwxx/proofpath';
 export const pypi = 'https://pypi.org/project/proofpath/';
+
+/* The sibling tools: same family, same page. */
+export const siblings: readonly { name: string; href: string; tag: string }[] = [
+    {
+        name: 'reasonhound',
+        href: 'https://reasonhound.vercel.app',
+        tag: 'a security scanner that follows the scent, not the checklist',
+    },
+    {
+        name: 'spiyweb',
+        href: 'https://spiyweb.vercel.app',
+        tag: 'retrieval that spreads through a graph, not top-k',
+    },
+];

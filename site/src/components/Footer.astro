@@ -1,8 +1,9 @@
 ---
-/* Crimson again: the shore plate as a band, then links and the credits every
-   engraving on the page earned. Credits come from the image manifest. */
+/* Crimson again: the shore plate as a band, then links, the sibling tools, and
+   the credits every engraving on the page earned. Credits come from the image
+   manifest. */
 import { images } from '../data/images.generated';
-import { repo, pypi, version } from '../data/commands';
+import { repo, pypi, version, siblings } from '../data/commands';
 import Halftone from './Halftone.astro';
 const credits = Object.values(images).map((i) => i.credit);
 const seen = new Set<string>();
@@ -41,6 +42,19 @@ const unique = credits.filter((c) => (seen.has(c.page_url) ? false : (seen.add(c
                     </a>
                 </li>
             </ul>
+            <div class="footer__family">
+                <p class="footer__family-title">Same family</p>
+                <ul>
+                    {siblings.map((s) => (
+                        <li>
+                            <a href={s.href} rel="noopener">
+                                {s.name}
+                            </a>{' '}
+                            <span>— {s.tag}</span>
+                        </li>
+                    ))}
+                </ul>
+            </div>
         </div>
         <details class="footer__col footer__credits">
             <summary class="footer__credits-title">Engravings on this page</summary>
@@ -195,6 +209,25 @@ const unique = credits.filter((c) => (seen.has(c.page_url) ? false : (seen.add(c
         margin: 0 0 var(--space-4);
         display: grid;
         gap: var(--space-2);
+    }
+    .footer__family {
+        margin-top: var(--space-5);
+        font-size: var(--step--1);
+    }
+    .footer__family-title {
+        font-family: var(--font-mono);
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        color: var(--rose-soft);
+        margin: 0 0 var(--space-2);
+    }
+    .footer__family ul {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+    }
+    .footer__family span {
+        color: var(--rose-soft);
     }
     .footer__licence {
         color: var(--rose-soft);
