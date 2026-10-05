@@ -3427,7 +3427,8 @@ async def test_clicking_away_drops_a_typed_key_unwritten() -> None:
         app.query_one(Prompt).focus()
         await until(pilot, lambda: panel.collapsed, "the panel to fold")
         assert not panel.editing
-        assert not panel.query(Input)
+        # ``collapsed`` is set at once; the edit's removal lands a message later.
+        await until(pilot, lambda: not panel.query(Input), "the edit to be removed")
         _nowhere_else(app, PASTED)
     assert not user_dotenv_path().exists()
 
@@ -3729,6 +3730,8 @@ async def test_a_text_row_is_edited_in_place() -> None:
         await pilot.press("enter")
         await pilot.pause()
         assert panel.editing
+        # ``editing`` goes up before the edit's mount is done.
+        await until(pilot, lambda: bool(panel.query(Input)), "the edit to mount")
         edit = panel.query_one(Input)
         assert edit.value == default
         await until(pilot, lambda: app.focused is edit, "the edit to take focus")
@@ -3736,13 +3739,13 @@ async def test_a_text_row_is_edited_in_place() -> None:
         await written(pilot, "judge.model", f"{default}-x")
         assert load_config().judge.model == f"{default}-x"
         assert not panel.editing
-        assert not panel.query(Input)
+        await until(pilot, lambda: not panel.query(Input), "the edit to be removed")
         assert _panel_row(panel, "model") == f"> model             {default}-x"
         await until(pilot, lambda: app.focused is panel, "focus to come back to the panel")
         # ``Esc`` cancels: nothing written, the row shows what it showed.
         await pilot.press("enter")
         await pilot.pause()
-        await until(pilot, lambda: app.focused is panel.query_one(Input), "the second edit")
+        await until(pilot, lambda: app.focused in panel.query(Input), "the second edit")
         await pilot.press("z", "z", "z", "escape")
         await pilot.pause()
         assert not panel.editing
