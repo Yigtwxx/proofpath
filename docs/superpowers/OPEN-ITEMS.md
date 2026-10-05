@@ -610,3 +610,27 @@ five packages. The user's decisions:
 | 20.10 | Eval honesty | add a `--judge` flag to `scripts/eval_averitec.py`; do one run with the browser allowed; show the 0.404 search score in the README "Measured" table |
 | 20.11 | NLI bake-off result | **Winner: `large-fever` (MoritzLaurer DeBERTa-v3-large mnli-fever-anli-ling-wanli) × k=2 × `max`.** SciFact dev macro-F1 0.697, against 0.580 for the `base` × k=1 × `max` baseline and 0.608 for the best `base` row. Accuracy 0.697. AVeriTeC 3-way 0.438, or 0.475 on the readable subset, against a 0.708 majority baseline. Cost: 643 MB and 54 ms/pair, against 244 MB and 19 ms/pair. Full report: `docs/eval/2026-10-01-nli-bakeoff.md`. Next: (a) and (b) are settled by the accurate-NLI design (`docs/superpowers/specs/2026-10-01-accurate-nli-design.md`), which adds the winner as an opt-in "accurate" profile behind a consent download (spec §7.1); (c) stays open. (a) **settled** — rule-decided rows are left out of the tier walk (the numeric layer fired 4–6 times on train with 0 correct and pinned `high` at 1.000000); the accurate cuts are `high` 0.999142. (b) **settled** — the `medium` cut still sits on `decide`, and the report now says so itself (`NO_LOW_TIER`, default runs included). (c) **still open** — on AVeriTeC the winner is below `base` × k=2 (0.475 against 0.537), and `Supported` is still 2/19; the README recommends the profile for scientific sources, not for news |
 | 20.12 | Accurate-NLI follow-ups | (1) A shared `browser.read_terminal_answer` helper: `model_gate.ask_model_terminal` repeats `browser.ask_terminal`'s prompt loop and imports the private `_CHOICE_ANSWERS` to do it. (2) The `-q` `nli` line carries the fallback reason but not the advice. (3) Ctrl-C and `/stop` do not interrupt a running 643 MB download. (4) An "installed" but corrupt accurate model fails the run instead of falling back. (5) A multilingual NLI model is still deferred (out of scope in the accurate-NLI design); non-English claims still need the judge to translate |
+
+### 20.10 decisions — 2026-10-05
+
+The user picked the recommended option on all four questions.
+
+- **The judge is scored as a hypothetical column.** The product never lets the judge change
+  a verdict (spec §11.1), so with gold URLs `--judge` cannot move the product's number. The
+  report keeps the product's accuracy and adds a second one, labelled as something the
+  product does not do. In it, a confident model verdict (medium or high tier) still wins.
+  Otherwise the judge's opinions on the escalated sources decide (`verify.escalates`).
+  A majority of the asserting votes picks the label: an NEI opinion abstains, and a
+  tie is NEI. An escalation the judge did not answer votes with the models' label.
+- **Three runs and an ablation.** (1) gold URLs, browser, judge. (2) search, browser,
+  sentence queries. (3) search, browser, judge queries. Every source records the ladder
+  step that read it. The "without the browser" number comes from the same run, with the
+  step-3 sources dropped. Wayback was never tried for those pages, so the ablation is a
+  lower bound on the pages such a run reads. It is not a bound on its accuracy, which can
+  move either way. Runs fetch live (`--fresh`), because a cache hit has no step. Each
+  setup gets its own results file and report.
+- **Rate limits.** When Groq rate-limits, the judge falls back to the local
+  `qwen3.5:9b`, as the product does. The report counts opinions per model and splits the
+  hypothetical accuracy by the model whose vote won.
+- **Git.** One feature branch and one PR: the script, its tests, the `docs/eval`
+  reports and the README "Measured" row.
