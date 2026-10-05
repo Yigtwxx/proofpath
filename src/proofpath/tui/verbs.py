@@ -57,6 +57,8 @@ def verb_lines(
         return _fetch_lines(out, fetched)
     if verb == "config":
         return _config_lines(out, arg)
+    if verb == "update":
+        return _update_lines(out, arg, config)
     return _cache_lines(out, arg)
 
 
@@ -239,6 +241,36 @@ def _judge_lines(out: ui.Ui, checked: library.JudgeCheck) -> list[Text]:
     else:
         word, rest = "FAILED", checked.result.detail
     lines.append(_kv(out, "status", Text.assemble(ui.style_state(out, word), f" {rest}")))
+    return lines
+
+
+def _update_lines(out: ui.Ui, arg: str, config: Config) -> list[Text]:
+    """``/update`` and ``/update --check``: what ``proofpath update`` prints, plus the
+    restart line only a running TUI needs (update spec section 2.11). Nothing prompts."""
+    if arg not in ("", "--check"):
+        return [error_line(out, f"/update {arg}: try /update or /update --check")]
+    # The TUI is a terminal, so ``permissions.network = ask`` is let through with a
+    # note rather than read as a no-TTY deny (rule 4), as ``/fetch`` does.
+    result = library.update_install(config=config, interactive=True, check_only=arg == "--check")
+    lines = [_kv(out, "current", result.current), _kv(out, "latest", result.latest or "—")]
+    install = result.install
+    if install is not None:
+        where = install.source if install.source is not None else install.prefix
+        lines.append(_kv(out, "install", f"{install.name}  ({where})"))
+        if install.updatable:
+            lines.append(_kv(out, "extras", ", ".join(result.extras) or "none"))
+    lines.extend(_kv(out, "run", line) for line in result.log)
+    lines.append(
+        _kv(out, "state", result.summary) if result.ok else error_line(out, result.summary)
+    )
+    if result.command and result.state != "updated":
+        lines.append(_kv(out, "command", library.display_command(result.command)))
+    if result.state == "available":
+        lines.append(_kv(out, "note", "/update installs it"))
+    if result.state == "updated":
+        # This process still runs the code it started with; the new one is on disk.
+        lines.append(_kv(out, "note", f"restart proofpath to use v{result.installed}"))
+    lines.extend(_kv(out, "note", note) for note in result.notes)
     return lines
 
 

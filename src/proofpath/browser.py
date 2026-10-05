@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import importlib.util
 import os
-import shlex
 import shutil
 import subprocess
 import sys
@@ -26,6 +25,7 @@ from typing import Literal
 import typer
 
 from proofpath.config import ConfigError, Decision, Permission, resolve_permission, set_value
+from proofpath.shell import run_logged
 
 Answer = Literal["once", "always", "no", "never"]
 PROMPT_CHOICES = ("y", "a", "n", "never")
@@ -185,29 +185,6 @@ def install_commands() -> list[list[str]]:
     ]
 
 
-def _run_logged(
-    cmd: list[str],
-    log: list[str],
-    run: Callable[..., subprocess.CompletedProcess[str]],
-) -> subprocess.CompletedProcess[str]:
-    # Quoted, not merely spaced: the log is what the user is shown when an install
-    # fails, and a line they can paste back into a shell says more than one they
-    # cannot. The -c program and the pip spec are each one argument.
-    log.append(f"$ {shlex.join(cmd)}")
-    try:
-        result = run(cmd, capture_output=True, text=True, check=False)
-    except OSError as exc:
-        # e.g. the interpreter/binary named in cmd does not exist on this machine.
-        log.append(f"exit ? ({type(exc).__name__}: {exc})")
-        return subprocess.CompletedProcess(cmd, 1, stdout="", stderr=str(exc))
-    log.append(f"exit {result.returncode}")
-    if result.returncode != 0:
-        stderr_lines = (result.stderr or "").strip().splitlines()
-        if stderr_lines:
-            log.append(stderr_lines[-1])
-    return result
-
-
 def install(
     log: list[str],
     *,
@@ -217,16 +194,16 @@ def install(
     fail. ``pip`` missing in a uv-managed venv falls back to ``uv pip install`` only
     when ``uv`` is on PATH; otherwise the install fails outright."""
     pip_cmd, uv_cmd, module_cmd = install_commands()
-    result = _run_logged(pip_cmd, log, run)
+    result = run_logged(pip_cmd, log, run)
     if result.returncode != 0:
         if not shutil.which("uv"):
             return False
-        result = _run_logged(uv_cmd, log, run)
+        result = run_logged(uv_cmd, log, run)
         if result.returncode != 0:
             return False
     # No retry behind this one: see ``install_commands``. A failed browser download
     # is reported with its log, not paid for twice.
-    return _run_logged(module_cmd, log, run).returncode == 0
+    return run_logged(module_cmd, log, run).returncode == 0
 
 
 def fetch_with_browser(url: str, *, timeout: float = 60.0) -> tuple[int, bytes, str]:
