@@ -189,7 +189,10 @@ judge-written queries and translations).
 
 - **Trigger.** Any `JudgeUnavailable` from the primary provider: a 429, a quota
   error, or the provider not answering. The switch lasts for the rest of the run, so
-  a rate-limited Groq is not hit again on every batch.
+  a rate-limited Groq is not hit again on every batch. A 429 with a `Retry-After` of
+  at most 120 s (or none) is the exception: it switches only until that wait has
+  passed, then the provider is asked again (amended by
+  `2026-10-05-judge-cooldown-design.md`).
   The switch is immediate: with a fallback available, the primary gets no retry and
   no `Retry-After` wait. The failed request is sent again to the local model, so no
   batch is lost, and the notice appears before the model starts loading.

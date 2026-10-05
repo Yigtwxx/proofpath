@@ -2,7 +2,9 @@
 
 Spec section 11: the switch is never silent. The run's own block carries the line as
 a note too, but that scrolls away with the log; this row sits directly above the bar,
-right-aligned, from the moment the run switches until the next run starts.
+right-aligned, from the moment the run switches until the next run starts. A switch
+for a short 429 is temporary (judge-cooldown spec): the back notice then replaces
+the line, through the same path.
 """
 
 from __future__ import annotations
@@ -34,7 +36,9 @@ class JudgeNotice(Static):
 
     def show(self, text: str) -> None:
         self.text = text
-        # ``caution``: the run is still judged, by a different model than configured.
+        # ``caution``: some of the run's second opinions came from a model other than
+        # the one configured. True of the back notice too: the provider judges again,
+        # but the report still mixes two judges.
         style = self._theme.tone("caution") if self._coloured else ""
         self.update(Text(text, style=style, no_wrap=True, overflow="ellipsis"))
         self.display = True

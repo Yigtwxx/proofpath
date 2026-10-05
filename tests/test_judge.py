@@ -161,7 +161,11 @@ def test_complete_sends_the_json_schema_and_fills_usage_from_the_response() -> N
     # Ollama takes no key, so no Authorization header may be sent.
     assert "authorization" not in route.calls.last.request.headers
     assert done == judge.Completion(
-        text='{"opinions": []}', prompt_tokens=120, completion_tokens=7, model="qwen3.5:9b"
+        text='{"opinions": []}',
+        prompt_tokens=120,
+        completion_tokens=7,
+        model="qwen3.5:9b",
+        by="ollama qwen3.5:9b",  # who answered, as an opinion names it
     )
     assert client.cost.calls == 1
     assert client.cost.prompt_tokens == 120
@@ -438,13 +442,58 @@ def test_three_429s_give_up_with_judge_unavailable() -> None:
     )
     slept: list[float] = []
     client = judge.JudgeClient(OLLAMA, None, sleep=slept.append)
-    with pytest.raises(judge.JudgeUnavailable, match="429"):
+    with pytest.raises(judge.JudgeUnavailable, match="429") as caught:
         client.complete(MESSAGES)
     assert route.call_count == 3
     assert slept == [1.0, 1.0]  # no wait after the last attempt
     assert client.cost.calls == 0
     # The waits happened, so the report must still show them after giving up.
     assert client.cost.waited_s == 2.0
+    # The wait the provider named travels with the error (cooldown spec 2.2).
+    assert caught.value.retry_after == 1.0
+
+
+def caught_retry_after(client: judge.JudgeClient) -> float | None:
+    """``retry_after`` of the ``JudgeUnavailable`` one more call to ``client`` raises."""
+    with pytest.raises(judge.JudgeUnavailable) as caught:
+        client.complete(MESSAGES)
+    return caught.value.retry_after
+
+
+@pytest.mark.parametrize(
+    ("headers", "seconds"),
+    [({"Retry-After": "17"}, 17.0), ({}, None), ({"Retry-After": "soon"}, None)],
+)
+def test_a_fail_fast_429_carries_its_retry_after(
+    headers: dict[str, str], seconds: float | None
+) -> None:
+    """Cooldown spec 2.2: the fallback's primary is ``fail_fast``, and that is the path
+    whose error must say when the provider will answer again: one call, no sleep."""
+    with respx.mock() as router:
+        route = router.post(OLLAMA_URL).mock(
+            return_value=httpx.Response(429, headers=headers, json={})
+        )
+        slept: list[float] = []
+        client = judge.JudgeClient(OLLAMA, None, sleep=slept.append)
+        client.fail_fast = True
+        assert caught_retry_after(client) == seconds
+    assert (route.call_count, slept) == (1, [])
+
+
+def test_retry_after_belongs_to_the_last_failure_only() -> None:
+    """A 429 followed by a 5xx gave up on the 5xx, which named no wait."""
+    with respx.mock() as router:
+        router.post(OLLAMA_URL).mock(
+            side_effect=[
+                httpx.Response(429, headers={"Retry-After": "5"}, json={}),
+                httpx.Response(500),
+                httpx.Response(500),
+            ]
+        )
+        client = judge.JudgeClient(OLLAMA, None, sleep=lambda _: None)
+        with pytest.raises(judge.JudgeUnavailable) as caught:
+            client.complete(MESSAGES)
+    assert (caught.value.status, caught.value.retry_after) == (500, None)
 
 
 @respx.mock

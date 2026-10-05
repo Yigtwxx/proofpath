@@ -56,6 +56,11 @@ MESSAGES = [
 SCHEMA = {"type": "object", "properties": {"opinions": {"type": "array"}}}
 OPINION = json.dumps({"opinions": [{"id": "c1", "label": "NEI", "rationale": "silent"}]})
 LIMIT = f"Groq limit reached — judging with local ollama {LOCAL}"
+# A 429 without ``Retry-After`` cools down for the default 60 s (cooldown spec 2.1),
+# so the switch it causes says it is temporary.
+COOLING = f"{LIMIT} until it resets (~60s)"
+# A sticky switch, for the surfaces that must keep showing today's wording.
+KEY_401 = f"Groq rejected the key (HTTP 401) — judging with local ollama {LOCAL}"
 
 
 @pytest.fixture
@@ -95,16 +100,17 @@ def fallback(
     setting: str = LOCAL,
     sleep: Sleeps | None = None,
     on_switch: Callable[[str], None] | None = None,
+    clock: Callable[[], float] = time.monotonic,
 ) -> judge.FallbackClient:
     """A Groq primary behind the fallback, exactly as ``build_client`` wires it."""
     primary = judge.JudgeClient(GROQ, KEY, sleep=sleep or Sleeps())
-    return judge.FallbackClient(primary, fallback=setting, on_switch=on_switch)
+    return judge.FallbackClient(primary, fallback=setting, on_switch=on_switch, clock=clock)
 
 
 def routes(
     mock: respx.MockRouter,
     *,
-    groq: httpx.Response | Exception | list[httpx.Response] | None = None,
+    groq: httpx.Response | Exception | list[httpx.Response | Exception] | None = None,
     tags: httpx.Response | Exception | None = None,
     local: httpx.Response | None = None,
 ) -> tuple[respx.Route, respx.Route, respx.Route, respx.Route]:
@@ -138,7 +144,7 @@ def test_the_default_config_falls_back_to_qwen3_5(mock: respx.MockRouter) -> Non
     client.complete(MESSAGES)
     assert tags.call_count == 1  # only to confirm it is installed
     assert json.loads(local.calls.last.request.content)["model"] == "qwen3.5:9b"
-    assert client.switched == "Groq limit reached — judging with local ollama qwen3.5:9b"
+    assert client.switched == COOLING  # a bare 429: the default 60 s cooldown
     client.close()
 
 
@@ -201,8 +207,8 @@ def test_a_429_switches_at_once_and_the_opinion_names_the_local_model(
     opinions = judge.Judge(client).review([judge.JudgeItem("c1", "x", "y", Label.NEI, "low")])
 
     assert opinions["c1"].model == f"ollama {LOCAL}"
-    assert client.switched == LIMIT
-    assert seen == [LIMIT]
+    assert client.switched == COOLING
+    assert seen == [COOLING]
     assert groq.call_count == 1  # no retry
     assert sleep.calls == []  # and no Retry-After wait
     assert warm.call_count == 1
@@ -323,7 +329,7 @@ def test_a_listener_that_raises_does_not_lose_the_batch(mock: respx.MockRouter) 
     _, _, _, local = routes(mock)
     client = fallback(on_switch=broken)
     assert client.complete(MESSAGES).text == OPINION
-    assert client.switched == LIMIT
+    assert client.switched == COOLING
     assert local.call_count == 1
 
 
@@ -483,7 +489,7 @@ def test_two_threads_against_a_rate_limited_primary_switch_once(mock: respx.Mock
 
     assert errors == []
     assert done == [OPINION, OPINION]
-    assert seen == [LIMIT]
+    assert seen == [COOLING]
     assert groq.call_count == 2
     assert warm.call_count == 1
     assert local.call_count == 2
@@ -665,7 +671,9 @@ def test_a_users_own_override_is_honoured_as_written(mock: respx.MockRouter) -> 
 
     assert tags.call_count == 1
     assert json.loads(local.calls.last.request.content)["model"] == "my-judge:latest"
-    assert client.switched == "Groq limit reached — judging with local ollama my-judge:latest"
+    assert client.switched == (
+        "Groq limit reached — judging with local ollama my-judge:latest until it resets (~60s)"
+    )
 
 
 def test_an_untagged_override_matches_its_latest_tag(mock: respx.MockRouter) -> None:
@@ -744,7 +752,7 @@ def test_reset_goes_back_to_the_primary_and_forgets_the_notice(mock: respx.MockR
     seen: list[str] = []
     client = fallback(on_switch=seen.append)
     client.complete(MESSAGES)
-    assert client.switched == LIMIT
+    assert client.switched == COOLING
 
     client.reset()
     assert client.switched is None
@@ -753,7 +761,7 @@ def test_reset_goes_back_to_the_primary_and_forgets_the_notice(mock: respx.MockR
 
     assert groq.call_count == 2
     assert local.call_count == 1
-    assert seen == [LIMIT]
+    assert seen == [COOLING]
     # What the local model already answered is not forgotten by the reset.
     assert (client.cost.calls, client.cost.local_calls) == (2, 1)
 
@@ -765,25 +773,28 @@ QUERIES = json.dumps(
 )
 
 
+@pytest.mark.parametrize(
+    ("failure", "notice"), [(httpx.Response(429), COOLING), (httpx.Response(401), KEY_401)]
+)
 def test_a_run_that_switches_emits_one_notice_and_the_footer_carries_it(
-    mock: respx.MockRouter,
+    mock: respx.MockRouter, failure: httpx.Response, notice: str
 ) -> None:
-    routes(mock, local=_ok(QUERIES))
+    routes(mock, groq=failure, local=_ok(QUERIES))
     built = searching(StubSearcher())
     built.judge = judge.Judge(judge.build_client(GROQ, KEY))
     events: list[Event] = []
     report = verify_mod.verify(CLAIM, built, on_event=events.append)
 
     notices = [event for event in events if isinstance(event, Note) and event.notice]
-    assert [note.text for note in notices] == [LIMIT]
-    assert report.judge_notice == LIMIT
+    assert [note.text for note in notices] == [notice]
+    assert report.judge_notice == notice
     assert report.api_calls == 0  # Groq answered nothing; the one answer was local
     assert report.judge_cost is not None and report.judge_cost.local_calls == 1
     footer = render_footer(report)
-    assert footer.judge_notice == LIMIT
+    assert footer.judge_notice == notice
     assert footer.local_calls == 1
     markdown = render_markdown(report)
-    assert f"- judge fallback: {LIMIT}" in markdown
+    assert f"- judge fallback: {notice}" in markdown
     assert "- local calls: 1" in markdown
 
 
@@ -798,7 +809,7 @@ def test_a_second_run_on_the_same_engine_starts_on_the_primary_again(
     events: list[Event] = []
     second = verify_mod.verify(CLAIM, built, on_event=events.append)
 
-    assert first.judge_notice == LIMIT
+    assert first.judge_notice == COOLING
     assert second.judge_notice is None
     assert not [event for event in events if isinstance(event, Note) and event.notice]
     assert groq.call_count == 2
@@ -807,10 +818,17 @@ def test_a_second_run_on_the_same_engine_starts_on_the_primary_again(
 runner = CliRunner()
 
 
+@pytest.mark.parametrize(
+    ("failure", "notice"), [(httpx.Response(429), COOLING), (httpx.Response(401), KEY_401)]
+)
 def test_the_cli_prints_the_notice_on_stderr(
-    mock: respx.MockRouter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    mock: respx.MockRouter,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: httpx.Response,
+    notice: str,
 ) -> None:
-    routes(mock, local=_ok(QUERIES))
+    routes(mock, groq=failure, local=_ok(QUERIES))
     monkeypatch.setenv("GROQ_API_KEY", KEY.value)
     monkeypatch.setenv("PROOFPATH_CONFIG_DIR", str(tmp_path / "conf"))
     built = searching(StubSearcher())
@@ -825,9 +843,9 @@ def test_the_cli_prints_the_notice_on_stderr(
     target.write_text(CLAIM, encoding="utf-8")
     result = runner.invoke(app, ["check", str(target), "--judge", "--format", "json"])
 
-    assert LIMIT in result.stderr
+    assert notice in result.stderr
     # stdout is the one JSON document and nothing else; the notice rides inside it.
-    assert json.loads(result.stdout)["judge_notice"] == LIMIT
+    assert json.loads(result.stdout)["judge_notice"] == notice
     assert KEY.value not in result.output
 
 
@@ -997,7 +1015,7 @@ def test_a_local_model_that_answers_again_is_reported_as_judging_again(
         client.complete(MESSAGES)
     assert client.switched is not None and "failed too" in client.switched
     client.complete(MESSAGES)
-    assert client.switched == LIMIT
+    assert client.switched == COOLING
 
 
 def test_a_run_whose_local_model_fails_too_says_both_failed_in_the_report(
@@ -1029,3 +1047,526 @@ def test_judge_queries_keeps_the_status_of_the_failure() -> None:
     built = judge.Judge(Down())  # type: ignore[arg-type]
     assert built.queries(["a claim"]) == {}
     assert built.unavailable and built.status == 413
+
+
+# --- the cooldown: back to the provider once its minute limit resets ----------------
+# docs/superpowers/specs/2026-10-05-judge-cooldown-design.md. The clock is a fake moved
+# by hand, so a cooldown passes without a single sleep; every number below is a whole
+# second added to a whole start, so no float rounding decides a boundary.
+
+
+class Clock:
+    """The fallback's clock, moved by hand."""
+
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def _limited(seconds: str) -> httpx.Response:
+    return httpx.Response(429, headers={"Retry-After": seconds})
+
+
+def _cooling(seconds: int) -> str:
+    return f"{LIMIT} until it resets (~{seconds}s)"
+
+
+def _back(count: int) -> str:
+    noun = "request" if count == 1 else "requests"
+    return f"Groq answering again — local ollama {LOCAL} stood in for {count} {noun}"
+
+
+def _groq_ok() -> httpx.Response:
+    return _ok(OPINION, model=GROQ.model)
+
+
+def test_a_short_429_switches_then_comes_back_once_retry_after_has_passed(
+    mock: respx.MockRouter,
+) -> None:
+    """Cooldown spec 2.3: one switch notice, one back notice, and the provider judges
+    again from the first request at the time it named itself."""
+    clock = Clock()
+    seen: list[str] = []
+    groq, _, warm, local = routes(mock, groq=[_limited("30"), _groq_ok(), _groq_ok()])
+    client = fallback(on_switch=seen.append, clock=clock)
+    client.complete(MESSAGES)
+    assert client.switched == _cooling(30)
+    assert (client.provider, client.model) == ("ollama", LOCAL)
+
+    clock.now += 30
+    client.complete(MESSAGES)
+    client.complete(MESSAGES)
+
+    assert seen == [_cooling(30), _back(1)]
+    assert client.switched == _back(1)  # the footer tells the truth at the end of the run
+    assert (client.provider, client.model) == ("groq", GROQ.model)
+    assert (groq.call_count, local.call_count, warm.call_count) == (3, 1, 1)
+    assert (client.cost.calls, client.cost.local_calls) == (3, 1)
+
+
+def test_each_opinion_names_the_model_that_gave_it_across_the_cooldown(
+    mock: respx.MockRouter,
+) -> None:
+    clock = Clock()
+    routes(mock, groq=[_limited("30"), _groq_ok()])
+    reviewer = judge.Judge(fallback(clock=clock))
+    items = [judge.JudgeItem("c1", "x", "y", Label.NEI, "low")]
+    assert reviewer.review(items)["c1"].model == f"ollama {LOCAL}"
+    clock.now += 30
+    assert reviewer.review(items)["c1"].model == f"groq {GROQ.model}"
+
+
+def test_requests_inside_the_cooldown_go_to_the_local_model_only(mock: respx.MockRouter) -> None:
+    clock = Clock()
+    groq, _, _, local = routes(mock, groq=_limited("30"))
+    client = fallback(clock=clock)
+    client.complete(MESSAGES)
+    clock.now += 29.5
+    client.complete(MESSAGES)
+    client.complete(MESSAGES)
+
+    assert groq.call_count == 1  # nothing reaches the provider before its own time
+    assert local.call_count == 3
+
+
+def test_a_second_short_429_at_the_probe_restarts_the_cooldown_quietly(
+    mock: respx.MockRouter,
+) -> None:
+    """Cooldown spec 2.3: the new wait comes from the new ``Retry-After``; no second
+    notice, no second warm-up, and the request that probed is answered locally."""
+    clock = Clock()
+    sleep = Sleeps()
+    seen: list[str] = []
+    groq, _, warm, local = routes(mock, groq=[_limited("30"), _limited("10"), _groq_ok()])
+    client = fallback(on_switch=seen.append, clock=clock, sleep=sleep)
+    client.complete(MESSAGES)
+    clock.now += 30
+    assert client.complete(MESSAGES).text == OPINION
+    assert (groq.call_count, local.call_count, warm.call_count) == (2, 2, 1)
+    assert seen == [_cooling(30)]
+    assert sleep.calls == []  # the probe is fail-fast too: no Retry-After wait
+
+    clock.now += 9
+    client.complete(MESSAGES)
+    assert groq.call_count == 2  # the new wait, not the old one, is honoured
+    clock.now += 1
+    client.complete(MESSAGES)
+
+    assert groq.call_count == 3
+    assert seen == [_cooling(30), _back(3)]
+    assert client.switched == _back(3)
+
+
+@pytest.mark.parametrize(
+    ("failure", "notice"),
+    [
+        # A daily limit (RPD, TPD): asking again within minutes cannot help.
+        (_limited("3600"), LIMIT),
+        (_limited("121"), LIMIT),  # one second past COOLDOWN_MAX_S
+        (httpx.Response(413), LIMIT),  # the request alone busts the TPM
+        (
+            httpx.Response(401),
+            f"Groq rejected the key (HTTP 401) — judging with local ollama {LOCAL}",
+        ),
+        (
+            httpx.Response(500),
+            f"Groq did not answer (HTTP 500) — judging with local ollama {LOCAL}",
+        ),
+    ],
+)
+def test_every_other_failure_stays_sticky_with_todays_notice(
+    mock: respx.MockRouter, failure: httpx.Response, notice: str
+) -> None:
+    clock = Clock()
+    seen: list[str] = []
+    groq, _, _, local = routes(mock, groq=failure)
+    client = fallback(on_switch=seen.append, clock=clock)
+    client.complete(MESSAGES)
+    clock.now += 86_400
+    client.complete(MESSAGES)
+
+    assert groq.call_count == 1
+    assert local.call_count == 2
+    assert seen == [notice]
+    assert client.switched == notice
+
+
+@pytest.mark.parametrize(
+    ("failure", "seconds"),
+    [(httpx.Response(429), 60), (_limited("120"), 120)],
+)
+def test_a_429_cools_for_its_retry_after_or_60_s_without_one(
+    mock: respx.MockRouter, failure: httpx.Response, seconds: int
+) -> None:
+    clock = Clock()
+    start = clock.now
+    groq, _, _, _ = routes(mock, groq=[failure, _groq_ok()])
+    client = fallback(clock=clock)
+    client.complete(MESSAGES)
+    assert client.switched == _cooling(seconds)
+
+    clock.now = start + seconds - 1
+    client.complete(MESSAGES)
+    assert groq.call_count == 1
+    clock.now = start + seconds
+    client.complete(MESSAGES)
+    assert groq.call_count == 2
+
+
+def test_a_probe_that_fails_for_good_makes_the_switch_sticky(mock: respx.MockRouter) -> None:
+    """Cooldown spec 2.3: a sticky failure at the probe ends the cooldown for the run.
+    ``switched`` takes today's wording, since "until it resets" is no longer true."""
+    clock = Clock()
+    seen: list[str] = []
+    down = f"Groq did not answer (HTTP 500) — judging with local ollama {LOCAL}"
+    groq, _, warm, local = routes(mock, groq=[_limited("30"), httpx.Response(500)])
+    client = fallback(on_switch=seen.append, clock=clock)
+    client.complete(MESSAGES)
+    clock.now += 30
+    assert client.complete(MESSAGES).text == OPINION
+    clock.now += 86_400
+    client.complete(MESSAGES)
+
+    assert (groq.call_count, local.call_count, warm.call_count) == (2, 3, 1)
+    assert seen == [_cooling(30), down]
+    assert client.switched == down
+
+
+def test_a_429_after_the_return_switches_again_with_its_own_notice(
+    mock: respx.MockRouter,
+) -> None:
+    """Back on the provider means a later limit is a new switch, told as one: otherwise
+    ``switched`` would still say the provider was answering."""
+    clock = Clock()
+    seen: list[str] = []
+    groq, _, warm, local = routes(mock, groq=[_limited("30"), _groq_ok(), _limited("45")])
+    client = fallback(on_switch=seen.append, clock=clock)
+    client.complete(MESSAGES)
+    clock.now += 30
+    client.complete(MESSAGES)
+    client.complete(MESSAGES)
+
+    assert seen == [_cooling(30), _back(1), _cooling(45)]
+    assert client.switched == _cooling(45)
+    assert (groq.call_count, local.call_count, warm.call_count) == (3, 2, 2)
+
+
+def test_reset_clears_the_cooldown(mock: respx.MockRouter) -> None:
+    """Cooldown spec 2.5: a new run starts on the provider at once, and a cooldown
+    from the run before neither delays it nor earns it a back notice."""
+    clock = Clock()
+    seen: list[str] = []
+    groq, _, _, _ = routes(mock, groq=[_limited("30"), _groq_ok(), _limited("30")])
+    client = fallback(on_switch=seen.append, clock=clock)
+    client.complete(MESSAGES)
+    client.reset()
+    client.complete(MESSAGES)  # the same instant: no wait is left over
+    assert groq.call_count == 2
+    assert client.switched is None
+    assert seen == [_cooling(30)]
+
+    client.complete(MESSAGES)  # and the next limit is this run's own switch
+    assert seen == [_cooling(30), _cooling(30)]
+
+
+def test_only_one_thread_probes_when_the_cooldown_ends(mock: respx.MockRouter) -> None:
+    """Cooldown spec 2.3: while one thread asks the provider again, the others keep
+    using the local model; they neither queue behind the probe nor send a second one."""
+    clock = Clock()
+    probing, release = threading.Event(), threading.Event()
+    asked: list[int] = []
+
+    def provider(request: httpx.Request) -> httpx.Response:
+        asked.append(1)
+        if len(asked) == 1:
+            return _limited("30")
+        if len(asked) == 2:
+            probing.set()
+            assert release.wait(timeout=10)  # the probe stays out until released
+        return _groq_ok()
+
+    groq, _, _, local = routes(mock)
+    groq.mock(side_effect=provider)
+    seen: list[str] = []
+    client = fallback(on_switch=seen.append, clock=clock)
+    client.complete(MESSAGES)
+    clock.now += 30
+    finished = threading.Semaphore(0)
+    done: list[str] = []
+    errors: list[BaseException] = []
+
+    def work() -> None:
+        try:
+            done.append(client.complete(MESSAGES).text)
+        except BaseException as exc:  # pragma: no cover - reported below
+            errors.append(exc)
+        finally:
+            finished.release()
+
+    threads = [threading.Thread(target=work) for _ in range(3)]
+    for thread in threads:
+        thread.start()
+    assert probing.wait(timeout=5)
+    # Two threads finish on the local model while the probe is still out.
+    assert finished.acquire(timeout=5)
+    assert finished.acquire(timeout=5)
+    assert len(asked) == 2  # the switch, and the one probe
+    assert local.call_count == 3
+    release.set()
+    for thread in threads:
+        thread.join(timeout=10)
+
+    assert errors == []
+    assert done == [OPINION] * 3
+    assert seen == [_cooling(30), _back(3)]
+
+
+# --- the cooldown, review round 1 ----------------------------------------------------
+
+
+class Ticking(Clock):
+    """Moves on 31 s at every read: a run's next judge call finds the 30 s cooldown
+    of its last one over, with nothing in the run there to move a clock by hand."""
+
+    def __call__(self) -> float:
+        now = self.now
+        self.now += 31
+        return now
+
+
+class Watched(Clock):
+    """Says when it is read. The routing reads it under the lock, the moment before
+    a call that stays on the local model reads the warm-up gate."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.read = threading.Event()
+
+    def __call__(self) -> float:
+        self.read.set()
+        return super().__call__()
+
+
+def _held_second_local(
+    entered: threading.Event, gate: threading.Event
+) -> Callable[[httpx.Request], httpx.Response]:
+    """A local route whose second request stays out until ``gate`` opens."""
+    asked: list[int] = []
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        asked.append(1)
+        if len(asked) == 2:
+            entered.set()
+            assert gate.wait(timeout=10)
+        return _ok(OPINION)
+
+    return answer
+
+
+def test_a_dead_local_model_is_never_announced_as_judging_again(
+    mock: respx.MockRouter,
+) -> None:
+    """Review, important 1: latched dead stays dead for the run. A later switch says
+    both failed, in the notice and in ``switched``, and loads nothing. The return in
+    between works without the local model."""
+    clock = Clock()
+    seen: list[str] = []
+    both = f"Groq limit reached, and local ollama {LOCAL} failed too (HTTP 404)"
+    # Not "stood in for 0 requests": the footer would lose that the local model failed.
+    back = f"Groq answering again — local ollama {LOCAL} failed (HTTP 404)"
+    groq, _, warm, local = routes(
+        mock,
+        groq=[_limited("30"), _groq_ok(), _limited("30")],
+        local=httpx.Response(404),
+    )
+    client = fallback(on_switch=seen.append, clock=clock)
+    with pytest.raises(judge.JudgeUnavailable):
+        client.complete(MESSAGES)
+    assert client.switched == both
+    clock.now += 30
+    assert client.complete(MESSAGES).text == OPINION  # Groq is back; nothing stood in
+    assert client.switched == back
+    with pytest.raises(judge.JudgeUnavailable):
+        client.complete(MESSAGES)
+
+    assert client.switched == both
+    assert seen == [_cooling(30), back, both]
+    assert (groq.call_count, warm.call_count, local.call_count) == (3, 1, 1)
+
+
+def test_an_answer_in_flight_at_the_return_is_named_for_the_model_that_gave_it(
+    mock: respx.MockRouter,
+) -> None:
+    """Review, important 2: an opinion names the client that answered it, not the one
+    judging by the time it is read."""
+    clock = Clock()
+    entered, gate = threading.Event(), threading.Event()
+    _, _, _, local = routes(mock, groq=[_limited("30"), _groq_ok()])
+    local.mock(side_effect=_held_second_local(entered, gate))
+    client = fallback(clock=clock)
+    items = [judge.JudgeItem("c1", "x", "y", Label.NEI, "low")]
+    client.complete(MESSAGES)  # the switch
+    late: dict[str, judge.JudgeOpinion] = {}
+    thread = threading.Thread(target=lambda: late.update(judge.Judge(client).review(items)))
+    thread.start()
+    assert entered.wait(timeout=5)  # a local answer, still out
+    clock.now += 30
+    probed = judge.Judge(client).review(items)  # the probe: Groq is back
+    gate.set()
+    thread.join(timeout=10)
+
+    assert probed["c1"].model == f"groq {GROQ.model}"
+    assert late["c1"].model == f"ollama {LOCAL}"
+    assert client.cost.model == LOCAL  # the last answer to land was the local one
+
+
+def test_a_switch_after_a_return_never_strands_a_thread_on_the_first_warm_up(
+    mock: respx.MockRouter,
+) -> None:
+    """Review, important 3: a thread waiting on the first switch's warm-up is woken by
+    that switch, even when a second switch was made while the model still loaded."""
+    clock = Watched()
+    warming, release = threading.Event(), threading.Event()
+    warms: list[int] = []
+
+    def slow_first_warm(request: httpx.Request) -> httpx.Response:
+        warms.append(1)
+        if len(warms) == 1:
+            warming.set()
+            assert release.wait(timeout=10)
+        return httpx.Response(200, json={})
+
+    _, _, warm, _ = routes(mock, groq=[_limited("30"), _groq_ok(), _limited("30")])
+    warm.mock(side_effect=slow_first_warm)
+    client = fallback(clock=clock)
+    done: list[str] = []
+    switcher = threading.Thread(target=lambda: done.append(client.complete(MESSAGES).text))
+    switcher.start()
+    assert warming.wait(timeout=5)
+    clock.read.clear()
+    waiter = threading.Thread(
+        target=lambda: done.append(client.complete(MESSAGES).text), daemon=True
+    )
+    waiter.start()
+    assert clock.read.wait(timeout=5)  # routed to the local model, now at the gate
+    clock.now += 30
+    client.complete(MESSAGES)  # the probe: Groq answers
+    client.complete(MESSAGES)  # a new limit: the second switch, warmed at once
+    release.set()
+    switcher.join(timeout=5)
+    waiter.join(timeout=5)
+
+    assert not waiter.is_alive()  # not left to time out after WARM_WAIT_S
+    assert done == [OPINION, OPINION]
+    assert warm.call_count == 2
+
+
+@pytest.mark.parametrize("seconds", ["0", "0.4"])
+def test_a_wait_under_a_second_is_announced_as_about_one(
+    mock: respx.MockRouter, seconds: str
+) -> None:
+    routes(mock, groq=_limited(seconds))
+    client = fallback(clock=Clock())
+    client.complete(MESSAGES)
+    assert client.switched == _cooling(1)
+
+
+def test_the_back_notice_counts_each_cooldown_period_on_its_own(
+    mock: respx.MockRouter,
+) -> None:
+    """Review, nit 5: a request the local model took during the period counts even when
+    its answer lands after the return, and never toward the next period."""
+    clock = Clock()
+    seen: list[str] = []
+    entered, gate = threading.Event(), threading.Event()
+    _, _, _, local = routes(mock, groq=[_limited("30"), _groq_ok(), _limited("30"), _groq_ok()])
+    local.mock(side_effect=_held_second_local(entered, gate))
+    client = fallback(on_switch=seen.append, clock=clock)
+    client.complete(MESSAGES)  # period 1: the switch
+    thread = threading.Thread(target=client.complete, args=(MESSAGES,))
+    thread.start()
+    assert entered.wait(timeout=5)  # period 1: a second request, still out
+    clock.now += 30
+    client.complete(MESSAGES)  # the probe: back, with both of period 1's requests
+    client.complete(MESSAGES)  # period 2: a new switch
+    gate.set()
+    thread.join(timeout=10)  # period 1's answer lands during period 2
+    clock.now += 30
+    client.complete(MESSAGES)  # the probe again
+
+    assert seen == [_cooling(30), _back(2), _cooling(30), _back(1)]
+
+
+def test_a_probe_that_raises_something_else_leaves_the_next_call_to_probe(
+    mock: respx.MockRouter,
+) -> None:
+    """Not an answer and not a ``JudgeUnavailable``: the error reaches the caller, and
+    the cooldown is not left waiting for a probe that will never answer."""
+    clock = Clock()
+    groq, _, _, local = routes(mock, groq=[_limited("30"), RuntimeError("bug"), _groq_ok()])
+    client = fallback(clock=clock)
+    client.complete(MESSAGES)
+    clock.now += 30
+    with pytest.raises(RuntimeError):
+        client.complete(MESSAGES)
+    client.complete(MESSAGES)
+
+    assert groq.call_count == 3
+    assert (client.provider, local.call_count) == ("groq", 1)
+
+
+def test_a_run_whose_judge_comes_back_says_so_in_the_report(mock: respx.MockRouter) -> None:
+    """The back notice takes the switch notice's road: a note during the run, the
+    report's ``judge_notice``, its footer and its markdown. The summary, written after
+    the return, is named for Groq."""
+    routes(
+        mock,
+        groq=[_limited("30"), _ok("A short summary.", model=GROQ.model)],
+        local=_ok(QUERIES),
+    )
+    built = searching(StubSearcher())
+    built.judge = judge.Judge(fallback(clock=Ticking()))
+    events: list[Event] = []
+    report = verify_mod.verify(CLAIM, built, summarize=True, on_event=events.append)
+
+    notices = [event.text for event in events if isinstance(event, Note) and event.notice]
+    assert notices == [_cooling(30), _back(1)]
+    assert report.judge_notice == _back(1)
+    assert render_footer(report).judge_notice == _back(1)
+    assert f"- judge fallback: {_back(1)}" in render_markdown(report)
+    assert report.summary_model == f"groq {GROQ.model}"
+    assert report.judge_cost is not None
+    assert (report.api_calls, report.judge_cost.local_calls) == (1, 1)
+
+
+def test_the_cli_prints_the_back_notice_on_stderr(
+    mock: respx.MockRouter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    routes(
+        mock,
+        groq=[_limited("30"), _ok("A short summary.", model=GROQ.model)],
+        local=_ok(QUERIES),
+    )
+    monkeypatch.setenv("GROQ_API_KEY", KEY.value)
+    monkeypatch.setenv("PROOFPATH_CONFIG_DIR", str(tmp_path / "conf"))
+    built = searching(StubSearcher())
+
+    def fake_default(config: Config, **kwargs: Any) -> verify_mod.Engine:
+        # A clock that crosses the cooldown between the run's two judge calls (the
+        # queries, then the summary); everything else is the CLI's own.
+        built.judge = judge.Judge(fallback(clock=Ticking()))
+        built.escalate = kwargs.get("escalate", True)
+        return built
+
+    monkeypatch.setattr(verify_mod.Engine, "default", staticmethod(fake_default))
+    target = tmp_path / "claim.txt"
+    target.write_text(CLAIM, encoding="utf-8")
+    result = runner.invoke(
+        app, ["check", str(target), "--judge", "--summarize", "--format", "json"]
+    )
+
+    assert _cooling(30) in result.stderr
+    assert _back(1) in result.stderr
+    assert json.loads(result.stdout)["judge_notice"] == _back(1)

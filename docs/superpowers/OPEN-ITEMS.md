@@ -680,3 +680,21 @@ over "uv tool and pipx only". Design: `docs/superpowers/specs/2026-10-05-update-
   to the tool environment with pip, and the browser extra is installed that way on
   consent.
 - **Behaviour:** running the command updates straight away; `--check` only reports.
+
+## 22. Judge: back to the provider after a minute limit — 2026-10-05
+
+The user asked whether the judge could return to Groq once its per-minute limit resets
+instead of staying on the local `qwen3.5:9b` for the rest of the run. They chose
+**option A, a cooldown with return**, over waiting on the provider (B) and over A plus
+proactive pacing from the `x-ratelimit-*` headers (C). A 429 whose `Retry-After` is at
+most 120 s switches only until that time has passed. A daily limit, a 413, a key error
+and a server error keep today's sticky switch. Nobody waits, and the provider is asked
+again only once the time it named has passed. Design:
+`docs/superpowers/specs/2026-10-05-judge-cooldown-design.md`. It amends evidence-search
+spec §11.
+
+Follow-up (review, 2026-10-05, left open on purpose): `_come_back` announces the back
+notice outside the lock. If a concurrent re-switch announces its own notice inside that
+microsecond window, the TUI line can show the back notice while `switched` (the
+footer) holds the cooling one. Fix: announce under a separate `_announce_lock`, and only
+when `switched` still equals the notice.

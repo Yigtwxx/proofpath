@@ -577,8 +577,9 @@ def check(
         if isinstance(event, events.StageEnd):
             ui.stage_row(human, event.name, event.by, event.summary, event.elapsed)
         elif isinstance(event, events.Note) and event.notice:
-            # The judge switched to its local fallback: said at once, on stderr, and
-            # never dropped, not even under ``-q`` (spec section 11).
+            # The judge switched to its local fallback, or back to its provider after
+            # a cooldown: said at once, on stderr, and never dropped, not even under
+            # ``-q`` (spec section 11, judge-cooldown spec).
             ui.kv(out, "judge", event.text, err=True)
         elif isinstance(event, events.Note):
             ui.note(human, event.text)

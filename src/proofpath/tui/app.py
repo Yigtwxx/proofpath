@@ -415,6 +415,9 @@ class ProofpathApp(App[None]):
     def _judge_switched(self, text: str) -> None:
         """The summary's judge switched to its local model; say so above the bar.
 
+        The back notice of a cooldown that ended (judge-cooldown spec) arrives here
+        too, and replaces the line the same way.
+
         Called on the summary's worker thread, before the model is loaded. It only
         posts a message -- ``post_message`` is thread-safe and never waits -- so the
         worker is not held, and the widget is touched on the loop alone.
@@ -1053,7 +1056,7 @@ class ProofpathApp(App[None]):
             self._summarising.discard(run_id)
         if text:
             label = Text(
-                f"(model-written, {judge.name}) ",
+                f"(model-written, {judge.answered_by or judge.name}) ",
                 style=self._theme.tone("muted") if self._out.color else "",
             )
             line = ui.kv_text(self._out, "summary", Text.assemble(label, text))
