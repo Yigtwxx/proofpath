@@ -58,7 +58,7 @@ export const exitCodes: readonly { code: 0 | 1 | 2; meaning: string }[] = [
     { code: 2, meaning: 'the run itself failed' },
 ];
 
-export const version = '0.4.10';
+export const version = '0.4.11';
 export const repo = 'https://github.com/Yigtwxx/proofpath';
 export const pypi = 'https://pypi.org/project/proofpath/';
 

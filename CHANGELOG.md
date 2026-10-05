@@ -6,6 +6,15 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.11] - 2026-10-05
+
+`proofpath update` keeps proofpath current, and it keeps the extras you installed. A
+judge that hits Groq's per-minute limit now returns to Groq once the limit resets,
+instead of staying on the local model for the rest of the run. The AVeriTeC numbers
+were measured again, with the browser and the judge: search with judge-written queries
+scores 0.483, the one gain that cleared the noise. That is still below the 0.708
+baseline, and the report now says how often search calls a false claim supported.
+
 ### Added
 - **AVeriTeC eval: `--browser`, `--judge` and `--fresh`** (`scripts/eval_averitec.py`).
   Every source now records the ladder step that read it and, under `--judge`, the
