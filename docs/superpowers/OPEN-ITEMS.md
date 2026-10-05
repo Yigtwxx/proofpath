@@ -698,3 +698,30 @@ notice outside the lock. If a concurrent re-switch announces its own notice insi
 microsecond window, the TUI line can show the back notice while `switched` (the
 footer) holds the cooling one. Fix: announce under a separate `_announce_lock`, and only
 when `switched` still equals the notice.
+
+## 23. Judge quote check (20.9) and NEI → judge (20.13) — 2026-10-05
+
+The user asked for both items to be finished end to end, with the best options picked
+without further questions. Design: `docs/superpowers/specs/2026-10-05-judge-quote-and-nei-design.md`.
+
+- **20.9** (product): the review answer gains a `quote` field. A SUPPORTED or REFUTED
+  opinion whose quote is not in the passage, after normalisation and an
+  in-order check of ellipsis parts, is dropped and noted. Cached judgements from
+  before the change are not served as checked.
+- **20.13** (measurement only): `--judge-nei` shows each NEI source's closest passage
+  to the judge, and `--no-fallback` keeps every opinion on Groq. It is a second
+  hypothetical column, compared claim by claim with the product. Shipping it needs
+  p < 0.05 and no more false SUPPORTED than the product (5/63); that stays a separate
+  decision.
+
+**Result (2026-10-05, `docs/eval/2026-10-05-averitec-browser-judge-nei-nofallback.md`).**
+
+- The judge answered 97 of 105 NEI probes NEI, 4 SUPPORTED and 4 REFUTED.
+- Band plus probes: 0.427 against 0.371. 5 claims fixed, 0 broken, exact McNemar
+  p = 0.062. Wrong-way verdicts unchanged at 11.
+- **Not shipped:** p misses the 0.05 bar. With 5 discordant claims, 0.0625 is the floor.
+  Re-measure on the 300 train claims of 20.14 before deciding.
+- Most NEIs look like something other than a reading failure: the closest passage does
+  not settle the claim even for the LLM. That points (an inference, not a measurement)
+  to retrieval and coverage of the deciding passage as the next lever.
+- **20.9 in the live run:** 0 of 106 opinions dropped by the quote check.

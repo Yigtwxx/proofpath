@@ -6,6 +6,34 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+- **The judge's quote is checked, and shown.** A `SUPPORTED` or `REFUTED` opinion now
+  has to return the exact words from the passage that decide it, in a new `quote`
+  field. An opinion is dropped, with a note saying why, when its quote has no words,
+  when a part of it is shorter than two words, or when it is not in the passage it was
+  shown at word boundaries ("5 million" is not in "15 million"). The match folds case,
+  curly quotes, dashes and the minus sign, spaces, the fraction slash and invisible
+  characters such as the soft hyphen, and nothing else: a superscript stays a
+  superscript, and a sign or a percent is never trimmed. `...` may elide the middle of
+  a quote as long as every part is in the passage, in order. The verified quote is
+  printed in the judge line, `judge (<model>): SUPPORTED — "<quote>" — <rationale>`,
+  and JSON gains a `quote` field. An `NEI` opinion asserts nothing and may quote
+  nothing. Cached opinions are now keyed by the passage they were checked against, and
+  those cached before this change are not served again: the next run asks.
+
+### Added
+- **AVeriTeC eval: `--judge-nei` and `--no-fallback`** (`scripts/eval_averitec.py`).
+  `--judge-nei` (requires `--judge`) also sends every read source whose verdict is NEI
+  to the judge, with the passage the models came closest to deciding on, and the
+  hypothetical column gains a second number in which those opinions vote too, with its
+  per-label counts, its wrong-way count beside the product's, and an exact McNemar test
+  against the product claim by claim. The report also counts opinions by model and kind
+  of escalation, and the ones the quote check dropped by reason. `--no-fallback`
+  (requires `--judge`) turns the judge's local fallback off for the run, so every
+  opinion is from the configured model. Both
+  flags get their own results file and report name. Measurement only: the product
+  still never sends an NEI to the judge.
+
 ## [0.4.11] - 2026-10-05
 
 `proofpath update` keeps proofpath current, and it keeps the extras you installed. A

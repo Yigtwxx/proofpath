@@ -1355,6 +1355,19 @@ def test_judge_detail_is_one_wording_for_every_surface() -> None:
     assert judge_detail(OPINION).startswith(JUDGE_DETAIL_PREFIX)
 
 
+def test_judge_detail_shows_the_verified_quote_before_the_rationale() -> None:
+    """The quote passed the check against the passage (OPEN-ITEMS 20.9), so it is
+    shown as the passage's words, quoted, the way a verdict's ``source:`` line is."""
+    quoted = dataclasses.replace(OPINION, quote="we observed a 4-8% improvement")
+    assert judge_detail(quoted) == (
+        'judge (groq openai/gpt-oss-120b): SUPPORTED \u2014 "we observed a 4-8% improvement" '
+        '\u2014 the passage says "we observed a 4-8% improvement"'
+    )
+    # An NEI that quoted nothing shows nothing where the quote would be.
+    silent = dataclasses.replace(OPINION, label=Label.NEI, rationale="it is silent")
+    assert judge_detail(silent) == "judge (groq openai/gpt-oss-120b): NEI \u2014 it is silent"
+
+
 def test_a_judged_finding_prints_its_own_judge_line_not_a_note() -> None:
     item = dataclasses.replace(
         finding(Kind.NOT_SUPPORTED, line=112, page=4),

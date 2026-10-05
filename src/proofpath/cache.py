@@ -29,6 +29,49 @@ from proofpath.pipeline import CUT_DECIMALS, Thresholds
 from proofpath.resolve import Candidate, FieldMatch, ResolveResult, Retraction, State, strip_marker
 
 SCHEMA_VERSION = "5"
+
+# What a cached judgement has passed, stored as a suffix on its ``judge_model`` key.
+# ``q1``: the judge's quote was found in the passage (OPEN-ITEMS 20.9). An opinion
+# cached before that was never checked, and serving it now would attach it as if it
+# had been; under its bare model name it simply stops matching, so the next run asks
+# again. The rule lives in the key suffix rather than in a schema migration: the
+# unmatched rows cost a few bytes, and ``put_chunks`` still retires them with their
+# source. (The ``quote`` column is a separate, guarded migration: it stores what was
+# checked.) The next rule an opinion has to pass bumps this to ``q2``.
+JUDGEMENT_CHECKS = "q1"
+# Hex digits of the passage's hash kept in the key: 64 bits, so two passages of one
+# source colliding is not a case worth a column of its own.
+_PASSAGE_KEY_CHARS = 16
+
+
+def _judgement_key(judge_model: str, passage: str) -> str:
+    """The ``judge_model`` a judgement is stored under: the judge's name, the checks
+    its opinions passed, and the passage it was checked against.
+
+    The passage belongs in the key because the check does: an opinion verified against
+    one passage says nothing about another, and the same claim and source are decided
+    on another passage after an NLI profile or ``k`` changes. Hashed whitespace-folded,
+    as the judge was shown it (``judge._one_line``). Callers pass the bare name and the
+    passage text; only this file builds the key."""
+    folded = " ".join(passage.split())
+    digest = hashlib.sha256(folded.encode("utf-8")).hexdigest()[:_PASSAGE_KEY_CHARS]
+    return f"{judge_model}#{JUDGEMENT_CHECKS}#{digest}"
+
+
+def _add_judgement_quote(conn: sqlite3.Connection) -> None:
+    """Give an older ``judgements`` table its ``quote`` column, once.
+
+    Guarded by ``PRAGMA table_info`` rather than by the schema version: the column
+    came with OPEN-ITEMS 20.9 inside schema 5, so a v5 file may or may not have it,
+    and ``ALTER TABLE ... ADD COLUMN`` fails if it is already there. Its rows predate
+    the quote check and are never served (``JUDGEMENT_CHECKS``), so ``''`` is honest.
+    """
+    columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(judgements)")}
+    if columns and "quote" not in columns:
+        with conn:
+            conn.execute("ALTER TABLE judgements ADD COLUMN quote TEXT NOT NULL DEFAULT ''")
+
+
 RAW_TEXT_TTL_DAYS = 7
 # A resolution is a statement about a published record, which does not change; the
 # month is there so a reference an index had not yet ingested is looked at again.
@@ -147,6 +190,7 @@ _JUDGEMENTS_DDL: tuple[str, ...] = (
         label       TEXT NOT NULL,
         rationale   TEXT NOT NULL,
         created_at  TEXT NOT NULL,
+        quote       TEXT NOT NULL DEFAULT '',  -- the checked quote (OPEN-ITEMS 20.9)
         PRIMARY KEY (claim_hash, source_id, judge_model)
     )
     """,
@@ -369,6 +413,9 @@ class Cache:
             # A new file was upgraded from nothing; an existing one lost its
             # embeddings, which the report may want to mention.
             self.migrated_from = recorded
+        if recorded is None or _version(recorded) <= _version(SCHEMA_VERSION):
+            # Never on a file from a newer proofpath, which is left exactly as it is.
+            _add_judgement_quote(self._conn)
 
     def close(self) -> None:
         self._conn.close()
@@ -616,43 +663,49 @@ class Cache:
         judge_model: str,
         opinion: JudgeOpinion,
         *,
+        passage: str,
         now: datetime | None = None,
     ) -> None:
-        """Store one judge opinion. Re-asking the same judge replaces what it said."""
+        """Store one judge opinion on the passage it was shown. Re-asking the same
+        judge about the same passage replaces what it said."""
         with self._conn:
             self._conn.execute(
                 "INSERT INTO judgements(claim_hash, source_id, judge_model, label, rationale, "
-                "created_at) VALUES (?, ?, ?, ?, ?, ?) "
+                "created_at, quote) VALUES (?, ?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT(claim_hash, source_id, judge_model) DO UPDATE SET "
                 "label = excluded.label, rationale = excluded.rationale, "
-                "created_at = excluded.created_at",
+                "created_at = excluded.created_at, quote = excluded.quote",
                 (
                     claim_hash_,
                     source_id,
-                    judge_model,
+                    _judgement_key(judge_model, passage),
                     opinion.label.value,
                     opinion.rationale,
                     _iso(now or _now()),
+                    opinion.quote,
                 ),
             )
 
     def get_judgement(
-        self, claim_hash_: str, source_id: str, judge_model: str
+        self, claim_hash_: str, source_id: str, judge_model: str, *, passage: str
     ) -> JudgeOpinion | None:
         """What this judge said about this claim and source, or ``None`` if unasked.
 
         No TTL: an opinion is about a claim and a passage, both of which are fixed.
-        The passage changing is what retires it, and ``put_chunks`` does that.
+        The passage changing is what retires it, and ``put_chunks`` does that. A
+        change to what an opinion has to pass retires it too: ``_judgement_key``.
         """
         row = self._conn.execute(
-            "SELECT label, rationale FROM judgements "
+            "SELECT label, rationale, quote FROM judgements "
             "WHERE claim_hash = ? AND source_id = ? AND judge_model = ?",
-            (claim_hash_, source_id, judge_model),
+            (claim_hash_, source_id, _judgement_key(judge_model, passage)),
         ).fetchone()
         if row is None:
             return None
-        label, rationale = row
-        return JudgeOpinion(label=Label(label), rationale=str(rationale), model=judge_model)
+        label, rationale, quote = row
+        return JudgeOpinion(
+            label=Label(label), rationale=str(rationale), model=judge_model, quote=str(quote)
+        )
 
     # --- resolutions and retractions ---------------------------------------------
 

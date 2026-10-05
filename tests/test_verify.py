@@ -2265,15 +2265,21 @@ class FakeJudgeClient:
 
 
 def _agreeing(user: str) -> str:
-    ids = re.findall(r"id: (\S+)", user)
+    """SUPPORTED for every item, quoting each item's own passage whole: the quote
+    check (OPEN-ITEMS 20.9) is passed honestly, not switched off."""
+    items = re.findall(r"id: (\S+)\n  claim: .*\n  passage: (.*)\n", user)
     agreed = [
-        {"id": ident, "label": "SUPPORTED", "rationale": "the passage says so"} for ident in ids
+        {"id": ident, "label": "SUPPORTED", "rationale": "the passage says so", "quote": passage}
+        for ident, passage in items
     ]
     return json.dumps({"opinions": agreed})
 
 
-def _opinion(ident: str, label: str, rationale: str = "the passage says so") -> str:
-    return json.dumps({"opinions": [{"id": ident, "label": label, "rationale": rationale}]})
+def _opinion(
+    ident: str, label: str, rationale: str = "the passage says so", *, quote: str = ""
+) -> str:
+    entry = {"id": ident, "label": label, "rationale": rationale, "quote": quote}
+    return json.dumps({"opinions": [entry]})
 
 
 # 0.455 sits between ``decide`` (0.45) and ``medium`` (0.457948): decided, but only
@@ -2323,7 +2329,14 @@ def test_only_a_low_tier_verdict_with_a_passage_is_escalated() -> None:
 def test_the_judges_opinion_is_attached_and_alters_nothing() -> None:
     """Spec section 11.1: the judge gives an opinion, never a verdict."""
     client = FakeJudgeClient(
-        [_opinion("c0", "SUPPORTED", 'it says "improved translation quality"')]
+        [
+            _opinion(
+                "c0",
+                "SUPPORTED",
+                'it says "improved translation quality"',
+                quote="improved translation quality",
+            )
+        ]
     )
     report = judged(client)
 
@@ -2343,7 +2356,13 @@ def test_the_judges_opinion_is_attached_and_alters_nothing() -> None:
 def test_an_agreeing_judge_leaves_the_finding_without_a_judge_line() -> None:
     """A second opinion worth printing is one that differs; agreement is recorded
     on the finding but does not add a line saying the same thing twice."""
-    client = FakeJudgeClient([_opinion("c0", "REFUTED", "it contradicts the claim")])
+    client = FakeJudgeClient(
+        [
+            _opinion(
+                "c0", "REFUTED", "it contradicts the claim", quote="improved translation quality"
+            )
+        ]
+    )
     report = judged(client)
 
     finding = next(f for f in report.findings if f.kind is Kind.NOT_SUPPORTED)

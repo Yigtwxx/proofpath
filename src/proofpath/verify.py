@@ -1997,9 +1997,16 @@ def _judging(
     opinions: dict[str, JudgeOpinion] = {}
     fresh: dict[str, JudgeOpinion] = {}
     keys: dict[str, tuple[str, str]] = {}
+    # The passage each item is judged on: part of its cache key, because the quote an
+    # opinion passed was checked against that passage and no other (OPEN-ITEMS 20.9).
+    shown: dict[str, str] = {}
     ask: list[JudgeItem] = []
     for index, result in escalated:
         ident = f"c{index}"
+        passage = result.verdict.passage
+        if passage is None:  # pragma: no cover - escalates already refused these
+            continue
+        shown[ident] = passage.text
         # Keyed by what the models actually read (the hypothesis when the claim was
         # translated), matching ``_decide_claim``'s verdict cache key: a judgement
         # about the English text belongs to that text, not to the reader's sentence.
@@ -2008,13 +2015,12 @@ def _judging(
             result.source_id,
         )
         stored = (
-            None if engine.cache is None else engine.cache.get_judgement(*keys[ident], judge.name)
+            None
+            if engine.cache is None
+            else engine.cache.get_judgement(*keys[ident], judge.name, passage=passage.text)
         )
         if stored is not None:
             opinions[ident] = stored
-            continue
-        passage = result.verdict.passage
-        if passage is None:  # pragma: no cover - escalates already refused these
             continue
         ask.append(
             JudgeItem(
@@ -2045,7 +2051,9 @@ def _judging(
             for ident, opinion in fresh.items():
                 # Under the model that gave it: a judge that switched mid-review has
                 # opinions from two models, and each belongs to its own cache row.
-                engine.cache.put_judgement(*keys[ident], opinion.model, opinion)
+                engine.cache.put_judgement(
+                    *keys[ident], opinion.model, opinion, passage=shown[ident]
+                )
         except sqlite3.Error as exc:
             # The cache is a speed-up, never a gate. A judgement that cannot be
             # stored -- a source row the cascade already took, a file gone read-only

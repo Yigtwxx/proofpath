@@ -21,8 +21,13 @@ Labels:
 
 Rules:
 
-- Quote the words that decide it. The rationale is one sentence and repeats the
-  deciding words from the passage verbatim.
+- Quote the words that decide it. `quote` is the exact words from the passage
+  that decide the item, copied character for character: no paraphrase, no words
+  of your own, no fixing of its spelling. To leave out the middle of a long
+  quote, write `...` there; every part must still be in the passage, in order.
+  A `SUPPORTED` or `REFUTED` opinion whose quote is not in the passage is
+  discarded. For `NEI`, `quote` may be empty.
+- The rationale is one sentence: why those words decide it.
 - Absence of evidence is not refutation. If the passage simply does not mention
   what the claim asserts, the label is `NEI`, never `REFUTED`.
 - Never invent a fact, a number, a citation or passage text. If the passage is
@@ -37,4 +42,4 @@ $items
 
 Reply with JSON only — no prose, no code fence — in exactly this shape:
 
-{"opinions": [{"id": "<item id>", "label": "SUPPORTED|REFUTED|NEI", "rationale": "<one sentence quoting the passage>"}]}
+{"opinions": [{"id": "<item id>", "label": "SUPPORTED|REFUTED|NEI", "rationale": "<one sentence: why the quote decides it>", "quote": "<the exact words from the passage>"}]}

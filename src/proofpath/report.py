@@ -467,11 +467,16 @@ JUDGE_DETAIL_PREFIX = "judge ("
 def judge_detail(opinion: JudgeOpinion) -> str:
     """The one wording for the judge's opinion, shared by every surface.
 
-    ``judge (groq openai/gpt-oss-120b): SUPPORTED - <rationale>``. The model is named
-    because an opinion nobody can attribute is not evidence, and the label is the
-    judge's own: the local verdict is elsewhere on the same finding, unchanged.
+    ``judge (groq openai/gpt-oss-120b): SUPPORTED - "<quote>" - <rationale>``. The
+    model is named because an opinion nobody can attribute is not evidence, and the
+    label is the judge's own: the local verdict is elsewhere on the same finding,
+    unchanged. The quote is the passage's own words, found there by the quote check
+    (OPEN-ITEMS 20.9), so it is quoted the way a verdict's ``source:`` line is; an NEI
+    that quoted nothing shows no empty quote marks.
     """
     head = f"{JUDGE_DETAIL_PREFIX}{opinion.model}): {opinion.label.value}"
+    if opinion.quote:
+        head = f'{head} \u2014 "{opinion.quote}"'
     return f"{head} \u2014 {opinion.rationale}"
 
 

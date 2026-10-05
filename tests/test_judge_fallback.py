@@ -54,7 +54,9 @@ MESSAGES = [
     {"role": "user", "content": "- id: c1\n  claim: x\n  passage: y\n  verdict: NEI (low)"},
 ]
 SCHEMA = {"type": "object", "properties": {"opinions": {"type": "array"}}}
-OPINION = json.dumps({"opinions": [{"id": "c1", "label": "NEI", "rationale": "silent"}]})
+OPINION = json.dumps(
+    {"opinions": [{"id": "c1", "label": "NEI", "rationale": "silent", "quote": ""}]}
+)
 LIMIT = f"Groq limit reached — judging with local ollama {LOCAL}"
 # A 429 without ``Retry-After`` cools down for the default 60 s (cooldown spec 2.1),
 # so the switch it causes says it is temporary.

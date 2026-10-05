@@ -519,7 +519,7 @@ def test_a_translated_claims_judgement_is_cached_under_the_english_hash(tmp_path
         {"items": [{"id": 0, "english": ENGLISH, "queries": ["OpenAI bankruptcy"]}]}
     )
     # A low-tier REFUTED (spec section 9 step 8): a real passage, so it escalates.
-    opinion = _opinion("c0", "REFUTED")
+    opinion = _opinion("c0", "REFUTED", quote=BANKRUPT)
     searcher = StubSearcher({"bankruptcy": [PAGE_A]})
     with Cache(tmp_path / "c.sqlite3") as db:
         built = engine(
@@ -549,11 +549,18 @@ def test_a_translated_claims_judgement_is_cached_under_the_english_hash(tmp_path
         assert not_supported.source_id is not None
         assert not_supported.judge is not None
 
-        stored = db.get_judgement(claim_hash(ENGLISH), not_supported.source_id, judge.name)
+        stored = db.get_judgement(
+            claim_hash(ENGLISH), not_supported.source_id, judge.name, passage=BANKRUPT
+        )
         assert stored is not None
         # Never under the reader's own sentence: that would reuse this opinion for a
         # differently translated run of the same Turkish claim later on.
-        assert db.get_judgement(claim_hash(TURKISH), not_supported.source_id, judge.name) is None
+        assert (
+            db.get_judgement(
+                claim_hash(TURKISH), not_supported.source_id, judge.name, passage=BANKRUPT
+            )
+            is None
+        )
 
 
 # --- found pages are read as pages (final review, Critical 1) ------------------------

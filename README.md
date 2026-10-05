@@ -442,9 +442,13 @@ were least sure about — the `low` tier, never a numeric mismatch and never a c
 without a quoted passage — go to the model in batches of up to 20 (about 7k tokens),
 each with its claim and the passage it was checked against. The model answers from the
 passage alone, and its label and one-sentence rationale are printed **beside** the local
-verdict: `= judge (groq openai/gpt-oss-120b): NEI — …`. The local verdict, the finding
-kind and the report's states never change. Opinions are cached with the verdict, so a
-re-run asks nothing.
+verdict: `= judge (groq openai/gpt-oss-120b): NEI — …`. A `SUPPORTED` or `REFUTED`
+opinion must also quote the words that decide it: at least two words, found in the
+passage at word boundaries (after folding case, curly quotes, dashes and spacing; `...`
+may elide a part). An opinion whose quote is not there is dropped, and the run says so
+in a note; a verified quote is printed in the judge line before the rationale. The local
+verdict, the finding kind and the report's states never change. Opinions are cached
+with the verdict, so a re-run asks nothing.
 
 **What it cannot do.** It never sees a source document, so it cannot introduce a claim
 or an evidence passage of its own; it cannot turn `NEI` into `SUPPORTED`; it cannot
@@ -511,7 +515,11 @@ The likely reason, not separately measured: the retrieval and entailment models 
 calibrated on scientific abstracts, and a fact-check page is a different object (long,
 discursive, and usually quoting the claim it debunks).
 As shipped, the judge cannot help with those NEIs. An NEI verdict carries no passage, so it
-is never escalated (rule 1); only 1 of the 165 read sources reached the judge. Nothing was
+is never escalated (rule 1); only 1 of the 165 read sources reached the judge. Shown each
+NEI's closest passage in a measurement-only run, the judge answered NEI on 97 of 105, and
+its 8 other opinions fixed 5 claims and broke none (0.427, exact McNemar p = 0.062). That
+is just short of the bar set beforehand, so it is not in the product
+([details](docs/eval/2026-10-05-averitec-browser-judge-nei-nofallback.md)). Nothing was
 tuned after these measurements, and no blocked URL was dropped from them.
 
 What proofpath is good at is the academic path the other rows measure: finding out whether a
