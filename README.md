@@ -410,9 +410,21 @@ if it is not in English) before searching. If the judge is rate-limited, the loc
 fallback below takes over; only if that fails too is the plain sentence searched, and
 the report says so.
 
-**This is experimental.** On AVeriTeC's search scenario, proofpath scores
-[**0.404**](docs/eval/2026-09-29-averitec-search.md) against a 0.708 majority baseline, and every report from a
-run that searched prints that line at the top.
+**This is experimental.** On AVeriTeC's search scenario (2026-10-05, browser allowed),
+proofpath scores [**0.371**](docs/eval/2026-10-05-averitec-search-browser-fresh.md) with
+sentence queries and [**0.483**](docs/eval/2026-10-05-averitec-search-browser-judge-fresh.md)
+when the judge writes the queries, against a 0.708 majority baseline. The judge's queries
+are the one gain that cleared the noise: on the same 89 claims they fixed 14 and broke 4
+(paired exact McNemar p = 0.031). The share of pages from fact-check sites did not change
+(22.0 % against 22.5 %).
+
+**Search also asserts the wrong way far more often than the cited sources do.** With the
+judge's queries, 25 of the 89 claims came back the wrong way, and 20 of those were false
+claims called SUPPORTED. With sentence queries the figure was 29, against 11 when the gold
+URLs are read. ("Wrong way" counts Supported read as REFUTED and Refuted read as SUPPORTED.)
+One likely cause, not yet measured: a page found by searching for a claim often repeats it,
+and the models may read the repetition as support. Both scores are still below the
+baseline, and every report from a run that searched prints that line at the top.
 
 ## Optional LLM judge (v0.3)
 
@@ -480,16 +492,24 @@ switch to, the run says so and tells you how to add one, on the same channels.
 | Source access | 50 DOIs | 72 % full text, 18 % abstract only, 10 % nothing ([details](docs/eval/2026-09-11-coverage.md)) — a real biomedical paper in the live runs reached 33 % full text |
 | Citation pairing, numeric | 61 hand-built passages | 0.99 ([details](docs/eval/2026-09-11-pairing.md)) |
 | Citation pairing, author-year | 55 hand-built passages, 83 expectations | 0.940 ([details](docs/eval/2026-09-12-pairing-author-year.md)) |
-| **End to end on real web claims** | AVeriTeC dev, 100 claims | **0.270 3-way accuracy against a 0.708 majority baseline — worse than always guessing "refuted"** ([details](docs/eval/2026-09-16-averitec.md)) |
+| **End to end on real web claims** | AVeriTeC dev, 100 claims | **0.371 3-way accuracy from the gold source URLs (browser allowed) against a 0.708 majority baseline — still worse than always guessing "refuted"** ([details](docs/eval/2026-10-05-averitec-browser-judge-fresh.md)). With evidence search and a judge writing the queries: 0.483 ([details](docs/eval/2026-10-05-averitec-search-browser-judge-fresh.md)). The first measurement, without the browser, was 0.270 ([2026-09-16](docs/eval/2026-09-16-averitec.md)) |
 
-**The AVeriTeC row is the one to read before trusting this tool on a news claim.** A third
-of those claims had no readable source at all: 32 of the source URLs needed the browser
-step, 29 were unreachable, 14 were refused by `robots.txt`. On the claims that *did* have a
-readable source the score is 0.361 — still below the baseline, and every one of the 19
-`Supported` claims was missed. The retrieval and entailment models were calibrated on
-scientific abstracts, and a fact-check page is a different object: long, discursive, and
-usually quoting the claim it debunks. Nothing was tuned after that measurement, and no
-blocked URL was dropped from it.
+**The AVeriTeC row is the one to read before trusting this tool on a news claim.** Coverage
+is no longer the main loss. On 2026-10-05, 165 of the 200 gold source URLs were read,
+and only 10 of those needed the browser step, worth about two claims, which is within the
+noise of 89. The loss is in the reading:
+
+- 36 of the 89 scorable claims had a readable source and still came back NEI where the
+  gold label was Supported or Refuted;
+- 11 were called the wrong way;
+- 7 had nothing readable.
+
+The likely reason, not separately measured: the retrieval and entailment models were
+calibrated on scientific abstracts, and a fact-check page is a different object (long,
+discursive, and usually quoting the claim it debunks).
+As shipped, the judge cannot help with those NEIs. An NEI verdict carries no passage, so it
+is never escalated (rule 1); only 1 of the 165 read sources reached the judge. Nothing was
+tuned after these measurements, and no blocked URL was dropped from them.
 
 What proofpath is good at is the academic path the other rows measure: finding out whether a
 cited paper exists, whether it was retracted, and whether its text says what the sentence

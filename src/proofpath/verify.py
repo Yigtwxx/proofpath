@@ -1944,7 +1944,7 @@ class _Judged:
     cancelled: bool
 
 
-def _escalates(result: ClaimResult) -> bool:
+def escalates(verdict: Verdict) -> bool:
     """Whether this verdict is the judge's business (spec section 9 step 8).
 
     Three exclusions, each with a reason the product cannot do without:
@@ -1957,8 +1957,10 @@ def _escalates(result: ClaimResult) -> bool:
     * Anything the models were confident about. The judge is an escape hatch for the
       low band, not a second pass over the whole document (spec section 11: 2-4 calls
       per paper, not one per claim).
+
+    Public because ``scripts/eval_averitec.py`` measures the same band: an eval
+    that drew its own line would measure a judge the product never runs.
     """
-    verdict = result.verdict
     if verdict.passage is None or verdict.reason.startswith(NUMERIC_REASON):
         return False
     return verdict.tier == "low" or verdict.label is Label.NEI
@@ -1985,7 +1987,9 @@ def _judging(
     began = time.monotonic()
     emit(StageStart(name=JUDGING, by=judge.name))
 
-    escalated = [(index, result) for index, result in enumerate(results) if _escalates(result)]
+    escalated = [
+        (index, result) for index, result in enumerate(results) if escalates(result.verdict)
+    ]
     opinions: dict[str, JudgeOpinion] = {}
     fresh: dict[str, JudgeOpinion] = {}
     keys: dict[str, tuple[str, str]] = {}
@@ -2006,7 +2010,7 @@ def _judging(
             opinions[ident] = stored
             continue
         passage = result.verdict.passage
-        if passage is None:  # pragma: no cover - _escalates already refused these
+        if passage is None:  # pragma: no cover - escalates already refused these
             continue
         ask.append(
             JudgeItem(

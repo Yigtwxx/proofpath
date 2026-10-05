@@ -1,8 +1,9 @@
 """Phase 10 harness: measure proofpath end to end on AVeriTeC dev (spec section 14).
 
 Usage:
-    uv run python scripts/eval_averitec.py [--limit 100] [--no-browser] [--sleep 1.0]
-        [--resume] [--search] [--out docs/eval/<date>-averitec.md]
+    uv run python scripts/eval_averitec.py [--limit 100] [--browser | --no-browser]
+        [--judge] [--fresh] [--sleep 1.0] [--resume] [--search]
+        [--out docs/eval/<date>-averitec.md]
 
 SciFact measures retrieval and entailment over abstracts we are handed. AVeriTeC
 measures the whole product: a real-world claim, its real source pages, fetched over
@@ -17,6 +18,13 @@ wrong, and the gap between them is how much of the dataset we structurally canno
 answer. Source coverage is reported per state, never collapsed (product rule 6): a
 run that reached nothing must not read like a run that reached everything.
 
+Every source keeps the ladder step that read it and, under ``--judge``, the judge's
+opinion when its verdict was in the escalation band. Two more numbers come from
+those rows: the accuracy with the browser's pages dropped (what a run without it
+would have read, less whatever Wayback would have rescued), and a hypothetical one
+in which the judge's opinions decide the low band. The product never does the
+second (spec section 11.1); the report says so.
+
 The live half below ``main`` is run by hand. Importing this module touches neither
 the network nor a model.
 """
@@ -28,8 +36,8 @@ import json
 import sys
 import time
 from collections import Counter
-from collections.abc import Sequence
-from dataclasses import dataclass, replace
+from collections.abc import Callable, Sequence
+from dataclasses import asdict, dataclass, replace
 from datetime import date
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -37,16 +45,18 @@ from urllib.parse import urlsplit
 
 from proofpath import claims as claims_mod
 from proofpath import ingest, pipeline, retrieval
+from proofpath import judge as judge_mod
 from proofpath.config import NliProfileName, SearchConfig, load_config
 from proofpath.eval import averitec
 from proofpath.fetch import Fetched
-from proofpath.models import Label, Passage
+from proofpath.models import Label, Passage, Verdict
 from proofpath.paths import cache_dir
 from proofpath.polite import ProviderError
+from proofpath.providers import NO_TEXT
 from proofpath.report import LANGUAGE_UNSUPPORTED, SEARCH_UNAVAILABLE
 from proofpath.search import Searcher, SearchKeyError, canonical, search_claim
 from proofpath.search.queries import plan_queries
-from proofpath.verify import NO_TEXT, Engine
+from proofpath.verify import Engine, escalates
 
 if TYPE_CHECKING:
     from proofpath.judge import Judge
@@ -69,6 +79,36 @@ GOLD_PATH = "gold source URLs, no search"
 SENTENCE_PATH = "sentence queries, no judge"
 RESULTS_NAME = "averitec_results.json"
 SEARCH_RESULTS_NAME = "averitec_search_results.json"
+# The ladder step the ablation drops (``fetch.STEP_NAMES``).
+BROWSER_STEP = 3
+# Who decided a claim's hypothetical judged label, when it was not a judge model.
+DECIDED_BY_MODELS = "models (medium or high tier)"
+NO_OPINION = "models (the judge gave no opinion)"
+NOTHING_ESCALATED = "nothing escalated"
+# A row from a results file written before sources were kept: only its label is known.
+UNRECORDED = "not recorded (row has no per-source record)"
+
+
+@dataclass(frozen=True)
+class Source:
+    """One fetchable source of one claim, as the run read it.
+
+    ``step`` is the ladder step that read the page, or the last one tried when it
+    failed; ``None`` for a cache hit, which carries no step. ``label`` is the models'
+    verdict, ``None`` when nothing was read. ``escalated`` says the verdict sat in the
+    band the product hands the judge (``verify.escalates``); ``judge_label`` and
+    ``judge_model`` are the judge's opinion of it, when one came back.
+    """
+
+    url: str
+    state: str
+    step: int | None
+    label: str | None
+    score: float = 0.0
+    tier: str | None = None
+    escalated: bool = False
+    judge_label: str | None = None
+    judge_model: str | None = None
 
 
 @dataclass(frozen=True)
@@ -86,6 +126,78 @@ class Row:
     predicted: str | None
     states: tuple[str, ...]  # one honesty/fetch state per source value
     urls: tuple[str, ...]  # the fetchable URLs the states came from, in fetch order
+    # One per fetchable URL. Empty in results files written before 2026-10-05.
+    sources: tuple[Source, ...] = ()
+
+
+def _best(sources: Sequence[Source]) -> Source:
+    """The strongest source, the first one on a tie, as ``_decide_claim`` always kept."""
+    best = sources[0]
+    for source in sources[1:]:
+        if source.score > best.score:
+            best = source
+    return best
+
+
+def _asserts(label: str | None) -> bool:
+    return label is not None and label != Label.NEI.value
+
+
+def product_label(sources: Sequence[Source]) -> str | None:
+    """What the product says of the claim: its strongest assertion over every source,
+    NEI when something was read and nothing asserted, ``None`` when nothing was read."""
+    asserted = [source for source in sources if _asserts(source.label)]
+    if asserted:
+        return _best(asserted).label
+    return Label.NEI.value if any(source.label is not None for source in sources) else None
+
+
+def judged_label(sources: Sequence[Source]) -> str | None:
+    """The claim's label if the judge's opinions decided the low band.
+
+    The product never does this (spec section 11.1): this is the column that says
+    whether it should. A confident model verdict (medium or high, not escalated)
+    still wins, as the escalation rule implies. Otherwise every escalated source
+    votes with the judge's label, or with the models' label when the judge gave no
+    opinion. An NEI vote abstains; the majority of the asserting votes wins, and a
+    tie is NEI.
+    """
+    confident = [s for s in sources if _asserts(s.label) and not s.escalated]
+    if confident:
+        return _best(confident).label
+    votes = [s.judge_label or s.label for s in sources if s.escalated]
+    tally = Counter(vote for vote in votes if _asserts(vote)).most_common()
+    if tally:
+        if len(tally) > 1 and tally[0][1] == tally[1][1]:
+            return Label.NEI.value
+        return tally[0][0]
+    return Label.NEI.value if any(source.label is not None for source in sources) else None
+
+
+def judge_decider(sources: Sequence[Source]) -> str:
+    """Who decided ``judged_label``: the models, or the judge model(s) whose vote won.
+
+    When the vote ends in NEI (every vote abstained, or a tie) no vote won, and every
+    escalated source's answerer is named: together they are what left it at NEI."""
+    if any(_asserts(s.label) and not s.escalated for s in sources):
+        return DECIDED_BY_MODELS
+    escalated = [s for s in sources if s.escalated]
+    if not escalated:
+        return NOTHING_ESCALATED
+    winner = judged_label(sources)
+    voters = [s for s in escalated if (s.judge_label or s.label) == winner and _asserts(winner)]
+    return " + ".join(sorted({s.judge_model or NO_OPINION for s in voters or escalated}))
+
+
+def without_browser(sources: Sequence[Source]) -> tuple[Source, ...]:
+    """The sources as a run without the browser would have them: the pages the browser
+    read are unread. A cache hit has no step, so it is kept (the report counts those)."""
+    return tuple(
+        replace(source, label=None, escalated=False, judge_label=None, judge_model=None)
+        if source.step == BROWSER_STEP and source.label is not None
+        else source
+        for source in sources
+    )
 
 
 def _is_archive(url: str) -> bool:
@@ -191,6 +303,33 @@ def _site(url: str) -> str:
 
 
 @dataclass(frozen=True)
+class Ablation:
+    """The run with the browser's pages dropped. A page the browser read was never
+    offered to the Wayback step, which a run without the browser tries next, so this
+    is a lower bound on the pages such a run reads -- not on its accuracy, which can
+    move either way (a wrong verdict dropped can turn a claim into a right NEI)."""
+
+    read_sources: int
+    browser_sources: int  # of ``read_sources``, read at ``BROWSER_STEP``
+    unknown_step: int  # of ``read_sources``, cache hits: kept, since no step is known
+    unrecorded: int  # rows with URLs and no per-source record: scored as the product did
+    accuracy_3way: float
+
+
+@dataclass(frozen=True)
+class JudgedScore:
+    """The hypothetical column: what ``judged_label`` would have scored."""
+
+    accuracy_3way: float
+    per_label: dict[str, tuple[int, int]]  # gold label -> (n, correct)
+    escalated: int  # sources in the judge's band
+    unanswered: int  # of those, how many got no opinion back
+    opinions: Counter[str]  # judge model -> opinions it gave
+    deciders: dict[str, tuple[int, int]]  # ``judge_decider`` -> (3-way n, correct)
+    unrecorded: int  # rows with URLs and no per-source record: scored as the product did
+
+
+@dataclass(frozen=True)
 class AveritecResult:
     n: int
     # The 3-way denominator, carried rather than recomputed downstream: the report
@@ -203,9 +342,82 @@ class AveritecResult:
     coverage: Counter[str]  # source state -> how many values ended there
     archive_urls: int  # of ``total_urls``, how many were web.archive.org snapshots
     total_urls: int
+    ablation: Ablation | None = None  # ``None`` when no row carries its sources
+    judged: JudgedScore | None = None  # ``None`` unless the run had a judge
 
 
-def score(rows: Sequence[Row]) -> AveritecResult:
+def _three_way(
+    rows: Sequence[Row], label_of: Callable[[Row], str | None]
+) -> tuple[float, dict[str, tuple[int, int]]]:
+    """3-way accuracy and per-gold-label (n, correct) for another way of labelling the
+    same rows, scored by the same rule as ``score``: no label is NEI."""
+    per_label: dict[str, tuple[int, int]] = {}
+    counted = correct = 0
+    for row in rows:
+        gold = averitec.to_label(row.gold)
+        if gold is None:
+            continue
+        predicted = label_of(row)
+        right = (Label(predicted) if predicted is not None else Label.NEI) is gold
+        seen, hits = per_label.get(row.gold, (0, 0))
+        per_label[row.gold] = (seen + 1, hits + int(right))
+        counted += 1
+        correct += int(right)
+    return (correct / counted if counted else 0.0), per_label
+
+
+def _unrecorded(row: Row) -> bool:
+    """Written before sources were kept (a ``--resume`` of an older file): the row has
+    URLs but no per-source record, so the product's own label is all that is known."""
+    return not row.sources and bool(row.urls)
+
+
+def _ablation(rows: Sequence[Row]) -> Ablation | None:
+    if not any(row.sources for row in rows):
+        return None
+    read = [s for row in rows for s in row.sources if s.label is not None]
+    accuracy, _ = _three_way(
+        rows,
+        lambda row: product_label(without_browser(row.sources)) if row.sources else row.predicted,
+    )
+    return Ablation(
+        read_sources=len(read),
+        browser_sources=sum(1 for s in read if s.step == BROWSER_STEP),
+        unknown_step=sum(1 for s in read if s.step is None),
+        unrecorded=sum(1 for row in rows if _unrecorded(row)),
+        accuracy_3way=accuracy,
+    )
+
+
+def _judged_label_of(row: Row) -> str | None:
+    return judged_label(row.sources) if row.sources else row.predicted
+
+
+def _judged(rows: Sequence[Row]) -> JudgedScore:
+    accuracy, per_label = _three_way(rows, _judged_label_of)
+    escalated = [s for row in rows for s in row.sources if s.escalated]
+    deciders: dict[str, tuple[int, int]] = {}
+    for row in rows:
+        gold = averitec.to_label(row.gold)
+        if gold is None:
+            continue
+        predicted = _judged_label_of(row)
+        right = (Label(predicted) if predicted is not None else Label.NEI) is gold
+        decider = UNRECORDED if _unrecorded(row) else judge_decider(row.sources)
+        seen, hits = deciders.get(decider, (0, 0))
+        deciders[decider] = (seen + 1, hits + int(right))
+    return JudgedScore(
+        accuracy_3way=accuracy,
+        per_label=per_label,
+        escalated=len(escalated),
+        unanswered=sum(1 for s in escalated if s.judge_label is None),
+        opinions=Counter(s.judge_model for s in escalated if s.judge_model is not None),
+        deciders=deciders,
+        unrecorded=sum(1 for row in rows if _unrecorded(row)),
+    )
+
+
+def score(rows: Sequence[Row], *, judge: bool = False) -> AveritecResult:
     """Turn decided rows into the numbers the report prints.
 
     A row with no prediction counts as NEI: having fetched nothing, NEI is the only
@@ -245,6 +457,8 @@ def score(rows: Sequence[Row]) -> AveritecResult:
         coverage=coverage,
         archive_urls=archive_urls,
         total_urls=total_urls,
+        ablation=_ablation(rows),
+        judged=_judged(rows) if judge else None,
     )
 
 
@@ -252,8 +466,21 @@ def _md_row(*cells: object) -> str:
     return "| " + " | ".join(str(c) for c in cells) + " |"
 
 
-def render_report(result: AveritecResult, *, date: str, limit: int, path: str = GOLD_PATH) -> str:
-    """The markdown skeleton. ``## Notes`` is left for the controller to fill in."""
+def render_report(
+    result: AveritecResult,
+    *,
+    date: str,
+    limit: int,
+    path: str = GOLD_PATH,
+    browser: bool | None = None,
+    fresh: bool = False,
+    judge: str = "",
+) -> str:
+    """The markdown skeleton. ``## Notes`` is left for the controller to fill in.
+
+    ``browser`` is ``None`` when the run left the browser to the config, so the report
+    claims nothing about it; ``judge`` is the judge's name, empty when there was none.
+    """
     # ``result.counted`` is the denominator the 3-way accuracy and its baseline are
     # read over. Printed beside `n`, because "0.80 over 100 claims" would otherwise
     # claim a coverage the number does not have when some claims were never scorable.
@@ -262,6 +489,18 @@ def render_report(result: AveritecResult, *, date: str, limit: int, path: str = 
         "",
         f"- claims: {result.n}  (limit={limit or 'none'})",
         f"- measured path: {path}",
+    ]
+    if browser is not None:
+        lines.append(f"- browser step: {'allowed' if browser else 'not used'}")
+    lines.append(f"- fetch: {'live, cache bypassed' if fresh else 'cache allowed'}")
+    if judge:
+        role = (
+            "its opinions are the hypothetical column below; the verdicts are the models'"
+            if path == GOLD_PATH
+            else "writes the search queries; its opinions are the hypothetical column below"
+        )
+        lines.append(f"- judge: {judge} ({role})")
+    lines += [
         f"- dataset: `{averitec.URL}`  (sha256 {averitec.SHA256[:12]}…)",
         "- one run of the whole product: real claims, real source pages, real fetch ladder.",
         "",
@@ -298,22 +537,115 @@ def render_report(result: AveritecResult, *, date: str, limit: int, path: str = 
     # report says how much of its own coverage came from one.
     lines.append("")
     if result.total_urls:
-        share = 100.0 * result.archive_urls / result.total_urls
+        percent = 100.0 * result.archive_urls / result.total_urls
         lines.append(
             f"{result.archive_urls} of {result.total_urls} source URLs are "
-            f"{ARCHIVE_HOST} snapshots ({share:.1f} %)."
+            f"{ARCHIVE_HOST} snapshots ({percent:.1f} %)."
         )
     else:
         lines.append(f"No source URLs were measured, so no {ARCHIVE_HOST} share applies.")
+    if result.ablation is not None:
+        lines.extend(_ablation_lines(result.ablation))
+    if result.judged is not None:
+        lines.extend(_judged_lines(result.judged, product=result.accuracy_3way))
     lines.extend(["", "## Notes", "", "<!-- filled in by hand after the run -->", ""])
     return "\n".join(lines) + "\n"
+
+
+def _ablation_lines(ablation: Ablation) -> list[str]:
+    lines = [
+        "",
+        "## Without the browser",
+        "",
+        f"{ablation.browser_sources} of {ablation.read_sources} read sources were read by "
+        f"the browser step. Treating them as unread gives a 3-way accuracy of "
+        f"**{ablation.accuracy_3way:.3f}**.",
+        "",
+        "Those pages never reached the Wayback step, which a run without the browser "
+        "tries next, so this is a lower bound on the pages such a run reads. It is not a "
+        "bound on its accuracy: dropping a page can lose a right verdict or a wrong one.",
+    ]
+    if ablation.unknown_step:
+        lines.extend(
+            [
+                "",
+                f"{ablation.unknown_step} read sources came from the cache, so the step "
+                "that read them is unknown; they are kept as read.",
+            ]
+        )
+    if ablation.unrecorded:
+        lines.extend(["", _unrecorded_line(ablation.unrecorded)])
+    return lines
+
+
+def _unrecorded_line(count: int) -> str:
+    return (
+        f"{count} rows have no per-source record (written before sources were kept); "
+        "they are scored with the product's own label."
+    )
+
+
+def _judged_lines(judged: JudgedScore, *, product: float) -> list[str]:
+    lines = [
+        "",
+        "## Judge (hypothetical)",
+        "",
+        "The product never lets the judge change a verdict (spec section 11.1). This "
+        "column is what the accuracy would be if it did: a medium or high model verdict "
+        "still wins; otherwise the judge's opinions on the escalated sources decide, by "
+        "majority of the asserting votes (an NEI opinion abstains), a tie being NEI. An "
+        "escalation the judge did not answer votes with the models' label.",
+        "",
+        f"3-way accuracy **{judged.accuracy_3way:.3f}**, against {product:.3f} for the "
+        f"product. {judged.escalated} sources were escalated; {judged.unanswered} got "
+        "no opinion back."
+        + (f" {_unrecorded_line(judged.unrecorded)}" if judged.unrecorded else ""),
+        "",
+        "| label | n | correct | accuracy |",
+        "|---|---|---|---|",
+    ]
+    for label in [label for label in averitec.LABELS if label in judged.per_label]:
+        seen, right = judged.per_label[label]
+        lines.append(_md_row(label, seen, right, f"{right / seen:.3f}" if seen else "—"))
+    lines.extend(["", "| judge model | opinions |", "|---|---|"])
+    for model, count in judged.opinions.most_common():
+        lines.append(_md_row(model, count))
+    if not judged.opinions:
+        lines.append(_md_row("none", 0))
+    lines.extend(["", "| decided by | n | correct | accuracy |", "|---|---|---|---|"])
+    for decider, (seen, right) in sorted(judged.deciders.items()):
+        lines.append(_md_row(decider, seen, right, f"{right / seen:.3f}" if seen else "—"))
+    return lines
 
 
 # --- live half: run by hand, not covered by tests ------------------------
 
 
-def _results_path(*, search: bool) -> Path:
-    return cache_dir() / "datasets" / (SEARCH_RESULTS_NAME if search else RESULTS_NAME)
+def _setup_suffix(*, browser: bool, judge: bool, fresh: bool) -> str:
+    """What sets this run apart from the legacy setup, for its file names."""
+    return (
+        ("-browser" if browser else "") + ("-judge" if judge else "") + ("-fresh" if fresh else "")
+    )
+
+
+def _results_path(
+    *, search: bool, browser: bool = False, judge: bool = False, fresh: bool = False
+) -> Path:
+    """One file per run setup, so a resume does not mix rows from two setups. The
+    legacy names stay the runs made without ``--browser``, ``--judge`` or ``--fresh``;
+    they are shared by ``--no-browser`` and by a run that leaves the browser to the
+    config, as they always were, so that older files can still be resumed."""
+    name = Path(SEARCH_RESULTS_NAME if search else RESULTS_NAME)
+    suffix = _setup_suffix(browser=browser, judge=judge, fresh=fresh)
+    return cache_dir() / "datasets" / f"{name.stem}{suffix}{name.suffix}"
+
+
+def _report_path(*, day: str, search: bool, browser: bool, judge: bool, fresh: bool) -> Path:
+    """The default ``--out``: one report per run setup, so two runs on one day keep both."""
+    suffix = ("-search" if search else "") + _setup_suffix(
+        browser=browser, judge=judge, fresh=fresh
+    )
+    return Path("docs/eval") / f"{day}-averitec{suffix}.md"
 
 
 def _load_rows(path: Path) -> list[Row]:
@@ -327,6 +659,7 @@ def _load_rows(path: Path) -> list[Row]:
             predicted=None if item["predicted"] is None else str(item["predicted"]),
             states=tuple(str(state) for state in item["states"]),
             urls=tuple(str(url) for url in item["urls"]),
+            sources=tuple(Source(**source) for source in item.get("sources", ())),
         )
         for item in raw
     ]
@@ -343,6 +676,7 @@ def _save_rows(path: Path, rows: Sequence[Row]) -> None:
                 "predicted": row.predicted,
                 "states": list(row.states),
                 "urls": list(row.urls),
+                "sources": [asdict(source) for source in row.sources],
             }
             for row in rows
         ],
@@ -354,26 +688,38 @@ def _save_rows(path: Path, rows: Sequence[Row]) -> None:
 
 
 def _decide_claim(
-    engine: Engine, claim: averitec.Claim, *, sleep: float, anonymous: bool = False
+    engine: Engine,
+    claim: averitec.Claim,
+    *,
+    sleep: float,
+    anonymous: bool = False,
+    fresh: bool = False,
+    judge: Judge | None = None,
 ) -> Row:
     """Fetch every source of one claim and keep the strongest non-NEI verdict.
 
     ``anonymous`` is for pages the search found: fetched without the contact address,
-    as the product fetches them (round 2)."""
+    as the product fetches them (round 2). ``fresh`` climbs past the cache, so every
+    source keeps the step that read it. ``judge`` is asked about the sources whose
+    verdict sits in the product's escalation band; its opinions are recorded beside
+    the verdicts and never change ``predicted`` (spec section 11.1)."""
     states: list[str] = []
-    best: pipeline.Verdict | None = None
-    fetched_any = False
+    sources: list[Source] = []
+    # What the judge is shown for each escalated source, by its index in ``sources``.
+    escalated: dict[int, Verdict] = {}
     for url in claim.source_urls:
         # Before every fetch, not between them: the ladder has no crawl delay of its
         # own, so this is the whole of the run's politeness and it has to hold across
         # claims too, not just within one.
         if sleep:
             time.sleep(sleep)
-        fetched = engine.fetcher.fetch(url, anonymous=anonymous)
-        states.append(state_for(fetched))
+        fetched = engine.fetcher.fetch(url, anonymous=anonymous, use_cache=not fresh)
+        state = state_for(fetched)
+        states.append(state)
+        step = None if fetched.from_cache else fetched.step
         if not fetched.ok or not fetched.text.strip():
+            sources.append(Source(url=url, state=state, step=step, label=None))
             continue
-        fetched_any = True
         passages = [
             Passage(sentence, url, ordinal)
             for ordinal, sentence in enumerate(retrieval.split_sentences(fetched.text))
@@ -386,30 +732,64 @@ def _decide_claim(
             k=engine.k,
             thresholds=engine.thresholds,
         )
-        # No passage, no verdict (product rule 1): an assertion without the sentence
-        # it rests on is dropped rather than reported.
-        if verdict.label is Label.NEI or verdict.passage is None:
-            continue
-        if best is None or verdict.score > best.score:
-            best = verdict
+        if escalates(verdict):
+            escalated[len(sources)] = verdict
+        # A source whose verdict is NEI was still read: it stays in the row, and
+        # ``product_label`` keeps only assertions, each with the passage it rests on
+        # (product rule 1, enforced by ``Verdict`` itself).
+        sources.append(
+            Source(
+                url=url,
+                state=state,
+                step=step,
+                label=verdict.label.value,
+                score=verdict.score,
+                tier=verdict.tier,
+                escalated=escalates(verdict),
+            )
+        )
+    if judge is not None and escalated:
+        sources = _ask_judge(judge, claim.text, sources, escalated)
     # One state per value the dataset gave, fetchable or not, so the coverage table
     # accounts for every annotation rather than only the ones we could try.
     states.extend([NOT_A_URL] * claim.non_urls)
     if not claim.source_urls and not claim.non_urls:
         states.append(NO_SOURCE)
-    if best is not None:
-        predicted: str | None = best.label.value
-    elif fetched_any:
-        predicted = Label.NEI.value
-    else:
-        predicted = None
     return Row(
         claim_id=claim.id,
         gold=claim.label,
-        predicted=predicted,
+        predicted=product_label(sources),
         states=tuple(states),
         urls=claim.source_urls,
+        sources=tuple(sources),
     )
+
+
+def _ask_judge(
+    judge: Judge, claim: str, sources: list[Source], escalated: dict[int, Verdict]
+) -> list[Source]:
+    """The judge's opinion on each escalated source, shown exactly what ``verify``
+    shows it: the claim, the passage, the models' verdict and its tier."""
+    items = [
+        judge_mod.JudgeItem(
+            id=f"s{index}",
+            claim=claim,
+            passage=verdict.passage.text,
+            verdict=verdict.label,
+            tier=verdict.tier,
+        )
+        for index, verdict in escalated.items()
+        if verdict.passage is not None  # ``escalates`` already refused the others
+    ]
+    opinions = judge.review(items)
+    answered = list(sources)
+    for index in escalated:
+        opinion = opinions.get(f"s{index}")
+        if opinion is not None:
+            answered[index] = replace(
+                sources[index], judge_label=opinion.label.value, judge_model=opinion.model
+            )
+    return answered
 
 
 NLI_PROFILE: NliProfileName = "default"
@@ -418,8 +798,24 @@ NLI_PROFILE: NliProfileName = "default"
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--limit", type=int, default=100, help="first N dev claims")
-    parser.add_argument(
+    browser_flags = parser.add_mutually_exclusive_group()
+    browser_flags.add_argument(
         "--no-browser", action="store_true", help="never use the browser step of the ladder"
+    )
+    browser_flags.add_argument(
+        "--browser",
+        action="store_true",
+        help="allow the browser step whatever the config says (installs it if missing)",
+    )
+    parser.add_argument(
+        "--judge",
+        action="store_true",
+        help="ask the configured judge about the escalated verdicts (a hypothetical column)",
+    )
+    parser.add_argument(
+        "--fresh",
+        action="store_true",
+        help="fetch every page live, past the cache, so each source keeps its ladder step",
     )
     parser.add_argument("--sleep", type=float, default=1.0, help="seconds between fetches")
     parser.add_argument("--resume", action="store_true", help="skip claim ids already scored")
@@ -431,7 +827,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out", default="")
     args = parser.parse_args(argv)
 
-    results = _results_path(search=args.search)
+    results = _results_path(
+        search=args.search, browser=args.browser, judge=args.judge, fresh=args.fresh
+    )
     if results.exists() and not args.resume:
         # The file is the only record of a run that costs hours of network; a fresh
         # run must not quietly replace it. Checked before anything is downloaded, so
@@ -442,6 +840,21 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 2
+
+    config = load_config()
+    key: judge_mod.ApiKey | None = None
+    if args.judge:
+        # Checked before anything is downloaded, as the CLI's ``--judge`` checks it: a
+        # run told to measure the judge must not quietly measure the models alone.
+        key = judge_mod.resolve_api_key(config.judge.api_key_env)
+        if config.judge.api_key_env and key is None:
+            print(
+                f"error     {config.judge.api_key_env} is not set (put it in .env)",
+                file=sys.stderr,
+            )
+            return 2
+        if config.judge.provider == "gemini":
+            print(f"note      {judge_mod.GEMINI_DATA_USE}", file=sys.stderr)
 
     dataset = averitec.ensure_downloaded(cache_dir())
     claims = averitec.load(dataset, limit=args.limit or None)
@@ -455,15 +868,22 @@ def main(argv: list[str] | None = None) -> int:
     if done:
         print(f"resume    {len(done)} claims already scored in {results}")
 
-    config = load_config()
     # ``interactive=False`` so an `ask` permission is denied and reported rather than
     # prompted for (product rule 4); ``--no-browser`` forces the browser step off
-    # outright, otherwise the config's own permission decides.
+    # outright and ``--browser`` on (asking for it is the consent, spec section 7.1);
+    # otherwise the config's own permission decides.
     # ``nli="default"`` is pinned: the published numbers describe the default install,
     # so the user's ``models.nli`` must not change what this script measures.
+    browser = True if args.browser else False if args.no_browser else None
+    # Built here, not where the key is checked: ``Engine.default`` owns it from this
+    # call on and closes it even when it fails, so nothing in between can leak it.
+    judge = judge_mod.Judge(judge_mod.build_client(config.judge, key)) if args.judge else None
     engine = Engine.default(
-        config, interactive=False, browser=False if args.no_browser else None, nli=NLI_PROFILE
+        config, interactive=False, browser=browser, nli=NLI_PROFILE, judge=judge
     )
+    # The configured judge's name, taken before it can switch to its local fallback:
+    # the report names the judge the run was told to use, the table who answered.
+    judge_name = "" if judge is None else judge.name
     print(f"nli       {NLI_PROFILE} profile (pinned; ignores models.nli)")
     searcher: Searcher | None = None
     if args.search:
@@ -481,6 +901,7 @@ def main(argv: list[str] | None = None) -> int:
         searcher = engine.searcher
 
     # The judge the product would write queries with: the same rule ``verify`` uses.
+    # Under ``--judge`` it also gives its opinion of the escalated verdicts.
     judge = engine.judge if engine.escalate else None
     path = measured_path(judge) if searcher is not None else GOLD_PATH
     scored = 0
@@ -489,7 +910,9 @@ def main(argv: list[str] | None = None) -> int:
             if claim.id in done:
                 continue
             if searcher is None:
-                stored.append(_decide_claim(engine, claim, sleep=args.sleep))
+                stored.append(
+                    _decide_claim(engine, claim, sleep=args.sleep, fresh=args.fresh, judge=judge)
+                )
             else:
                 # The gold URLs are the answer key; search mode reads what evidence
                 # search would actually find, which is the §17.1 gate this run exists
@@ -507,7 +930,16 @@ def main(argv: list[str] | None = None) -> int:
                     found = replace(
                         claim, text=searched.text, source_urls=searched.urls, non_urls=0
                     )
-                    stored.append(_decide_claim(engine, found, sleep=args.sleep, anonymous=True))
+                    stored.append(
+                        _decide_claim(
+                            engine,
+                            found,
+                            sleep=args.sleep,
+                            anonymous=True,
+                            fresh=args.fresh,
+                            judge=judge,
+                        )
+                    )
             scored += 1
             # After every claim, not at the end: a run this long is interrupted more
             # often than it finishes, and the file has to survive that.
@@ -529,17 +961,33 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     finally:
         engine.close()
+    if judge is not None and judge.switched:
+        # The run's one switch notice, as the product prints it (spec section 11).
+        print(f"note      {judge.switched}", file=sys.stderr)
 
     wanted = {claim.id for claim in claims}
     rows = [row for row in stored if row.claim_id in wanted]
-    report = render_report(score(rows), date=date.today().isoformat(), limit=args.limit, path=path)
+    report = render_report(
+        score(rows, judge=args.judge),
+        date=date.today().isoformat(),
+        limit=args.limit,
+        path=path,
+        browser=browser,
+        fresh=args.fresh,
+        judge=judge_name,
+    )
     print()
     print(report)
-    suffix = "-search" if args.search else ""
     out = (
         Path(args.out)
         if args.out
-        else Path("docs/eval") / f"{date.today().isoformat()}-averitec{suffix}.md"
+        else _report_path(
+            day=date.today().isoformat(),
+            search=args.search,
+            browser=args.browser,
+            judge=args.judge,
+            fresh=args.fresh,
+        )
     )
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(report, encoding="utf-8")

@@ -12,6 +12,7 @@ import importlib.util
 import sys
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -411,3 +412,572 @@ def test_a_rejected_search_key_stops_the_run_at_the_first_claim(
     assert not out.exists()
     message = capsys.readouterr().err
     assert "TAVILY_API_KEY" in message and "rejected" in message
+
+
+# --- per-source rows: the browser ablation and the judge's hypothetical column ------
+
+Source = eval_averitec.Source
+product_label = eval_averitec.product_label
+judged_label = eval_averitec.judged_label
+judge_decider = eval_averitec.judge_decider
+without_browser = eval_averitec.without_browser
+
+GROQ = "groq openai/gpt-oss-120b"
+LOCAL = "ollama qwen3.5:9b"
+
+
+def _read(
+    label: str,
+    score: float = 0.5,
+    *,
+    step: int | None = 1,
+    tier: str = "medium",
+    escalated: bool = False,
+    judge_label: str | None = None,
+    judge_model: str | None = None,
+    url: str = LIVE,
+) -> Any:
+    return Source(
+        url=url,
+        state=OK,
+        step=step,
+        label=label,
+        score=score,
+        tier=tier,
+        escalated=escalated,
+        judge_label=judge_label,
+        judge_model=judge_model,
+    )
+
+
+def _unread(state: str = UNREACHABLE, *, step: int = 1) -> Any:
+    return Source(url=LIVE, state=state, step=step, label=None)
+
+
+def test_the_product_label_is_the_strongest_assertion_among_the_sources() -> None:
+    sources = (_read("SUPPORTED", 0.6), _read("REFUTED", 0.9), _read("NEI", 0.99))
+    assert product_label(sources) == "REFUTED"
+
+
+def test_on_a_tied_score_the_first_source_wins_as_it_always_did() -> None:
+    first = _read("SUPPORTED", 0.7, url="https://a.example/1")
+    second = _read("REFUTED", 0.7, url="https://b.example/2")
+    assert product_label((first, second)) == "SUPPORTED"
+    assert product_label((second, first)) == "REFUTED"
+
+
+def test_the_product_label_is_nei_when_something_was_read_but_nothing_asserted() -> None:
+    assert product_label((_read("NEI"), _unread())) == "NEI"
+
+
+def test_the_product_label_is_none_when_nothing_was_read() -> None:
+    assert product_label((_unread(), _unread(BLOCKED))) is None
+    assert product_label(()) is None
+
+
+def test_a_confident_model_verdict_wins_over_the_judge() -> None:
+    sources = (
+        _read("SUPPORTED", 0.8, tier="high"),
+        _read("NEI", tier="low", escalated=True, judge_label="REFUTED", judge_model=GROQ),
+    )
+    assert judged_label(sources) == "SUPPORTED"
+    assert judge_decider(sources) == eval_averitec.DECIDED_BY_MODELS
+
+
+def test_without_a_confident_verdict_the_judge_opinions_decide() -> None:
+    sources = (
+        _read("NEI", tier="low", escalated=True, judge_label="SUPPORTED", judge_model=GROQ),
+        _read(
+            "REFUTED", 0.3, tier="low", escalated=True, judge_label="SUPPORTED", judge_model=GROQ
+        ),
+    )
+    assert product_label(sources) == "REFUTED"  # the product keeps the model's verdict
+    assert judged_label(sources) == "SUPPORTED"
+    assert judge_decider(sources) == GROQ
+
+
+def test_a_tied_judge_vote_is_nei() -> None:
+    sources = (
+        _read("NEI", tier="low", escalated=True, judge_label="SUPPORTED", judge_model=GROQ),
+        _read("NEI", tier="low", escalated=True, judge_label="REFUTED", judge_model=LOCAL),
+    )
+    assert judged_label(sources) == "NEI"
+    # No vote won, so every answerer is named: together they left it at NEI.
+    assert judge_decider(sources) == f"{GROQ} + {LOCAL}"
+
+
+def test_the_decider_is_the_model_whose_vote_won_not_every_model_that_answered() -> None:
+    sources = (
+        _read("NEI", tier="low", escalated=True, judge_label="SUPPORTED", judge_model=GROQ),
+        _read("NEI", tier="low", escalated=True, judge_label="SUPPORTED", judge_model=GROQ),
+        _read("NEI", tier="low", escalated=True, judge_label="REFUTED", judge_model=LOCAL),
+    )
+    assert judged_label(sources) == "SUPPORTED"
+    assert judge_decider(sources) == GROQ
+
+
+def test_an_escalation_the_judge_never_answered_keeps_the_model_label_as_its_vote() -> None:
+    sources = (_read("REFUTED", 0.3, tier="low", escalated=True),)
+    assert judged_label(sources) == "REFUTED"
+    assert judge_decider(sources) == eval_averitec.NO_OPINION
+
+
+def test_a_judge_that_says_nei_everywhere_leaves_a_read_claim_at_nei() -> None:
+    sources = (
+        _read("REFUTED", 0.3, tier="low", escalated=True, judge_label="NEI", judge_model=GROQ),
+    )
+    assert judged_label(sources) == "NEI"
+
+
+def test_a_claim_with_nothing_escalated_or_read_has_no_judged_label() -> None:
+    assert judged_label((_unread(),)) is None
+    assert judge_decider((_unread(),)) == eval_averitec.NOTHING_ESCALATED
+
+
+def test_without_browser_drops_only_what_the_browser_read() -> None:
+    browser = _read("SUPPORTED", 0.9, step=3)
+    cached = _read("REFUTED", 0.4, step=None)
+    plain = _read("NEI", step=2)
+    dropped = without_browser((browser, cached, plain))
+    assert dropped[0].label is None
+    assert dropped[1:] == (cached, plain)
+    assert product_label(dropped) == "REFUTED"
+
+
+# --- results files: one per run setup, the legacy name untouched ---------------------
+
+
+@pytest.mark.parametrize(
+    ("search", "browser", "judge", "fresh", "name"),
+    [
+        (False, False, False, False, "averitec_results.json"),
+        (True, False, False, False, "averitec_search_results.json"),
+        (False, True, True, True, "averitec_results-browser-judge-fresh.json"),
+        (True, True, False, True, "averitec_search_results-browser-fresh.json"),
+        (True, True, True, True, "averitec_search_results-browser-judge-fresh.json"),
+        (False, False, False, True, "averitec_results-fresh.json"),
+    ],
+)
+def test_every_run_setup_gets_its_own_results_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    search: bool,
+    browser: bool,
+    judge: bool,
+    fresh: bool,
+    name: str,
+) -> None:
+    monkeypatch.setattr(eval_averitec, "cache_dir", lambda: tmp_path)
+    path = eval_averitec._results_path(search=search, browser=browser, judge=judge, fresh=fresh)
+    assert path == tmp_path / "datasets" / name
+
+
+def test_two_search_setups_on_one_day_write_two_reports() -> None:
+    day = "2026-10-05"
+    sentence = eval_averitec._report_path(
+        day=day, search=True, browser=True, judge=False, fresh=True
+    )
+    judged = eval_averitec._report_path(day=day, search=True, browser=True, judge=True, fresh=True)
+    assert sentence == Path("docs/eval/2026-10-05-averitec-search-browser-fresh.md")
+    assert judged == Path("docs/eval/2026-10-05-averitec-search-browser-judge-fresh.md")
+    legacy = eval_averitec._report_path(
+        day=day, search=False, browser=False, judge=False, fresh=False
+    )
+    assert legacy == Path("docs/eval/2026-10-05-averitec.md")
+
+
+def test_rows_round_trip_with_their_sources(tmp_path: Path) -> None:
+    row = Row(
+        claim_id=7,
+        gold=SUPPORTED,
+        predicted="REFUTED",
+        states=(OK, UNREACHABLE),
+        urls=(LIVE, ARCHIVED),
+        sources=(
+            _read(
+                "REFUTED",
+                0.3,
+                step=3,
+                tier="low",
+                escalated=True,
+                judge_label="SUPPORTED",
+                judge_model=GROQ,
+            ),
+            _unread(),
+        ),
+    )
+    path = tmp_path / "results.json"
+    eval_averitec._save_rows(path, [row])
+    assert eval_averitec._load_rows(path) == [row]
+
+
+def test_a_legacy_results_file_without_sources_still_loads(tmp_path: Path) -> None:
+    path = tmp_path / "results.json"
+    path.write_text(
+        '[{"claim_id": 1, "gold": "Refuted", "predicted": null, "states": ["ok"], "urls": []}]',
+        encoding="utf-8",
+    )
+    (row,) = eval_averitec._load_rows(path)
+    assert row.sources == ()
+
+
+# --- score and report: the ablation and the hypothetical judge ----------------------
+
+JUDGED_ROWS = [
+    # The browser read the only assertion; the judge agrees with the model.
+    Row(
+        claim_id=0,
+        gold=SUPPORTED,
+        predicted="SUPPORTED",
+        states=(OK,),
+        urls=(LIVE,),
+        sources=(_read("SUPPORTED", 0.9, step=3, tier="high"),),
+    ),
+    # The model is unsure and wrong; Groq's opinion would have been right.
+    Row(
+        claim_id=1,
+        gold=SUPPORTED,
+        predicted="REFUTED",
+        states=(OK,),
+        urls=(LIVE,),
+        sources=(
+            _read(
+                "REFUTED",
+                0.3,
+                tier="low",
+                escalated=True,
+                judge_label="SUPPORTED",
+                judge_model=GROQ,
+            ),
+        ),
+    ),
+    # Read from the cache: the step is unknown, and the local judge got it wrong.
+    Row(
+        claim_id=2,
+        gold=REFUTED,
+        predicted="NEI",
+        states=(OK,),
+        urls=(LIVE,),
+        sources=(
+            _read(
+                "NEI",
+                step=None,
+                tier="low",
+                escalated=True,
+                judge_label="SUPPORTED",
+                judge_model=LOCAL,
+            ),
+        ),
+    ),
+    # Nothing read; nothing escalated.
+    Row(
+        claim_id=3,
+        gold=NEI,
+        predicted=None,
+        states=(UNREACHABLE,),
+        urls=(LIVE,),
+        sources=(_unread(),),
+    ),
+]
+
+
+def test_score_leaves_the_product_accuracy_alone() -> None:
+    result = score(JUDGED_ROWS, judge=True)
+    assert result.accuracy_3way == pytest.approx(2 / 4)
+
+
+def test_score_drops_browser_reads_for_the_ablation() -> None:
+    ablation = score(JUDGED_ROWS).ablation
+    assert ablation is not None
+    assert ablation.read_sources == 3
+    assert ablation.browser_sources == 1
+    assert ablation.unknown_step == 1
+    # Claim 0 loses its only source and falls to "nothing read" (NEI): 1 of 4 right.
+    assert ablation.accuracy_3way == pytest.approx(1 / 4)
+
+
+def test_rows_without_sources_have_no_ablation_and_no_judged_column() -> None:
+    result = score(ROWS)
+    assert result.ablation is None
+    assert result.judged is None
+
+
+def test_score_reports_the_hypothetical_judge_accuracy_and_who_decided() -> None:
+    judged = score(JUDGED_ROWS, judge=True).judged
+    assert judged is not None
+    # Claims 0 (models) and 1 (Groq) right, 2 (local) wrong, 3 NEI right.
+    assert judged.accuracy_3way == pytest.approx(3 / 4)
+    assert judged.escalated == 2
+    assert judged.unanswered == 0
+    assert judged.opinions == {GROQ: 1, LOCAL: 1}
+    assert judged.deciders[eval_averitec.DECIDED_BY_MODELS] == (1, 1)
+    assert judged.deciders[GROQ] == (1, 1)
+    assert judged.deciders[LOCAL] == (1, 0)
+
+
+def test_a_judge_run_with_nothing_escalated_still_has_a_judged_column() -> None:
+    judged = score(ROWS[:1], judge=True).judged
+    assert judged is not None
+    assert judged.escalated == 0
+
+
+def test_the_report_states_the_run_setup() -> None:
+    text = render_report(
+        score(JUDGED_ROWS, judge=True),
+        date="2026-10-05",
+        limit=4,
+        browser=True,
+        fresh=True,
+        judge=GROQ,
+    )
+    assert "browser step: allowed" in text
+    assert "fetch: live, cache bypassed" in text
+    assert f"judge: {GROQ}" in text
+
+
+def test_the_ablation_bounds_the_pages_read_and_not_the_accuracy() -> None:
+    text = render_report(score(JUDGED_ROWS), date="2026-10-05", limit=4, browser=True)
+    assert "## Without the browser" in text
+    assert "lower bound on the pages such a run reads" in text
+    assert "not a bound on its accuracy" in text
+    assert "1 of 3 read sources" in text
+    assert "step that read them is unknown" in text  # a cache read is said, not hidden
+
+
+def test_the_judge_column_says_the_product_does_not_do_this() -> None:
+    text = render_report(score(JUDGED_ROWS, judge=True), date="2026-10-05", limit=4, judge=GROQ)
+    assert "## Judge (hypothetical)" in text
+    assert "never lets the judge change a verdict" in text
+    assert "**0.750**" in text
+    assert _md_line(GROQ, 1, 1, "1.000") in text  # per deciding model
+    assert _md_line(LOCAL, 1, 0, "0.000") in text
+
+
+def test_a_report_without_sources_or_judge_has_neither_section() -> None:
+    text = render_report(score(ROWS), date="2026-10-05", limit=6)
+    assert "## Without the browser" not in text
+    assert "## Judge (hypothetical)" not in text
+
+
+def _md_line(*cells: object) -> str:
+    return "| " + " | ".join(str(c) for c in cells) + " |"
+
+
+# --- _decide_claim: live fetch, step kept, the escalated verdicts asked --------------
+
+
+def _fetched(
+    url: str, *, step: int, text: str = "Some text. More text.", outcome: str = "ok"
+) -> object:
+    from proofpath.fetch import Fetched, Outcome
+
+    return Fetched(
+        url=url,
+        final_url=url,
+        step=step,
+        outcome=Outcome(outcome),
+        status=200,
+        content_type="text/html",
+        kind="html",
+        body=b"",
+        text=text,
+        notes=[],
+        from_cache=step == 0,
+    )
+
+
+class _Fetcher:
+    def __init__(self, pages: dict[str, object]) -> None:
+        self.pages = pages
+        self.calls: list[tuple[str, bool, bool]] = []
+
+    def fetch(self, url: str, *, anonymous: bool = False, use_cache: bool = True) -> object:
+        self.calls.append((url, anonymous, use_cache))
+        return self.pages[url]
+
+
+class _Judge:
+    def __init__(self, answers: dict[str, str], model: str = GROQ) -> None:
+        self.answers = answers  # passage text -> label value
+        self.model = model
+        self.asked: list[object] = []
+
+    def review(self, items: list[object], **_: object) -> dict[str, object]:
+        from proofpath.judge import JudgeOpinion
+        from proofpath.models import Label
+
+        self.asked.extend(items)
+        return {
+            item.id: JudgeOpinion(Label(self.answers[item.passage]), "why", self.model)  # type: ignore[attr-defined]
+            for item in items
+            if item.passage in self.answers  # type: ignore[attr-defined]
+        }
+
+
+def _engine(fetcher: _Fetcher) -> object:
+    return SimpleNamespace(
+        fetcher=fetcher,
+        get_embedder=lambda: None,
+        get_scorer=lambda: None,
+        k=1,
+        thresholds=None,
+    )
+
+
+def _verdicts(monkeypatch: pytest.MonkeyPatch, by_url: dict[str, object]) -> None:
+    def decide(_claim: str, passages: list[object], *_a: object, **_k: object) -> object:
+        return by_url[passages[0].source_id]  # type: ignore[attr-defined]
+
+    monkeypatch.setattr(eval_averitec.pipeline, "decide", decide)
+
+
+def _verdict(label: str, score: float, tier: str, url: str, reason: str = "") -> object:
+    from proofpath.models import Label, Passage, Verdict
+
+    return Verdict(Label(label), score, tier, Passage(f"passage of {url}", url, 0), reason)  # type: ignore[arg-type]
+
+
+def test_a_fresh_run_climbs_past_the_cache_and_keeps_the_step(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    one, two = "https://a.example/1", "https://b.example/2"
+    fetcher = _Fetcher(
+        {
+            one: _fetched(one, step=3),
+            two: _fetched(two, step=1, outcome="UNVERIFIED (unreachable)", text=""),
+        }
+    )
+    _verdicts(monkeypatch, {one: _verdict("SUPPORTED", 0.9, "high", one)})
+    claim = averitec.Claim(id=1, text="A claim.", label="Supported", source_urls=(one, two))
+
+    row = eval_averitec._decide_claim(_engine(fetcher), claim, sleep=0, fresh=True)
+
+    assert [call[2] for call in fetcher.calls] == [False, False]
+    assert row.predicted == "SUPPORTED"
+    assert [(s.step, s.label) for s in row.sources] == [(3, "SUPPORTED"), (1, None)]
+
+
+def test_only_the_low_band_is_sent_to_the_judge(monkeypatch: pytest.MonkeyPatch) -> None:
+    low, high, numeric = "https://a.example/low", "https://b.example/high", "https://c.example/num"
+    fetcher = _Fetcher({url: _fetched(url, step=1) for url in (low, high, numeric)})
+    _verdicts(
+        monkeypatch,
+        {
+            low: _verdict("REFUTED", 0.3, "low", low),
+            high: _verdict("SUPPORTED", 0.9, "high", high),
+            numeric: _verdict("REFUTED", 1.0, "low", numeric, reason="numeric mismatch: 3 vs 4"),
+        },
+    )
+    judge = _Judge({f"passage of {low}": "SUPPORTED"})
+    claim = averitec.Claim(
+        id=2, text="A claim.", label="Supported", source_urls=(low, high, numeric)
+    )
+
+    row = eval_averitec._decide_claim(_engine(fetcher), claim, sleep=0, judge=judge)  # type: ignore[arg-type]
+
+    assert [item.passage for item in judge.asked] == [f"passage of {low}"]  # type: ignore[attr-defined]
+    by_url = {s.url: s for s in row.sources}
+    assert by_url[low].escalated and by_url[low].judge_label == "SUPPORTED"
+    assert by_url[low].judge_model == GROQ
+    assert not by_url[high].escalated and not by_url[numeric].escalated
+    # The product's rule is unchanged: the strongest assertion, here the numeric 1.0.
+    assert row.predicted == "REFUTED"
+    assert row.predicted == product_label(row.sources)
+
+
+def test_without_a_judge_nothing_is_asked_and_escalation_is_still_recorded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    low = "https://a.example/low"
+    fetcher = _Fetcher({low: _fetched(low, step=1)})
+    _verdicts(monkeypatch, {low: _verdict("REFUTED", 0.3, "low", low)})
+    claim = averitec.Claim(id=3, text="A claim.", label="Refuted", source_urls=(low,))
+
+    row = eval_averitec._decide_claim(_engine(fetcher), claim, sleep=0)
+
+    assert fetcher.calls[0][2] is True  # not fresh: the cache may answer
+    (source,) = row.sources
+    assert source.escalated and source.judge_label is None
+
+
+# --- main: the new flags ---------------------------------------------------------------
+
+
+def test_browser_and_no_browser_cannot_both_be_asked_for(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit) as exc:
+        eval_averitec.main(["--browser", "--no-browser"])
+    assert exc.value.code == 2
+
+
+def test_a_judge_run_without_its_key_stops_before_the_dataset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from proofpath.config import Config
+
+    monkeypatch.setattr(eval_averitec, "cache_dir", lambda: tmp_path)
+    monkeypatch.setattr(eval_averitec, "load_config", Config)
+    monkeypatch.setattr(eval_averitec.judge_mod, "resolve_api_key", lambda _name: None)
+    monkeypatch.setattr(
+        eval_averitec.averitec,
+        "ensure_downloaded",
+        lambda _cache: pytest.fail("the dataset was fetched before the key was checked"),
+    )
+
+    assert eval_averitec.main(["--judge"]) == 2
+    assert "GROQ_API_KEY" in capsys.readouterr().err
+
+
+# --- review round 1: a resume over an older file, the judge's role in search mode -----
+
+# A row from a results file written before sources were kept, right as the product
+# scored it, beside one new row whose only source the browser read.
+MIXED_ROWS = [
+    Row(claim_id=0, gold=SUPPORTED, predicted="SUPPORTED", states=(OK,), urls=(LIVE,)),
+    Row(
+        claim_id=1,
+        gold=REFUTED,
+        predicted="REFUTED",
+        states=(OK,),
+        urls=(LIVE,),
+        sources=(_read("REFUTED", 0.9, step=1, tier="high"),),
+    ),
+]
+
+
+def test_an_older_row_keeps_the_products_label_in_the_ablation() -> None:
+    ablation = score(MIXED_ROWS).ablation
+    assert ablation is not None
+    assert ablation.browser_sources == 0
+    assert ablation.unrecorded == 1
+    # No browser page was dropped, so nothing may move: 2 of 2, as the product scored.
+    assert ablation.accuracy_3way == pytest.approx(1.0)
+
+
+def test_an_older_row_keeps_the_products_label_in_the_judged_column() -> None:
+    judged = score(MIXED_ROWS, judge=True).judged
+    assert judged is not None
+    assert judged.accuracy_3way == pytest.approx(1.0)
+    assert judged.unrecorded == 1
+    assert judged.deciders[eval_averitec.UNRECORDED] == (1, 1)
+
+
+def test_the_report_counts_the_rows_with_no_per_source_record() -> None:
+    text = render_report(score(MIXED_ROWS, judge=True), date="2026-10-05", limit=2, judge=GROQ)
+    assert "1 rows have no per-source record" in text
+
+
+def test_in_search_mode_the_report_says_the_judge_wrote_the_queries() -> None:
+    result = score(JUDGED_ROWS, judge=True)
+    gold = render_report(result, date="2026-10-05", limit=4, judge=GROQ)
+    searched = render_report(
+        result,
+        date="2026-10-05",
+        limit=4,
+        judge=GROQ,
+        path=eval_averitec.measured_path(SimpleNamespace(name=GROQ)),
+    )
+    assert "the verdicts are the models'" in gold
+    assert "writes the search queries" in searched
+    assert "writes the search queries" not in gold

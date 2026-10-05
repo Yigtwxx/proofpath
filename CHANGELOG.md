@@ -7,6 +7,15 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- **AVeriTeC eval: `--browser`, `--judge` and `--fresh`** (`scripts/eval_averitec.py`).
+  Every source now records the ladder step that read it and, under `--judge`, the
+  judge's opinion when its verdict was in the escalation band. The report adds two
+  numbers beside the product's: the accuracy with the browser's pages dropped, and a
+  hypothetical one in which the judge decides the low band. The product never does the
+  second, and the report says so. Each run setup gets its own results file and report.
+  Measured on 2026-10-05: gold URLs 0.371; search with sentence queries 0.371; search
+  with the judge writing the queries 0.483 (14 claims fixed, 4 broken, p = 0.031). The
+  majority baseline is 0.708.
 - **`proofpath update`** installs the latest release from PyPI, and
   **`proofpath update --check`** only says whether there is one. In the TUI they are
   `/update` and `/update --check`. Running the command is the consent, so nothing

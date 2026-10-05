@@ -27,7 +27,7 @@ from proofpath import verify as verify_mod
 from proofpath.browser import Answer, ConsentGate
 from proofpath.cache import Cache
 from proofpath.config import Config, ModelsConfig, Permission, Permissions
-from proofpath.document import Claim, Document, Locator, PageError
+from proofpath.document import Document, PageError
 from proofpath.entailment import Scorer, pick_onnx_file
 from proofpath.events import (
     Cancelled,
@@ -49,7 +49,6 @@ from proofpath.profiles import ACCURATE_PROFILE, DEFAULT_PROFILE, NliProfile
 from proofpath.report import (
     ABSTRACT_BASIS,
     JUDGE_DETAIL_PREFIX,
-    ClaimResult,
     Kind,
     Report,
     judge_detail,
@@ -85,9 +84,9 @@ from proofpath.verify import (
     VERIFYING,
     Engine,
     Prepared,
-    _escalates,
     _parser_for,
     decide_all,
+    escalates,
     prepare,
     target_document,
     verify,
@@ -2734,17 +2733,6 @@ def test_asking_for_a_summary_without_a_judge_is_a_programming_error() -> None:
         verify(draft(JUDGE_BODY, [REAL]), built, summarize=True)
 
 
-def _result(verdict: Verdict) -> ClaimResult:
-    claim = Claim(
-        text="the method is faster",
-        locator=Locator(line=1),
-        cited_refs=(1,),
-        paragraph=0,
-        sentence=0,
-    )
-    return ClaimResult(claim, 1, "doi:10.1/x", verdict, from_cache=False)
-
-
 PASSAGE = Passage("the method is faster", "doi:10.1/x", 0)
 
 
@@ -2765,4 +2753,4 @@ PASSAGE = Passage("the method is faster", "doi:10.1/x", 0)
 def test_the_escalation_set_is_the_low_band_with_something_to_judge_against(
     verdict: Verdict, escalated: bool
 ) -> None:
-    assert _escalates(_result(verdict)) is escalated
+    assert escalates(verdict) is escalated

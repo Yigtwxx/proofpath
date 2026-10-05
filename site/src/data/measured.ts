@@ -81,12 +81,12 @@ export const measures: readonly Measure[] = [
     },
     {
         id: 'averitec',
-        figure: '0.270',
+        figure: '0.371',
         reading: '3-way accuracy',
-        against: 'against a 0.708 majority baseline — worse than always guessing "refuted"',
+        against: 'against a 0.708 majority baseline — still worse than always guessing "refuted"',
         what: 'End to end on real web claims',
-        set: 'AVeriTeC dev, 100 claims',
-        doc: '2026-09-16-averitec.md',
+        set: 'AVeriTeC dev, 100 claims, browser allowed',
+        doc: '2026-10-05-averitec-browser-judge-fresh.md',
         weak: true,
     },
 ];
@@ -98,4 +98,4 @@ export const accessDoc = '2026-09-11-coverage.md';
 export const evalUrl = (doc: string): string => `${repo}/blob/main/docs/eval/${doc}`;
 
 export const averitecNote =
-    'A third of those claims had no readable source at all: 32 URLs needed the browser step, 29 were unreachable, 14 were refused by robots.txt. On the claims that did have one the score is 0.361 — still below the baseline. The models were calibrated on scientific abstracts; a fact-check page is a different object.';
+    'Coverage is no longer the loss: 165 of 200 sources were read. 36 of 89 claims had a readable source and still came back NEI, and 11 went the wrong way. The models were calibrated on scientific abstracts; a fact-check page is a different object. With evidence search and the judge writing the queries it scores 0.483 (14 claims fixed, 4 broken, p = 0.031), the one gain beyond the noise — but 25 of 89 claims come back the wrong way there, 20 of them false claims called supported (likely cause, not yet measured: search finds pages that repeat the claim).';

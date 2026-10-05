@@ -607,9 +607,63 @@ five packages. The user's decisions:
 | 20.7 | Skip model loads on a fully cached re-run | same as 10.2 |
 | 20.8 | Bibliography parsing that was measured but never shipped | two-column rejoin (9.10/12.1), multi-block headless fallback (11.11), more headings (16.5), `[1]-[3]` ranges (9.4) |
 | 20.9 | The judge's quote is never checked | `judge._collect` does not verify that the quoted span occurs in the passage. Checking it is a cheap way to enforce product rule 1 |
-| 20.10 | Eval honesty | add a `--judge` flag to `scripts/eval_averitec.py`; do one run with the browser allowed; show the 0.404 search score in the README "Measured" table |
+| 20.10 | Eval honesty | **done 2026-10-05**: `--browser`, `--judge`, `--fresh`; three runs and their results are under "20.10 results" below |
 | 20.11 | NLI bake-off result | **Winner: `large-fever` (MoritzLaurer DeBERTa-v3-large mnli-fever-anli-ling-wanli) × k=2 × `max`.** SciFact dev macro-F1 0.697, against 0.580 for the `base` × k=1 × `max` baseline and 0.608 for the best `base` row. Accuracy 0.697. AVeriTeC 3-way 0.438, or 0.475 on the readable subset, against a 0.708 majority baseline. Cost: 643 MB and 54 ms/pair, against 244 MB and 19 ms/pair. Full report: `docs/eval/2026-10-01-nli-bakeoff.md`. Next: (a) and (b) are settled by the accurate-NLI design (`docs/superpowers/specs/2026-10-01-accurate-nli-design.md`), which adds the winner as an opt-in "accurate" profile behind a consent download (spec §7.1); (c) stays open. (a) **settled** — rule-decided rows are left out of the tier walk (the numeric layer fired 4–6 times on train with 0 correct and pinned `high` at 1.000000); the accurate cuts are `high` 0.999142. (b) **settled** — the `medium` cut still sits on `decide`, and the report now says so itself (`NO_LOW_TIER`, default runs included). (c) **still open** — on AVeriTeC the winner is below `base` × k=2 (0.475 against 0.537), and `Supported` is still 2/19; the README recommends the profile for scientific sources, not for news |
 | 20.12 | Accurate-NLI follow-ups | (1) A shared `browser.read_terminal_answer` helper: `model_gate.ask_model_terminal` repeats `browser.ask_terminal`'s prompt loop and imports the private `_CHOICE_ANSWERS` to do it. (2) The `-q` `nli` line carries the fallback reason but not the advice. (3) Ctrl-C and `/stop` do not interrupt a running 643 MB download. (4) An "installed" but corrupt accurate model fails the run instead of falling back. (5) A multilingual NLI model is still deferred (out of scope in the accurate-NLI design); non-English claims still need the judge to translate |
+
+### 20.10 decisions — 2026-10-05
+
+The user picked the recommended option on all four questions.
+
+- **The judge is scored as a hypothetical column.** The product never lets the judge change
+  a verdict (spec §11.1), so with gold URLs `--judge` cannot move the product's number. The
+  report keeps the product's accuracy and adds a second one, labelled as something the
+  product does not do. In it, a confident model verdict (medium or high tier) still wins.
+  Otherwise the judge's opinions on the escalated sources decide (`verify.escalates`).
+  A majority of the asserting votes picks the label: an NEI opinion abstains, and a
+  tie is NEI. An escalation the judge did not answer votes with the models' label.
+- **Three runs and an ablation.** (1) gold URLs, browser, judge. (2) search, browser,
+  sentence queries. (3) search, browser, judge queries. Every source records the ladder
+  step that read it. The "without the browser" number comes from the same run, with the
+  step-3 sources dropped. Wayback was never tried for those pages, so the ablation is a
+  lower bound on the pages such a run reads. It is not a bound on its accuracy, which can
+  move either way. Runs fetch live (`--fresh`), because a cache hit has no step. Each
+  setup gets its own results file and report.
+- **Rate limits.** When Groq rate-limits, the judge falls back to the local
+  `qwen3.5:9b`, as the product does. The report counts opinions per model and splits the
+  hypothetical accuracy by the model whose vote won.
+- **Git.** One feature branch and one PR: the script, its tests, the `docs/eval`
+  reports and the README "Measured" row.
+
+### 20.10 results — 2026-10-05
+
+| Run | 3-way | Without the browser | Judge (hypothetical) |
+|---|---|---|---|
+| Gold URLs, browser, judge | 0.371 | 0.348 | 0.371 |
+| Search, browser, sentence queries | 0.371 | 0.348 | — |
+| Search, browser, judge queries (Groq `gpt-oss-120b`) | **0.483** | 0.483 | 0.483 |
+
+All three are against a 0.708 majority baseline over 89 claims. Reports:
+`docs/eval/2026-10-05-averitec-*.md`.
+
+- **Coverage is no longer the main loss.** 165 of 200 gold sources were read. The
+  browser was worth about two claims, within the ±0.05 noise.
+- **The reading is the loss.** 36 of 89 claims had a readable source and came back NEI,
+  and 11 went the wrong way.
+- **The judge's queries are the one gain that cleared the noise.** On the same claims
+  they fixed 14 and broke 4 (McNemar p = 0.031). The share of fact-check pages did not
+  change.
+- **Search asserts the wrong way much more.** 25 of 89 claims (judge queries) and 29 of
+  89 (sentence queries) came back the wrong way, mostly false claims called SUPPORTED.
+  The gold URLs give 11 (new item 20.15).
+- **The judge cannot see NEIs** (new item 20.13). This is why the hypothetical column
+  equals the product.
+
+| # | Item | Note |
+|---|---|---|
+| 20.13 | The judge never sees an NEI | `pipeline.decide` returns NEI with `passage=None`, so `verify.escalates` never sends it (rule 1). Yet NEI-on-a-read-source is 36 of the 56 wrong claims on AVeriTeC. Measure first: give the judge the best passage of each NEI source, verify its quote (20.9), and score it as a hypothetical column. Run it without the fallback so it measures Groq alone. Only then decide whether the product should escalate NEI with its best passage |
+| 20.14 | Web cuts | Fit `decide`/`medium` on AVeriTeC **train** and report them on dev, as the accurate model's cuts were fitted on SciFact train. This targets the same NEI slice without touching rule 1 |
+| 20.15 | Search calls more false claims SUPPORTED | With search, 20–22 of the 63 false claims come back SUPPORTED, against 5 from the gold URLs. Hypothesis, not yet measured: a page found by searching for a claim often quotes it, and the models read the quote as support. Check that on the failing rows first. Candidate fix: drop passages that restate the claim (near-duplicate of the hypothesis) before entailment, and measure it on AVeriTeC train first. This bears on rule 3's spirit: a wrong SUPPORTED is the costliest error |
 
 ## 21. `proofpath update` — 2026-10-05
 
