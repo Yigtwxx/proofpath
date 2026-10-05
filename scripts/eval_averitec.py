@@ -2,8 +2,8 @@
 
 Usage:
     uv run python scripts/eval_averitec.py [--limit 100] [--browser | --no-browser]
-        [--judge] [--fresh] [--sleep 1.0] [--resume] [--search]
-        [--out docs/eval/<date>-averitec.md]
+        [--judge [--judge-nei] [--no-fallback]] [--fresh] [--sleep 1.0] [--resume]
+        [--search] [--out docs/eval/<date>-averitec.md]
 
 SciFact measures retrieval and entailment over abstracts we are handed. AVeriTeC
 measures the whole product: a real-world claim, its real source pages, fetched over
@@ -25,6 +25,14 @@ would have read, less whatever Wayback would have rescued), and a hypothetical o
 in which the judge's opinions decide the low band. The product never does the
 second (spec section 11.1); the report says so.
 
+``--judge-nei`` measures what the judge would do with the NEIs (OPEN-ITEMS 20.13):
+every read source whose verdict is NEI is also sent, with the passage the models came
+closest to deciding on (``pipeline.closest``), and the hypothetical column gains a
+second number in which those opinions vote too. The judge's quote is checked
+(OPEN-ITEMS 20.9), so the report counts the opinions that check dropped.
+``--no-fallback`` keeps every opinion from the configured model: a 429 is waited out
+instead of handed to the local one.
+
 The live half below ``main`` is run by hand. Importing this module touches neither
 the network nor a model.
 """
@@ -33,11 +41,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 import time
 from collections import Counter
 from collections.abc import Callable, Sequence
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from datetime import date
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -87,6 +96,21 @@ NO_OPINION = "models (the judge gave no opinion)"
 NOTHING_ESCALATED = "nothing escalated"
 # A row from a results file written before sources were kept: only its label is known.
 UNRECORDED = "not recorded (row has no per-source record)"
+# The two kinds of escalation a source can have been sent to the judge under: the
+# product's own band (``verify.escalates``), and the ``--judge-nei`` probe of an NEI.
+ESCALATED = "escalated"
+NEI_PROBE = "nei"
+# Why the quote check dropped a judge's opinion, keyed by the judge's own note. Read
+# off ``Judge.skipped`` by exact match on the judge's public wording, never by
+# substring, so a note the judge writes for another reason is never counted here.
+DROP_NO_QUOTE = "no quote"
+DROP_TOO_SHORT = "a quoted part under two words"
+DROP_NOT_IN_PASSAGE = "quote not in the passage"
+_DROP_REASONS = {
+    judge_mod.QUOTE_MISSING: DROP_NO_QUOTE,
+    judge_mod.QUOTE_TOO_SHORT: DROP_TOO_SHORT,
+    judge_mod.QUOTE_NOT_FOUND: DROP_NOT_IN_PASSAGE,
+}
 
 
 @dataclass(frozen=True)
@@ -96,8 +120,14 @@ class Source:
     ``step`` is the ladder step that read the page, or the last one tried when it
     failed; ``None`` for a cache hit, which carries no step. ``label`` is the models'
     verdict, ``None`` when nothing was read. ``escalated`` says the verdict sat in the
-    band the product hands the judge (``verify.escalates``); ``judge_label`` and
-    ``judge_model`` are the judge's opinion of it, when one came back.
+    band the product hands the judge (``verify.escalates``); ``probed`` says it was an
+    NEI sent under ``--judge-nei`` with its closest passage. ``judge_label`` and
+    ``judge_model`` are the judge's opinion of it, when one came back; ``dropped`` is
+    why the quote check threw one away (``DROP_NO_QUOTE``, ``DROP_TOO_SHORT``,
+    ``DROP_NOT_IN_PASSAGE``).
+
+    ``probed`` and ``dropped`` are new on 2026-10-05 and default to what an older
+    results file meant without them: no probe, nothing dropped.
     """
 
     url: str
@@ -109,6 +139,18 @@ class Source:
     escalated: bool = False
     judge_label: str | None = None
     judge_model: str | None = None
+    probed: bool = False
+    dropped: str | None = None
+
+    @property
+    def escalation(self) -> str | None:
+        """Which kind of escalation sent this source to the judge, if any.
+
+        Derived from the two flags rather than stored beside them, so it cannot
+        disagree with them, and an older file's ``escalated`` keeps its meaning."""
+        if self.escalated:
+            return ESCALATED
+        return NEI_PROBE if self.probed else None
 
 
 @dataclass(frozen=True)
@@ -152,7 +194,7 @@ def product_label(sources: Sequence[Source]) -> str | None:
     return Label.NEI.value if any(source.label is not None for source in sources) else None
 
 
-def judged_label(sources: Sequence[Source]) -> str | None:
+def judged_label(sources: Sequence[Source], *, probes: bool = False) -> str | None:
     """The claim's label if the judge's opinions decided the low band.
 
     The product never does this (spec section 11.1): this is the column that says
@@ -161,11 +203,15 @@ def judged_label(sources: Sequence[Source]) -> str | None:
     votes with the judge's label, or with the models' label when the judge gave no
     opinion. An NEI vote abstains; the majority of the asserting votes wins, and a
     tie is NEI.
+
+    ``probes`` lets the ``--judge-nei`` probes vote too, by the same rule. A probe's
+    own label is NEI, so a probe the judge did not answer abstains: it can only move
+    the claim through an opinion that passed the quote check.
     """
     confident = [s for s in sources if _asserts(s.label) and not s.escalated]
     if confident:
         return _best(confident).label
-    votes = [s.judge_label or s.label for s in sources if s.escalated]
+    votes = [s.judge_label or s.label for s in sources if s.escalated or (probes and s.probed)]
     tally = Counter(vote for vote in votes if _asserts(vote)).most_common()
     if tally:
         if len(tally) > 1 and tally[0][1] == tally[1][1]:
@@ -193,7 +239,15 @@ def without_browser(sources: Sequence[Source]) -> tuple[Source, ...]:
     """The sources as a run without the browser would have them: the pages the browser
     read are unread. A cache hit has no step, so it is kept (the report counts those)."""
     return tuple(
-        replace(source, label=None, escalated=False, judge_label=None, judge_model=None)
+        replace(
+            source,
+            label=None,
+            escalated=False,
+            judge_label=None,
+            judge_model=None,
+            probed=False,
+            dropped=None,
+        )
         if source.step == BROWSER_STEP and source.label is not None
         else source
         for source in sources
@@ -317,6 +371,29 @@ class Ablation:
 
 
 @dataclass(frozen=True)
+class ProbedScore:
+    """The hypothetical column's second number: the product's band plus the NEI probes
+    (``--judge-nei``), and how it stands against the product claim by claim.
+
+    ``wrong_way`` is (Refuted called SUPPORTED, Supported called REFUTED): the errors
+    that assert the opposite of the truth, which an accuracy gain can hide. The bar in
+    the spec (2026-10-05 section 2.7) is no more false claims called SUPPORTED than the
+    product, so the product's own pair is carried beside it. ``fixed`` and ``broken``
+    are the discordant claims of the McNemar test against the product's outcome.
+    """
+
+    accuracy_3way: float
+    per_label: dict[str, tuple[int, int]]  # gold label -> (n, correct)
+    probed: int  # NEI sources sent with their closest passage
+    unanswered: int  # of those, how many got no opinion back
+    wrong_way: tuple[int, int]
+    product_wrong_way: tuple[int, int]
+    fixed: int  # claims the product got wrong and this got right
+    broken: int  # claims the product got right and this got wrong
+    p_value: float  # exact two-sided McNemar over ``fixed`` and ``broken``
+
+
+@dataclass(frozen=True)
 class JudgedScore:
     """The hypothetical column: what ``judged_label`` would have scored."""
 
@@ -324,9 +401,14 @@ class JudgedScore:
     per_label: dict[str, tuple[int, int]]  # gold label -> (n, correct)
     escalated: int  # sources in the judge's band
     unanswered: int  # of those, how many got no opinion back
-    opinions: Counter[str]  # judge model -> opinions it gave
+    # (judge model, escalation kind) -> opinions it gave: the NEI probes counted
+    # apart from the product's band, so neither number borrows the other's answers.
+    opinions: Counter[tuple[str, str]]
     deciders: dict[str, tuple[int, int]]  # ``judge_decider`` -> (3-way n, correct)
     unrecorded: int  # rows with URLs and no per-source record: scored as the product did
+    # (escalation kind, drop reason) -> opinions the quote check dropped (OPEN-ITEMS 20.9)
+    drops: Counter[tuple[str, str]] = field(default_factory=Counter)
+    probed: ProbedScore | None = None  # ``None`` unless the run had ``--judge-nei``
 
 
 @dataclass(frozen=True)
@@ -393,7 +475,66 @@ def _judged_label_of(row: Row) -> str | None:
     return judged_label(row.sources) if row.sources else row.predicted
 
 
-def _judged(rows: Sequence[Row]) -> JudgedScore:
+def _probes_label_of(row: Row) -> str | None:
+    return judged_label(row.sources, probes=True) if row.sources else row.predicted
+
+
+def _is_right(label: str | None, gold: Label) -> bool:
+    return (Label(label) if label is not None else Label.NEI) is gold
+
+
+def _wrong_way(rows: Sequence[Row], label_of: Callable[[Row], str | None]) -> tuple[int, int]:
+    """(Refuted called SUPPORTED, Supported called REFUTED) under one way of labelling."""
+    refuted_supported = supported_refuted = 0
+    for row in rows:
+        gold = averitec.to_label(row.gold)
+        predicted = label_of(row)
+        refuted_supported += int(gold is Label.REFUTED and predicted == Label.SUPPORTED.value)
+        supported_refuted += int(gold is Label.SUPPORTED and predicted == Label.REFUTED.value)
+    return refuted_supported, supported_refuted
+
+
+def mcnemar_exact(b: int, c: int) -> float:
+    """The exact two-sided McNemar p-value for ``b`` and ``c`` discordant pairs.
+
+    Exact rather than the chi-squared approximation: a hundred claims leave a handful
+    of discordant pairs, which is where the approximation is worst. Under the null
+    each discordant claim is a fair coin, so ``min(b, c)`` is a Binomial(b + c, 1/2)
+    tail, doubled and capped at 1. No discordant pair at all is no evidence: 1.0.
+    """
+    n = b + c
+    if n == 0:
+        return 1.0
+    tail = sum(math.comb(n, i) for i in range(min(b, c) + 1)) / (1 << n)
+    return min(1.0, 2.0 * tail)
+
+
+def _probed(rows: Sequence[Row]) -> ProbedScore:
+    accuracy, per_label = _three_way(rows, _probes_label_of)
+    probes = [s for row in rows for s in row.sources if s.probed]
+    fixed = broken = 0
+    for row in rows:
+        gold = averitec.to_label(row.gold)
+        if gold is None:
+            continue
+        product = _is_right(row.predicted, gold)
+        probed = _is_right(_probes_label_of(row), gold)
+        fixed += int(probed and not product)
+        broken += int(product and not probed)
+    return ProbedScore(
+        accuracy_3way=accuracy,
+        per_label=per_label,
+        probed=len(probes),
+        unanswered=sum(1 for s in probes if s.judge_label is None),
+        wrong_way=_wrong_way(rows, _probes_label_of),
+        product_wrong_way=_wrong_way(rows, lambda row: row.predicted),
+        fixed=fixed,
+        broken=broken,
+        p_value=mcnemar_exact(broken, fixed),
+    )
+
+
+def _judged(rows: Sequence[Row], *, probes: bool = False) -> JudgedScore:
     accuracy, per_label = _three_way(rows, _judged_label_of)
     escalated = [s for row in rows for s in row.sources if s.escalated]
     deciders: dict[str, tuple[int, int]] = {}
@@ -411,14 +552,30 @@ def _judged(rows: Sequence[Row]) -> JudgedScore:
         per_label=per_label,
         escalated=len(escalated),
         unanswered=sum(1 for s in escalated if s.judge_label is None),
-        opinions=Counter(s.judge_model for s in escalated if s.judge_model is not None),
+        opinions=Counter(
+            (s.judge_model, s.escalation)
+            for row in rows
+            for s in row.sources
+            if s.judge_model is not None and s.escalation is not None
+        ),
         deciders=deciders,
         unrecorded=sum(1 for row in rows if _unrecorded(row)),
+        # A dropped opinion was asked for, so its source always has an escalation.
+        drops=Counter(
+            (s.escalation, s.dropped)
+            for row in rows
+            for s in row.sources
+            if s.dropped is not None and s.escalation is not None
+        ),
+        probed=_probed(rows) if probes else None,
     )
 
 
-def score(rows: Sequence[Row], *, judge: bool = False) -> AveritecResult:
+def score(rows: Sequence[Row], *, judge: bool = False, probes: bool = False) -> AveritecResult:
     """Turn decided rows into the numbers the report prints.
+
+    ``probes`` adds the hypothetical column's second number (``--judge-nei``); it means
+    nothing without ``judge``.
 
     A row with no prediction counts as NEI: having fetched nothing, NEI is the only
     thing the run honestly asserted. A row whose gold label is Conflicting can never
@@ -458,7 +615,7 @@ def score(rows: Sequence[Row], *, judge: bool = False) -> AveritecResult:
         archive_urls=archive_urls,
         total_urls=total_urls,
         ablation=_ablation(rows),
-        judged=_judged(rows) if judge else None,
+        judged=_judged(rows, probes=probes) if judge else None,
     )
 
 
@@ -475,11 +632,15 @@ def render_report(
     browser: bool | None = None,
     fresh: bool = False,
     judge: str = "",
+    judge_nei: bool = False,
+    no_fallback: bool = False,
 ) -> str:
     """The markdown skeleton. ``## Notes`` is left for the controller to fill in.
 
     ``browser`` is ``None`` when the run left the browser to the config, so the report
     claims nothing about it; ``judge`` is the judge's name, empty when there was none.
+    ``judge_nei`` and ``no_fallback`` are the run's ``--judge-nei`` and
+    ``--no-fallback``, stated in the header so two setups' reports cannot be confused.
     """
     # ``result.counted`` is the denominator the 3-way accuracy and its baseline are
     # read over. Printed beside `n`, because "0.80 over 100 claims" would otherwise
@@ -500,6 +661,13 @@ def render_report(
             else "writes the search queries; its opinions are the hypothetical column below"
         )
         lines.append(f"- judge: {judge} ({role})")
+        if judge_nei:
+            lines.append(
+                "- NEI probes: on (every read NEI source was also sent to the judge, "
+                "with its closest passage)"
+            )
+        if no_fallback:
+            lines.append("- judge fallback: off (every opinion is from the configured model)")
     lines += [
         f"- dataset: `{averitec.URL}`  (sha256 {averitec.SHA256[:12]}…)",
         "- one run of the whole product: real claims, real source pages, real fetch ladder.",
@@ -607,43 +775,127 @@ def _judged_lines(judged: JudgedScore, *, product: float) -> list[str]:
     for label in [label for label in averitec.LABELS if label in judged.per_label]:
         seen, right = judged.per_label[label]
         lines.append(_md_row(label, seen, right, f"{right / seen:.3f}" if seen else "—"))
-    lines.extend(["", "| judge model | opinions |", "|---|---|"])
-    for model, count in judged.opinions.most_common():
-        lines.append(_md_row(model, count))
+    lines.extend(["", "| judge model | escalation | opinions |", "|---|---|---|"])
+    for (model, kind), count in judged.opinions.most_common():
+        lines.append(_md_row(model, kind, count))
     if not judged.opinions:
-        lines.append(_md_row("none", 0))
+        lines.append(_md_row("none", "—", 0))
     lines.extend(["", "| decided by | n | correct | accuracy |", "|---|---|---|---|"])
     for decider, (seen, right) in sorted(judged.deciders.items()):
         lines.append(_md_row(decider, seen, right, f"{right / seen:.3f}" if seen else "—"))
+    if judged.probed is not None:
+        lines.extend(_probed_lines(judged.probed, product=product))
+    lines.extend(_drop_lines(judged.drops))
+    return lines
+
+
+def _wrong_way_text(pair: tuple[int, int]) -> str:
+    return f"{sum(pair)} ({pair[0]} + {pair[1]})"
+
+
+def _probed_lines(probed: ProbedScore, *, product: float) -> list[str]:
+    """The second hypothetical number. Reading it (spec 2026-10-05 section 2.7): it
+    is a case for escalating NEIs only if the gain clears the noise (p < 0.05) and it
+    calls no more false claims supported than the product does."""
+    lines = [
+        "",
+        "### Band plus NEI probes",
+        "",
+        "`--judge-nei` also sent every read source whose verdict was NEI to the judge, "
+        "as NEI at low tier, with the passage the models came closest to deciding on. "
+        "Here those opinions vote too, by the same rule; a probe the judge did not "
+        "answer abstains.",
+        "",
+        f"3-way accuracy **{probed.accuracy_3way:.3f}**, against {product:.3f} for the "
+        f"product. {probed.probed} NEI sources were probed; {probed.unanswered} got no "
+        "opinion back.",
+        "",
+        f"Against the product, claim by claim: {probed.fixed} fixed, {probed.broken} "
+        f"broken (exact McNemar, two-sided p = {probed.p_value:.3f}).",
+        "",
+        "Refuted called SUPPORTED plus Supported called REFUTED, the "
+        f"wrong way: {_wrong_way_text(probed.wrong_way)} with the probes, against "
+        f"{_wrong_way_text(probed.product_wrong_way)} for the product.",
+        "",
+        "| label | n | correct | accuracy |",
+        "|---|---|---|---|",
+    ]
+    for label in [label for label in averitec.LABELS if label in probed.per_label]:
+        seen, right = probed.per_label[label]
+        lines.append(_md_row(label, seen, right, f"{right / seen:.3f}" if seen else "—"))
+    return lines
+
+
+def _drop_lines(drops: Counter[tuple[str, str]]) -> list[str]:
+    lines = [
+        "",
+        "### Dropped by the quote check",
+        "",
+        "A SUPPORTED or REFUTED opinion whose quote is not in the passage it was shown "
+        "is dropped (OPEN-ITEMS 20.9), and the source then counts as unanswered above.",
+        "",
+        "| escalation | reason | dropped |",
+        "|---|---|---|",
+    ]
+    for (kind, reason), count in sorted(drops.items()):
+        lines.append(_md_row(kind, reason, count))
+    if not drops:
+        lines.append(_md_row("none", "—", 0))
     return lines
 
 
 # --- live half: run by hand, not covered by tests ------------------------
 
 
-def _setup_suffix(*, browser: bool, judge: bool, fresh: bool) -> str:
-    """What sets this run apart from the legacy setup, for its file names."""
+def _setup_suffix(
+    *, browser: bool, judge: bool, fresh: bool, judge_nei: bool = False, no_fallback: bool = False
+) -> str:
+    """What sets this run apart from the legacy setup, for its file names.
+
+    ``-judge-nei`` takes the place of ``-judge``, which it requires, rather than
+    following it: ``-judge-judge-nei`` would say the same thing twice."""
+    judged = "-judge-nei" if judge_nei else "-judge" if judge else ""
     return (
-        ("-browser" if browser else "") + ("-judge" if judge else "") + ("-fresh" if fresh else "")
+        ("-browser" if browser else "")
+        + judged
+        + ("-nofallback" if no_fallback else "")
+        + ("-fresh" if fresh else "")
     )
 
 
 def _results_path(
-    *, search: bool, browser: bool = False, judge: bool = False, fresh: bool = False
+    *,
+    search: bool,
+    browser: bool = False,
+    judge: bool = False,
+    fresh: bool = False,
+    judge_nei: bool = False,
+    no_fallback: bool = False,
 ) -> Path:
     """One file per run setup, so a resume does not mix rows from two setups. The
     legacy names stay the runs made without ``--browser``, ``--judge`` or ``--fresh``;
     they are shared by ``--no-browser`` and by a run that leaves the browser to the
     config, as they always were, so that older files can still be resumed."""
     name = Path(SEARCH_RESULTS_NAME if search else RESULTS_NAME)
-    suffix = _setup_suffix(browser=browser, judge=judge, fresh=fresh)
+    suffix = _setup_suffix(
+        browser=browser, judge=judge, fresh=fresh, judge_nei=judge_nei, no_fallback=no_fallback
+    )
     return cache_dir() / "datasets" / f"{name.stem}{suffix}{name.suffix}"
 
 
-def _report_path(*, day: str, search: bool, browser: bool, judge: bool, fresh: bool) -> Path:
+def _report_path(
+    *,
+    day: str,
+    search: bool,
+    browser: bool,
+    judge: bool,
+    fresh: bool,
+    judge_nei: bool = False,
+    no_fallback: bool = False,
+) -> Path:
     """The default ``--out``: one report per run setup, so two runs on one day keep both."""
     suffix = ("-search" if search else "") + _setup_suffix(
-        browser=browser, judge=judge, fresh=fresh
+        browser=browser, judge=judge, fresh=fresh, judge_nei=judge_nei, no_fallback=no_fallback
     )
     return Path("docs/eval") / f"{day}-averitec{suffix}.md"
 
@@ -695,6 +947,7 @@ def _decide_claim(
     anonymous: bool = False,
     fresh: bool = False,
     judge: Judge | None = None,
+    judge_nei: bool = False,
 ) -> Row:
     """Fetch every source of one claim and keep the strongest non-NEI verdict.
 
@@ -702,11 +955,14 @@ def _decide_claim(
     as the product fetches them (round 2). ``fresh`` climbs past the cache, so every
     source keeps the step that read it. ``judge`` is asked about the sources whose
     verdict sits in the product's escalation band; its opinions are recorded beside
-    the verdicts and never change ``predicted`` (spec section 11.1)."""
+    the verdicts and never change ``predicted`` (spec section 11.1). ``judge_nei`` also
+    asks it about every read NEI source, shown the closest passage (OPEN-ITEMS 20.13)."""
     states: list[str] = []
     sources: list[Source] = []
     # What the judge is shown for each escalated source, by its index in ``sources``.
     escalated: dict[int, Verdict] = {}
+    # The closest passage of each NEI source probed under ``judge_nei``, the same way.
+    probes: dict[int, Passage] = {}
     for url in claim.source_urls:
         # Before every fetch, not between them: the ladder has no crawl delay of its
         # own, so this is the whole of the run's politeness and it has to hold across
@@ -724,7 +980,9 @@ def _decide_claim(
             Passage(sentence, url, ordinal)
             for ordinal, sentence in enumerate(retrieval.split_sentences(fetched.text))
         ]
-        verdict = pipeline.decide(
+        # ``decide``'s verdict, unchanged, and the passage an NEI verdict drops: one
+        # embedding and one scoring for both, so a probe never re-reads the page.
+        verdict, nearest = pipeline.decide_closest(
             claim.text,
             passages,
             engine.get_embedder(),
@@ -732,8 +990,13 @@ def _decide_claim(
             k=engine.k,
             thresholds=engine.thresholds,
         )
+        index = len(sources)
         if escalates(verdict):
-            escalated[len(sources)] = verdict
+            escalated[index] = verdict
+        elif judge is not None and judge_nei and verdict.label is Label.NEI and nearest is not None:
+            # No closest passage means nothing scored above zero: there is no passage
+            # to show, and asking without one is what rule 1 forbids.
+            probes[index] = nearest
         # A source whose verdict is NEI was still read: it stays in the row, and
         # ``product_label`` keeps only assertions, each with the passage it rests on
         # (product rule 1, enforced by ``Verdict`` itself).
@@ -746,10 +1009,11 @@ def _decide_claim(
                 score=verdict.score,
                 tier=verdict.tier,
                 escalated=escalates(verdict),
+                probed=index in probes,
             )
         )
-    if judge is not None and escalated:
-        sources = _ask_judge(judge, claim.text, sources, escalated)
+    if judge is not None and (escalated or probes):
+        sources = _ask_judge(judge, claim.text, sources, escalated, probes)
     # One state per value the dataset gave, fetchable or not, so the coverage table
     # accounts for every annotation rather than only the ones we could try.
     states.extend([NOT_A_URL] * claim.non_urls)
@@ -766,30 +1030,59 @@ def _decide_claim(
 
 
 def _ask_judge(
-    judge: Judge, claim: str, sources: list[Source], escalated: dict[int, Verdict]
+    judge: Judge,
+    claim: str,
+    sources: list[Source],
+    escalated: dict[int, Verdict],
+    probes: dict[int, Passage] | None = None,
 ) -> list[Source]:
     """The judge's opinion on each escalated source, shown exactly what ``verify``
-    shows it: the claim, the passage, the models' verdict and its tier."""
-    items = [
-        judge_mod.JudgeItem(
-            id=f"s{index}",
-            claim=claim,
-            passage=verdict.passage.text,
-            verdict=verdict.label,
-            tier=verdict.tier,
+    shows it: the claim, the passage, the models' verdict and its tier.
+
+    A probe is shown its closest passage as an NEI at ``low``, which is what the
+    product would send were it to escalate NEIs. Both kinds go in one ``review``, and
+    an opinion the quote check dropped is recorded on its source by reason."""
+    shown: dict[int, judge_mod.JudgeItem] = {}
+    for index, verdict in escalated.items():
+        if verdict.passage is not None:  # ``escalates`` already refused the others
+            shown[index] = judge_mod.JudgeItem(
+                id=f"s{index}",
+                claim=claim,
+                passage=verdict.passage.text,
+                verdict=verdict.label,
+                tier=verdict.tier,
+            )
+    for index, passage in (probes or {}).items():
+        shown[index] = judge_mod.JudgeItem(
+            id=f"s{index}", claim=claim, passage=passage.text, verdict=Label.NEI, tier="low"
         )
-        for index, verdict in escalated.items()
-        if verdict.passage is not None  # ``escalates`` already refused the others
-    ]
-    opinions = judge.review(items)
+    opinions = judge.review([shown[index] for index in sorted(shown)])
+    # Read straight after the call: ``review`` resets ``skipped`` on every call, so
+    # these are this claim's notes and no other's.
+    dropped = _drops(judge.skipped)
     answered = list(sources)
-    for index in escalated:
+    for index in shown:
         opinion = opinions.get(f"s{index}")
         if opinion is not None:
             answered[index] = replace(
                 sources[index], judge_label=opinion.label.value, judge_model=opinion.model
             )
+        elif f"s{index}" in dropped:
+            answered[index] = replace(sources[index], dropped=dropped[f"s{index}"])
     return answered
+
+
+def _drops(skipped: Sequence[str]) -> dict[str, str]:
+    """Item id -> why the quote check dropped its opinion, from ``Judge.skipped``.
+
+    The judge writes ``"<id>: <reason>"`` for a quote it refused; every other note is
+    about something else (no JSON, an unknown id, no rationale) and is left out."""
+    found: dict[str, str] = {}
+    for note in skipped:
+        ident, separator, reason = note.partition(": ")
+        if separator and reason in _DROP_REASONS:
+            found[ident] = _DROP_REASONS[reason]
+    return found
 
 
 NLI_PROFILE: NliProfileName = "default"
@@ -813,6 +1106,18 @@ def main(argv: list[str] | None = None) -> int:
         help="ask the configured judge about the escalated verdicts (a hypothetical column)",
     )
     parser.add_argument(
+        "--judge-nei",
+        action="store_true",
+        help="also send every read NEI source to the judge with its closest passage "
+        "(requires --judge; a second hypothetical number)",
+    )
+    parser.add_argument(
+        "--no-fallback",
+        action="store_true",
+        help="never switch the judge to its local fallback, so every opinion is from "
+        "the configured model (requires --judge; sets judge.fallback = off for this run)",
+    )
+    parser.add_argument(
         "--fresh",
         action="store_true",
         help="fetch every page live, past the cache, so each source keeps its ladder step",
@@ -826,10 +1131,23 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--out", default="")
     args = parser.parse_args(argv)
+    if args.judge_nei and not args.judge:
+        # A usage error, not a silent no-op: a run asked to probe the NEIs that had no
+        # judge to probe them with would report a column it never measured.
+        parser.error("--judge-nei requires --judge")
+    if args.no_fallback and not args.judge:
+        # The same refusal: with no judge there is no fallback to turn off, and the
+        # "-nofallback" file name would label a run that is the plain one.
+        parser.error("--no-fallback requires --judge")
+    setup = {
+        "browser": args.browser,
+        "judge": args.judge,
+        "fresh": args.fresh,
+        "judge_nei": args.judge_nei,
+        "no_fallback": args.no_fallback,
+    }
 
-    results = _results_path(
-        search=args.search, browser=args.browser, judge=args.judge, fresh=args.fresh
-    )
+    results = _results_path(search=args.search, **setup)
     if results.exists() and not args.resume:
         # The file is the only record of a run that costs hours of network; a fresh
         # run must not quietly replace it. Checked before anything is downloaded, so
@@ -842,6 +1160,10 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     config = load_config()
+    if args.no_fallback:
+        # On the config the judge is built from, so ``build_client`` hands its
+        # ``FallbackClient`` "off" and a 429 is waited out on the configured model.
+        config = replace(config, judge=replace(config.judge, fallback=judge_mod.FALLBACK_OFF))
     key: judge_mod.ApiKey | None = None
     if args.judge:
         # Checked before anything is downloaded, as the CLI's ``--judge`` checks it: a
@@ -911,7 +1233,14 @@ def main(argv: list[str] | None = None) -> int:
                 continue
             if searcher is None:
                 stored.append(
-                    _decide_claim(engine, claim, sleep=args.sleep, fresh=args.fresh, judge=judge)
+                    _decide_claim(
+                        engine,
+                        claim,
+                        sleep=args.sleep,
+                        fresh=args.fresh,
+                        judge=judge,
+                        judge_nei=args.judge_nei,
+                    )
                 )
             else:
                 # The gold URLs are the answer key; search mode reads what evidence
@@ -938,6 +1267,7 @@ def main(argv: list[str] | None = None) -> int:
                             anonymous=True,
                             fresh=args.fresh,
                             judge=judge,
+                            judge_nei=args.judge_nei,
                         )
                     )
             scored += 1
@@ -968,26 +1298,22 @@ def main(argv: list[str] | None = None) -> int:
     wanted = {claim.id for claim in claims}
     rows = [row for row in stored if row.claim_id in wanted]
     report = render_report(
-        score(rows, judge=args.judge),
+        score(rows, judge=args.judge, probes=args.judge_nei),
         date=date.today().isoformat(),
         limit=args.limit,
         path=path,
         browser=browser,
         fresh=args.fresh,
         judge=judge_name,
+        judge_nei=args.judge_nei,
+        no_fallback=args.no_fallback,
     )
     print()
     print(report)
     out = (
         Path(args.out)
         if args.out
-        else _report_path(
-            day=date.today().isoformat(),
-            search=args.search,
-            browser=args.browser,
-            judge=args.judge,
-            fresh=args.fresh,
-        )
+        else _report_path(day=date.today().isoformat(), search=args.search, **setup)
     )
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(report, encoding="utf-8")

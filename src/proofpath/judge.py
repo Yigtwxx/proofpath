@@ -22,6 +22,7 @@ import re
 import string
 import threading
 import time
+import unicodedata
 from collections.abc import Callable, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, replace
@@ -1318,6 +1319,11 @@ class JudgeOpinion:
     label: Label
     rationale: str
     model: str
+    # The passage's own words the opinion rests on, as the judge wrote them less their
+    # wrapping, and only once ``quote_problem`` found them in the passage it was shown
+    # (OPEN-ITEMS 20.9). Empty for an NEI that quoted nothing or quoted wrongly. Last
+    # and defaulted, so every existing construction and JSON reader keeps working.
+    quote: str = ""
 
 
 @dataclass(frozen=True)
@@ -1357,6 +1363,14 @@ TOKEN_CAP = 3500
 # sentence each for a review, a few sentences for a summary.
 _REASONING_EFFORT = "low"
 _REVIEW_TOKENS = 4096
+# What one opinion costs to write, budgeted rather than measured: ``{"id", "label",
+# "rationale", "quote"}`` with a one-sentence rationale and a clause-long quote is
+# ~50 tokens by ``estimate_tokens`` (a test pins a typical one), and this doubles it
+# for the long quote. ``BATCH_SIZE`` opinions then take 20 x 100 = 2000 tokens, under
+# half of ``_REVIEW_TOKENS`` (2048): the other half is the reasoning model's thinking,
+# which it charges to the same ``max_tokens``. ``BATCH_SIZE`` is the per-batch item
+# cap that holds this; raising either number has to keep the product under 2048.
+_OPINION_TOKENS = 100
 _SUMMARY_TOKENS = 1500
 
 # Groq is the default because it does not train on submitted prompts. Gemini does,
@@ -1380,8 +1394,11 @@ _REVIEW_SCHEMA: dict[str, Any] = {
                     "id": {"type": "string"},
                     "label": {"type": "string", "enum": [label.value for label in Label]},
                     "rationale": {"type": "string"},
+                    # The deciding words, copied from the passage: checked by
+                    # ``quote_problem`` for an asserting label (OPEN-ITEMS 20.9).
+                    "quote": {"type": "string"},
                 },
-                "required": ["id", "label", "rationale"],
+                "required": ["id", "label", "rationale", "quote"],
                 "additionalProperties": False,
             },
         }
@@ -1452,6 +1469,167 @@ def _split_prompt(text: str) -> tuple[str, str]:
 def _one_line(text: str) -> str:
     """Whitespace folded, so one item stays one block the model can count."""
     return " ".join(text.split())
+
+
+# --- the quote check (OPEN-ITEMS 20.9, spec 2026-10-05 section 1) ----------------
+#
+# The prompt has always asked for the deciding words verbatim; nothing checked that
+# they were. A judge answering from memory, or paraphrasing, still had its opinion
+# printed beside the verdict -- and rule 1 ("never assert without a passage") binds
+# the judge as much as the pipeline. So the words now come back in their own field
+# and are looked for in the passage the item carried. The notes are public because
+# ``scripts/eval_averitec.py`` counts drops by reason off ``Judge.skipped``: a
+# reworded note would quietly count none.
+QUOTE_MISSING = "no quoted words came back; opinion dropped"
+QUOTE_TOO_SHORT = "a quoted part is shorter than two words; opinion dropped"
+QUOTE_NOT_FOUND = "the quoted words are not in the passage; opinion dropped"
+
+# A part has to carry at least this many words. One word -- "the", "e", a "5" -- is in
+# almost every passage, so finding it proves nothing about where the opinion came from.
+_MIN_QUOTE_WORDS = 2
+# A number or a contraction is one word however it is written: "43,000", "3.2" and
+# "it's" each count once, so a bare figure cannot pass for a two-word quote.
+_WORD = re.compile(r"\w+(?:[.,']\w+)*")
+# What glues a number to its neighbours. A quote that starts at a digit must not begin
+# right after a sign or after a digit and its separator ("1.2", "43,000", "-3.2"); one
+# that ends at a digit must not stop before a separator and a digit, or a percent sign.
+_SIGNS = "+-"
+_SEPARATORS = ".,"
+# Typography a model does not reproduce reliably: curly quotes become straight ones,
+# the fraction slash a slash. Dashes, spaces and format characters go by Unicode
+# category in ``_fold_char``, so this table does not have to list every one of them.
+_STRAIGHT = {
+    "\u2018": "'",
+    "\u2019": "'",
+    "\u201a": "'",
+    "\u201b": "'",
+    "\u201c": '"',
+    "\u201d": '"',
+    "\u201e": '"',
+    "\u201f": '"',
+    "\u2044": "/",
+}
+_ELLIPSIS = re.compile(r"\.\.\.|\u2026")
+# What ``_trim`` may take off a quote's ends: quote marks, brackets and sentence
+# punctuation, which are the model's wrapping and not the passage's words. Never ``-``,
+# ``%`` or ``+``: a minus-sign "3.2%" trimmed to "3.2" would match a passage that says
+# the opposite.
+_WRAPPING = frozenset(
+    "\"'`"  # straight quote marks
+    "\u2018\u2019\u201a\u201b\u201c\u201d\u201e\u201f"  # curly ones, before folding
+    "\u00ab\u00bb\u2039\u203a"  # guillemets
+    "()[]{}"  # brackets
+    ".,;:!?"  # sentence punctuation
+)
+
+
+def _fold_char(char: str) -> str:
+    if char in _STRAIGHT:
+        return _STRAIGHT[char]
+    if char == "\u2212":
+        # The minus sign is a math symbol to Unicode, but a model types it as "-".
+        return "-"
+    category = unicodedata.category(char)
+    if category == "Pd":
+        return "-"
+    if category == "Zs":  # every space separator, the no-break space among them
+        return " "
+    if category == "Cf":  # soft hyphen, zero-width space: invisible on the page
+        return ""
+    return char
+
+
+def _fold(text: str) -> str:
+    """One normalisation for both sides of the match.
+
+    NFC, then explicit folds and nothing else: NFKC would also turn "10\u2076" into
+    "106" and make a superscript a false numeric match. Casefolding stays, as a
+    documented limit: "MW" and "mW" fold to the same words. Casefolding also turns
+    the "\ufb01" ligature into "fi", so that one matches; full-width letters are not
+    folded.
+    """
+    text = "".join(_fold_char(char) for char in unicodedata.normalize("NFC", text))
+    return " ".join(text.split()).casefold()
+
+
+def _trim(part: str) -> str:
+    """A quote part without the whitespace, quote marks, brackets and sentence
+    punctuation around it."""
+    start, end = 0, len(part)
+    while start < end and (part[start].isspace() or part[start] in _WRAPPING):
+        start += 1
+    while end > start and (part[end - 1].isspace() or part[end - 1] in _WRAPPING):
+        end -= 1
+    return part[start:end]
+
+
+def _glued_before(haystack: str, needle: str, found: int) -> bool:
+    if found == 0:
+        return False
+    before = haystack[found - 1]
+    if before.isalnum():
+        return True
+    if not needle[0].isdigit():
+        return False
+    # "2 million" in "1.2 million", "000" in "43,000", "3.2%" in "-3.2%". A dash right
+    # after a digit is a range ("2019-2020"), not a sign, so "2020 season" still stands.
+    after_digit = found >= 2 and haystack[found - 2].isdigit()
+    return (before in _SIGNS and not after_digit) or (before in _SEPARATORS and after_digit)
+
+
+def _glued_after(haystack: str, needle: str, after: int) -> bool:
+    if after == len(haystack):
+        return False
+    following = haystack[after]
+    if following.isalnum():
+        return True
+    if not needle[-1].isdigit():
+        return False
+    # "1" in "1.5", "3" in "3%".
+    return following == "%" or (
+        following in _SEPARATORS and after + 1 < len(haystack) and haystack[after + 1].isdigit()
+    )
+
+
+def _find_words(haystack: str, needle: str, start: int) -> int:
+    """Where ``needle`` first occurs in ``haystack`` at or after ``start`` with nothing
+    glued to either end, or -1. "5 million" is not in "15 million", "ploy" is not in
+    "unemployment", and a number's own sign, separators and percent sign belong to it:
+    "2 million" is not in "1.2 million", nor "3.2%" in "-3.2%"."""
+    found = haystack.find(needle, start)
+    while found >= 0:
+        after = found + len(needle)
+        if not _glued_before(haystack, needle, found) and not _glued_after(haystack, needle, after):
+            return found
+        found = haystack.find(needle, found + 1)
+    return -1
+
+
+def quote_problem(quote: str, passage: str) -> str | None:
+    """Why ``quote`` does not stand as the passage's own words, or ``None`` when it does.
+
+    Exact after ``_fold`` on both sides, nothing looser: a fuzzy match would let the
+    paraphrase through, and the paraphrase is what this check exists to catch. An
+    ellipsis splits the quote; every part must be at least two words, and must occur
+    in the passage at word boundaries, in order and without overlapping, so a model
+    may elide the middle of a sentence but not stitch scraps together. The checks run
+    in that order: ``QUOTE_MISSING`` when there is not a word in it,
+    ``QUOTE_TOO_SHORT`` when a part is one word, ``QUOTE_NOT_FOUND`` otherwise.
+    """
+    parts = [_trim(part) for part in _ELLIPSIS.split(_fold(quote))]
+    parts = [part for part in parts if part]
+    if not any(_WORD.search(part) for part in parts):
+        return QUOTE_MISSING
+    if any(len(_WORD.findall(part)) < _MIN_QUOTE_WORDS for part in parts):
+        return QUOTE_TOO_SHORT
+    haystack = _fold(passage)
+    position = 0
+    for part in parts:
+        found = _find_words(haystack, part, position)
+        if found < 0:
+            return QUOTE_NOT_FOUND
+        position = found + len(part)
+    return None
 
 
 class Judge:
@@ -1717,7 +1895,8 @@ class Judge:
             ids = ", ".join(item.id for item in batch)
             self.skipped.append(f"the judge's answer was not JSON; {len(batch)} items ({ids})")
             return
-        known = {item.id for item in batch}
+        passages = {item.id: item.passage for item in batch}
+        known = set(passages)
         for entry in payload:
             if not isinstance(entry, dict):
                 self.skipped.append(f"an opinion was {type(entry).__name__}, not an object")
@@ -1739,10 +1918,21 @@ class Judge:
                 # Rule 1 applies to the judge too: no quoted reason, no opinion.
                 self.skipped.append(f"{ident} came back with no rationale")
                 continue
+            # Rule 1 again, now checked rather than asked for (OPEN-ITEMS 20.9): an
+            # opinion that asserts must quote the passage it was shown. NEI asserts
+            # nothing and owes no quote, but keeps one only if it passed, so a quote
+            # the report shows is always a checked one. ``or ""`` so a JSON null is
+            # no quote, not the four letters "None".
+            raw = _one_line(str(entry.get("quote") or ""))
+            problem = quote_problem(raw, passages[ident])
+            if problem is not None and label is not Label.NEI:
+                self.skipped.append(f"{ident}: {problem}")
+                continue
             # Named by the answer, not by ``self.name`` read now: the client may have
             # changed hands since this answer left it (judge-cooldown review).
             by = completion.by or self.name
-            into[ident] = JudgeOpinion(label=label, rationale=rationale, model=by)
+            quote = _trim(raw) if problem is None else ""
+            into[ident] = JudgeOpinion(label=label, rationale=rationale, model=by, quote=quote)
 
 
 def _render(item: JudgeItem) -> str:

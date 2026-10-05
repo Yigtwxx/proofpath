@@ -99,6 +99,39 @@ _SUPPORTED = LABEL_ORDER.index(Label.SUPPORTED)
 _REFUTED = LABEL_ORDER.index(Label.REFUTED)
 
 
+@dataclass(frozen=True)
+class Closest:
+    """The strongest SUPPORTED / REFUTED signal among the scored hits, decided or not.
+
+    Never a verdict: ``aggregate`` turns it into one, and below ``decide`` that verdict
+    is NEI and carries no passage (product rule 1). ``passage`` is ``None`` only when
+    no hit scored above zero for either label, and ``label`` is then NEI.
+    """
+
+    label: Label
+    score: float
+    passage: Passage | None
+
+
+def closest(hits: Sequence[Hit], probs: np.ndarray) -> Closest:
+    """The passage the models came closest to deciding on, and the label and score
+    they came closest with.
+
+    Split out of ``aggregate`` so the AVeriTeC eval can show an NEI's passage to the
+    judge (OPEN-ITEMS 20.13) by the very rule that picks a decided verdict's passage:
+    a second copy of the loop could drift from this one, and the eval would then probe
+    a passage the product would never have chosen. The first hit wins a tie, as it
+    always did.
+    """
+    best = Closest(Label.NEI, 0.0, None)
+    for hit, row in zip(hits, probs, strict=True):
+        for label, column in ((Label.SUPPORTED, _SUPPORTED), (Label.REFUTED, _REFUTED)):
+            value = float(row[column])
+            if value > best.score:
+                best = Closest(label, value, hit.passage)
+    return best
+
+
 def aggregate(
     hits: Sequence[Hit],
     probs: np.ndarray,
@@ -106,18 +139,10 @@ def aggregate(
     thresholds: Thresholds = DEFAULT_THRESHOLDS,
 ) -> Verdict:
     """Let the strongest SUPPORTED / REFUTED signal among the scored hits decide."""
-    best_label = Label.NEI
-    best_score = 0.0
-    best_passage: Passage | None = None
-    for hit, row in zip(hits, probs, strict=True):
-        for label, column in ((Label.SUPPORTED, _SUPPORTED), (Label.REFUTED, _REFUTED)):
-            value = float(row[column])
-            if value > best_score:
-                best_label, best_score, best_passage = label, value, hit.passage
-
-    if best_score < thresholds.decide:
-        return Verdict(Label.NEI, best_score, "low", None)
-    return Verdict(best_label, best_score, thresholds.tier(best_score), best_passage)
+    best = closest(hits, probs)
+    if best.score < thresholds.decide:
+        return Verdict(Label.NEI, best.score, "low", None)
+    return Verdict(best.label, best.score, thresholds.tier(best.score), best.passage)
 
 
 def decide_indexed(
@@ -134,9 +159,25 @@ def decide_indexed(
     The index is built once per source and reused for every claim that cites it, so
     a document's passages are embedded once per run, not once per claim.
     """
+    verdict, _ = _decide_indexed(claim, index, embedder, scorer, k=k, thresholds=thresholds)
+    return verdict
+
+
+def _decide_indexed(
+    claim: str,
+    index: PassageIndex,
+    embedder: Embedder,
+    scorer: Scorer,
+    *,
+    k: int,
+    thresholds: Thresholds,
+) -> tuple[Verdict, Passage | None]:
+    """``decide_indexed``'s verdict, and the passage the models came closest to
+    deciding on (``closest``): the verdict's own when it asserts, the one an NEI
+    dropped when it does not. The verdict is the product's, unchanged."""
     hits = rank_indexed(claim, index, embedder, k=k)
     if not hits:
-        return Verdict(Label.NEI, 0.0, "low", None)
+        return Verdict(Label.NEI, 0.0, "low", None), None
 
     # Numbers first (spec section 10): a contradicting figure is decided by rule,
     # with both figures named, and never reaches the NLI model.
@@ -145,11 +186,12 @@ def decide_indexed(
         reason = (
             f"numeric mismatch: claim says {numeric.claim_text}, source says {numeric.source_text}"
         )
-        return Verdict(Label.REFUTED, 1.0, "high", numeric.passage, reason=reason)
+        verdict = Verdict(Label.REFUTED, 1.0, "high", numeric.passage, reason=reason)
+        return verdict, numeric.passage
 
     # NLI convention: premise is the source passage, hypothesis is the claim.
     probs = scorer.score([(hit.passage.text, claim) for hit in hits])
-    return aggregate(hits, probs, thresholds=thresholds)
+    return aggregate(hits, probs, thresholds=thresholds), closest(hits, probs).passage
 
 
 def decide(
@@ -167,6 +209,28 @@ def decide(
     index = PassageIndex(dim=embedder.dim)
     index.add(passages, embedder.embed([p.text for p in passages]))
     return decide_indexed(claim, index, embedder, scorer, k=k, thresholds=thresholds)
+
+
+def decide_closest(
+    claim: str,
+    passages: Sequence[Passage],
+    embedder: Embedder,
+    scorer: Scorer,
+    *,
+    k: int,
+    thresholds: Thresholds = DEFAULT_THRESHOLDS,
+) -> tuple[Verdict, Passage | None]:
+    """``decide``'s verdict and the closest passage, from one embedding and one scoring.
+
+    For ``scripts/eval_averitec.py --judge-nei`` (OPEN-ITEMS 20.13), which shows an NEI
+    source's closest passage to the judge. The product never calls it: an NEI verdict
+    there carries no passage, and nothing here changes that.
+    """
+    if not passages:
+        return Verdict(Label.NEI, 0.0, "low", None), None
+    index = PassageIndex(dim=embedder.dim)
+    index.add(passages, embedder.embed([p.text for p in passages]))
+    return _decide_indexed(claim, index, embedder, scorer, k=k, thresholds=thresholds)
 
 
 # Alias for the Phase 1 harness; removed in Phase 9 when the LLM judge lands.

@@ -694,13 +694,24 @@ def _item(ident: str, *, size: int = 238, tier: Tier = "low") -> judge.JudgeItem
     )
 
 
-def _answers(label: str = "NEI", rationale: str = 'the passage says "faster"') -> Any:
-    """Answer every id the request actually carries, so packing decides the shape."""
+def _answers(
+    label: str = "NEI",
+    rationale: str = 'the passage says "faster"',
+    quote: str = "The method is faster",
+) -> Any:
+    """Answer every id the request actually carries, so packing decides the shape.
+
+    The default quote is the opening of every ``_item`` passage, so an asserting
+    label passes the quote check (OPEN-ITEMS 20.9) unless a test says otherwise."""
 
     def respond(request: httpx.Request) -> httpx.Response:
         sent = json.loads(request.content)
         ids = re.findall(r"id: (\S+)", sent["messages"][-1]["content"])
-        payload = {"opinions": [{"id": i, "label": label, "rationale": rationale} for i in ids]}
+        payload = {
+            "opinions": [
+                {"id": i, "label": label, "rationale": rationale, "quote": quote} for i in ids
+            ]
+        }
         return _ok(json.dumps(payload))
 
     return respond
@@ -742,8 +753,12 @@ def test_review_sends_two_messages_and_a_strict_schema() -> None:
     assert sent["response_format"]["json_schema"]["schema"]["properties"]["opinions"]
     # The per-item field the template names is `verdict`: the local label and tier.
     assert "verdict: NEI (low)" in sent["messages"][-1]["content"]
+    # An NEI owes no quote; this one quoted the passage, so it keeps it.
     assert opinions["c1"] == judge.JudgeOpinion(
-        label=Label.NEI, rationale='the passage says "faster"', model="ollama qwen3.5:9b"
+        label=Label.NEI,
+        rationale='the passage says "faster"',
+        model="ollama qwen3.5:9b",
+        quote="The method is faster",
     )
     assert reviewer.cost.calls == 1
     assert not reviewer.unavailable and reviewer.skipped == []
@@ -821,11 +836,13 @@ def test_lenient_parsing_keeps_the_good_opinions_and_notes_the_rest() -> None:
     respx.post(OLLAMA_URL).mock(
         return_value=_ok(
             '```json\n{"opinions": ['
-            '{"id": "c1", "label": "SUPPORTED", "rationale": "it says so"},'
-            '{"id": "nobody", "label": "NEI", "rationale": "x"},'
-            '{"id": "c2", "label": "MAYBE", "rationale": "x"},'
-            '{"id": "c3", "label": "NEI", "rationale": "   "},'
-            '{"id": "c1", "label": "REFUTED", "rationale": "second helping"}'
+            '{"id": "c1", "label": "SUPPORTED", "rationale": "it says so",'
+            ' "quote": "The method is faster"},'
+            '{"id": "nobody", "label": "NEI", "rationale": "x", "quote": ""},'
+            '{"id": "c2", "label": "MAYBE", "rationale": "x", "quote": ""},'
+            '{"id": "c3", "label": "NEI", "rationale": "   ", "quote": ""},'
+            '{"id": "c1", "label": "REFUTED", "rationale": "second helping",'
+            ' "quote": "The method is faster"}'
             "]}\n```"
         )
     )
@@ -854,7 +871,7 @@ def test_becoming_unavailable_mid_way_keeps_what_was_already_gathered() -> None:
     """The judge is an extra opinion: losing it mid-run must not lose the run."""
     respx.post(OLLAMA_URL).mock(
         side_effect=[
-            _ok('{"opinions": [{"id": "c1", "label": "NEI", "rationale": "silent"}]}'),
+            _ok('{"opinions": [{"id": "c1", "label": "NEI", "rationale": "silent", "quote": ""}]}'),
             httpx.Response(401, json={"error": {"message": "Invalid API Key gsk_secret"}}),
         ]
     )
@@ -876,7 +893,7 @@ def test_a_second_review_starts_from_a_clean_state() -> None:
     respx.post(OLLAMA_URL).mock(
         side_effect=[
             httpx.Response(401, json={"error": {"message": "Invalid API Key"}}),
-            _ok('{"opinions": [{"id": "c1", "label": "NEI", "rationale": "silent"}]}'),
+            _ok('{"opinions": [{"id": "c1", "label": "NEI", "rationale": "silent", "quote": ""}]}'),
         ]
     )
     reviewer = judge.Judge(judge.JudgeClient(OLLAMA, None), batch_size=1)
@@ -1063,3 +1080,284 @@ def test_queries_leave_a_reasoning_model_room_to_think_and_answer_five_claims() 
 def test_the_queries_budget_grows_with_the_batch_and_stays_under_its_ceiling() -> None:
     assert judge._queries_budget(1) < judge._queries_budget(5)
     assert judge._queries_budget(1000) == judge._QUERIES_MAX_TOKENS
+
+
+# --- the quote check (OPEN-ITEMS 20.9, spec 2026-10-05 §1) -------------------------
+
+# Curly quotes, an en dash, a double space and a line break: the typography a model
+# does not reproduce when it quotes. Written as escapes so the characters the test is
+# about are visible in the source.
+QUOTED_PASSAGE = (
+    "The vaccine\u2019s efficacy was 95 % \u2013 measured in \u201cphase  3\u201d trials.\n"
+    "Its final results came later."
+)
+NUMBERS = "Unemployment fell to 3.5% in March, and 15 million jobs were added."
+
+
+@pytest.mark.parametrize(
+    ("quote", "passage"),
+    [
+        # Exact.
+        ("The vaccine\u2019s efficacy was 95 %", QUOTED_PASSAGE),
+        # Case, straight quotes for curly ones, a hyphen for the en dash, one space for
+        # the run of two, and the quote's own wrapping quote marks and full stop gone.
+        ('"the vaccine\'s efficacy was 95 % - measured in "phase 3" trials."', QUOTED_PASSAGE),
+        # An ellipsis splits the quote; every part occurs, in order.
+        ("The vaccine\u2019s efficacy ... in \u201cphase 3\u201d trials", QUOTED_PASSAGE),
+        ("efficacy was 95 %\u2026final results came later", QUOTED_PASSAGE),
+        # Numbers at word boundaries.
+        ("15 million", NUMBERS),
+        ("3.5% in March", NUMBERS),
+        ("(3.5% in March)", NUMBERS),  # brackets are the quote's, not the passage's
+        # A soft hyphen, a zero-width space and a no-break space in the passage are
+        # invisible on the page; a model quoting it types none of them.
+        ("unemployment fell to 3.5%", "Unem\u00adployment fell\u200b to 3.5%."),
+        ("15 million jobs", "and 15\u00a0million jobs"),
+        # The fraction slash is a slash.
+        ("1/2 cup of sugar", "Add 1\u20442 cup of sugar."),
+        # A superscript stays a superscript.
+        ("10\u2076 cells", "a dose of 10\u2076 cells per kilogram"),
+        # A negative figure keeps its sign, typed with a hyphen for the minus.
+        ("was \u22123.2%", "growth was -3.2%"),
+        # A documented limit of casefolding: units that differ only in case match.
+        ("output of 5 MW", "an output of 5 mW"),
+    ],
+)
+def test_a_quote_found_in_the_passage_passes(quote: str, passage: str) -> None:
+    assert judge.quote_problem(quote, passage) is None, (quote, passage)
+
+
+@pytest.mark.parametrize(
+    ("quote", "passage"),
+    [
+        # A paraphrase says the same thing in words the passage does not use.
+        ("the vaccine was 95 percent effective", QUOTED_PASSAGE),
+        # The parts of an ellipsis exist, but out of order.
+        ("final results ... the vaccine\u2019s efficacy", QUOTED_PASSAGE),
+        # Words from memory, not from the passage.
+        ("the trial enrolled 43,000 people", QUOTED_PASSAGE),
+        # Two words, but not at a word boundary: "5 million" is inside "15 million".
+        ("5 million", NUMBERS),
+        # NFKC would make the superscript a digit and "10⁶" the number 106.
+        ("106 cells", "a dose of 10\u2076 cells per kilogram"),
+        ("10\u2076 cells", "a dose of 106 cells per kilogram"),
+        # The sign is the claim: neither the minus nor the percent is trimmed away.
+        ("growth was \u22123.2%", "growth was 3.2%"),
+        # A number's own separators and sign glue it to its neighbours (re-review 1):
+        # the tail of "1.2 million" is not "2 million", nor of "43,000" "000".
+        ("2 million people", "about 1.2 million people"),
+        ("000 people", "about 43,000 people"),
+        ("3.2% growth", "a -3.2% growth rate"),
+        ("growth of 1", "growth of 1.5 percent"),
+        ("rose by 3", "rose by 3% last year"),
+    ],
+)
+def test_a_quote_not_in_the_passage_fails(quote: str, passage: str) -> None:
+    assert judge.quote_problem(quote, passage) == judge.QUOTE_NOT_FOUND, (quote, passage)
+
+
+@pytest.mark.parametrize(
+    "quote",
+    [
+        "e",  # a letter of "Unemployment"
+        "the",  # one word that is in nearly every passage
+        "ploy",  # inside "Unemployment", and one token
+        "u ... 1 ... 9",  # every part one token
+        "Unemployment fell ... March",  # a single-word part decides nothing either
+        # A number is one word however it is written (re-review 2).
+        "3.5%",
+        "15 ... 3.5",
+    ],
+)
+def test_a_quote_part_of_fewer_than_two_words_is_too_short(quote: str) -> None:
+    assert judge.quote_problem(quote, NUMBERS) == judge.QUOTE_TOO_SHORT, quote
+
+
+@pytest.mark.parametrize(
+    ("quote", "passage"),
+    [
+        ("43,000 people", "the trial enrolled 43,000 people"),
+        ("1.2 million people", "about 1.2 million people"),
+        ("-3.2% growth", "a -3.2% growth rate"),
+        ("it's effective", "they said it's effective"),
+        # Re-review 3: a sentence-final full stop, a number at either end of the
+        # passage, and the second year of a dashed range all still match.
+        ("rose by 3", "Sales rose by 3. Then they fell."),
+        ("12 people", "12 people came"),
+        ("came to 12", "the total came to 12"),
+        ("2020 season", "the 2019\u20132020 season"),
+    ],
+)
+def test_a_number_or_contraction_quoted_whole_still_matches(quote: str, passage: str) -> None:
+    assert judge.quote_problem(quote, passage) is None, (quote, passage)
+
+
+@pytest.mark.parametrize("quote", ["43,000", "3.2", "it's"])
+def test_a_number_or_contraction_alone_is_one_word(quote: str) -> None:
+    passage = "the trial enrolled 43,000 people; growth was 3.2; it's done"
+    assert judge.quote_problem(quote, passage) == judge.QUOTE_TOO_SHORT, quote
+
+
+@pytest.mark.parametrize("quote", ["", "   ", "...", "\u2026", '""', "\u201c\u201d", " - "])
+def test_an_empty_quote_is_no_quote(quote: str) -> None:
+    assert judge.quote_problem(quote, QUOTED_PASSAGE) == judge.QUOTE_MISSING, repr(quote)
+
+
+def test_the_review_schema_and_prompt_ask_for_the_quote() -> None:
+    item = judge._REVIEW_SCHEMA["properties"]["opinions"]["items"]
+    assert item["properties"]["quote"] == {"type": "string"}
+    # Strict structured output needs every property required.
+    assert set(item["required"]) == set(item["properties"])
+    text = judge.load_prompt("review").substitute(items="ITEMS")
+    assert '"quote"' in text
+    assert "exact words" in text
+
+
+def _one_answer(label: str, quote: str | None) -> httpx.Response:
+    entry: dict[str, str] = {"id": "c1", "label": label, "rationale": "one sentence"}
+    if quote is not None:
+        entry["quote"] = quote
+    return _ok(json.dumps({"opinions": [entry]}))
+
+
+@respx.mock
+@pytest.mark.parametrize("label", ["SUPPORTED", "REFUTED"])
+def test_an_asserting_opinion_whose_quote_is_not_in_the_passage_is_dropped(label: str) -> None:
+    respx.post(OLLAMA_URL).mock(return_value=_one_answer(label, "the method is slower"))
+    reviewer = judge.Judge(judge.JudgeClient(OLLAMA, None))
+
+    assert reviewer.review([_item("c1")]) == {}
+    # The run already prints ``skipped``; this is the line the reader sees.
+    assert reviewer.skipped == ["c1: the quoted words are not in the passage; opinion dropped"]
+    assert not reviewer.unavailable
+
+
+@respx.mock
+@pytest.mark.parametrize("quote", ["", None])
+@pytest.mark.parametrize("label", ["SUPPORTED", "REFUTED"])
+def test_an_asserting_opinion_with_no_quote_is_dropped(label: str, quote: str | None) -> None:
+    respx.post(OLLAMA_URL).mock(return_value=_one_answer(label, quote))
+    reviewer = judge.Judge(judge.JudgeClient(OLLAMA, None))
+
+    assert reviewer.review([_item("c1")]) == {}
+    assert reviewer.skipped == [f"c1: {judge.QUOTE_MISSING}"]
+
+
+@respx.mock
+@pytest.mark.parametrize("quote", ["", None])
+def test_an_nei_opinion_may_quote_nothing(quote: str | None) -> None:
+    """NEI asserts nothing, so it owes no passage (spec §1.2)."""
+    respx.post(OLLAMA_URL).mock(return_value=_one_answer("NEI", quote))
+    reviewer = judge.Judge(judge.JudgeClient(OLLAMA, None))
+
+    opinions = reviewer.review([_item("c1")])
+
+    assert opinions["c1"].label is Label.NEI
+    assert reviewer.skipped == []
+
+
+@respx.mock
+def test_an_asserting_opinion_that_quotes_the_passage_is_kept() -> None:
+    respx.post(OLLAMA_URL).mock(
+        return_value=_one_answer("SUPPORTED", "\u201cthe method is faster.\u201d")
+    )
+    reviewer = judge.Judge(judge.JudgeClient(OLLAMA, None))
+
+    opinions = reviewer.review([_item("c1")])
+
+    # The quote it passed with is kept for the report, without its wrapping marks.
+    assert opinions["c1"] == judge.JudgeOpinion(
+        label=Label.SUPPORTED,
+        rationale="one sentence",
+        model="ollama qwen3.5:9b",
+        quote="the method is faster",
+    )
+    assert reviewer.skipped == []
+
+
+@respx.mock
+def test_the_quote_is_checked_against_its_own_items_passage() -> None:
+    """Two items in one batch: a quote from the other item's passage is not this one's."""
+    respx.post(OLLAMA_URL).mock(
+        return_value=_ok(
+            json.dumps(
+                {
+                    "opinions": [
+                        {"id": "c1", "label": "SUPPORTED", "rationale": "r", "quote": "cats purr"},
+                        {"id": "c2", "label": "SUPPORTED", "rationale": "r", "quote": "cats purr"},
+                    ]
+                }
+            )
+        )
+    )
+    reviewer = judge.Judge(judge.JudgeClient(OLLAMA, None))
+    items = [
+        judge.JudgeItem("c1", "claim", "Dogs bark. Cats purr.", Label.NEI, "low"),
+        judge.JudgeItem("c2", "claim", "Fish swim.", Label.NEI, "low"),
+    ]
+
+    assert set(reviewer.review(items)) == {"c1"}
+    assert reviewer.skipped == [f"c2: {judge.QUOTE_NOT_FOUND}"]
+
+
+@respx.mock
+def test_an_nei_opinion_keeps_only_a_quote_that_passed() -> None:
+    """NEI owes no quote, but a quote shown in the report is always a checked one."""
+    respx.post(OLLAMA_URL).mock(
+        return_value=_ok(
+            json.dumps(
+                {
+                    "opinions": [
+                        {"id": "c1", "label": "NEI", "rationale": "r", "quote": "it is silent"},
+                        {"id": "c2", "label": "NEI", "rationale": "r", "quote": "The method is"},
+                    ]
+                }
+            )
+        )
+    )
+    reviewer = judge.Judge(judge.JudgeClient(OLLAMA, None))
+
+    opinions = reviewer.review([_item("c1"), _item("c2")])
+
+    assert opinions["c1"].quote == ""
+    assert opinions["c2"].quote == "The method is"
+    assert reviewer.skipped == []
+
+
+@respx.mock
+@pytest.mark.parametrize("label", ["SUPPORTED", "REFUTED"])
+def test_a_too_short_quote_drops_an_asserting_opinion(label: str) -> None:
+    respx.post(OLLAMA_URL).mock(return_value=_one_answer(label, "faster"))
+    reviewer = judge.Judge(judge.JudgeClient(OLLAMA, None))
+
+    assert reviewer.review([_item("c1")]) == {}
+    assert reviewer.skipped == [f"c1: {judge.QUOTE_TOO_SHORT}"]
+
+
+def test_the_item_cap_leaves_half_the_answer_budget_unspent() -> None:
+    """Every opinion now carries a quote. A typical one is ~50 tokens (estimated
+    below); ``_OPINION_TOKENS`` budgets double that for a long quote, and a full batch
+    of them has to fit in half of ``_REVIEW_TOKENS``: the other half is the reasoning
+    model's thinking, which it charges to the same budget."""
+    typical = json.dumps(
+        {
+            "id": "c19",
+            "label": "SUPPORTED",
+            "rationale": "The passage gives the same rate for the same month as the claim does.",
+            "quote": "unemployment fell to 3.5% in March, the lowest rate since 1969",
+        }
+    )
+    assert judge.estimate_tokens(typical) <= judge._OPINION_TOKENS // 2 + 10
+    assert judge.BATCH_SIZE * judge._OPINION_TOKENS <= judge._REVIEW_TOKENS // 2
+
+
+@respx.mock
+def test_a_default_judge_splits_a_batch_at_the_item_cap() -> None:
+    route = respx.post(OLLAMA_URL).mock(side_effect=_answers())
+    reviewer = judge.Judge(judge.JudgeClient(OLLAMA, None), token_cap=10**6)
+
+    opinions = reviewer.review([_item(f"c{n}", size=10) for n in range(judge.BATCH_SIZE + 1)])
+
+    assert route.call_count == 2
+    assert len(opinions) == judge.BATCH_SIZE + 1
+    assert [len(re.findall(r"id: (\S+)", p)) for p in _prompts(route)] == [judge.BATCH_SIZE, 1]

@@ -659,29 +659,110 @@ def test_migrating_a_v1_file_adds_the_lookup_tables(tmp_path: Path) -> None:
 # --- judgements (schema v4) ------------------------------------------------------
 
 OPINION = JudgeOpinion(
-    label=Label.SUPPORTED, rationale='the passage says "cats purr"', model="groq gpt-oss"
+    label=Label.SUPPORTED,
+    rationale='the passage says "cats purr"',
+    model="groq gpt-oss",
+    quote="cats purr when content",
 )
+# The passage the judge was shown: part of the judgement's key (OPEN-ITEMS 20.9 review).
+PASSAGE = "Cats purr when content."
 
 
 def test_a_judgement_round_trips_and_is_keyed_by_the_judge_model(db: Cache) -> None:
     db.add_source(
         "s", scheme="academic", title="", url="", text_kind="abstract", raw_text=RAW, now=NOW
     )
-    db.put_judgement("h", "s", "groq gpt-oss", OPINION, now=NOW)
-    assert db.get_judgement("h", "s", "groq gpt-oss") == OPINION
+    db.put_judgement("h", "s", "groq gpt-oss", OPINION, passage=PASSAGE, now=NOW)
+    assert db.get_judgement("h", "s", "groq gpt-oss", passage=PASSAGE) == OPINION
     # Another judge has not been asked; absence of its opinion is not an opinion.
-    assert db.get_judgement("h", "s", "ollama qwen3.5:9b") is None
-    assert db.get_judgement("other", "s", "groq gpt-oss") is None
+    assert db.get_judgement("h", "s", "ollama qwen3.5:9b", passage=PASSAGE) is None
+    assert db.get_judgement("other", "s", "groq gpt-oss", passage=PASSAGE) is None
 
 
 def test_a_second_opinion_from_the_same_judge_replaces_the_first(db: Cache) -> None:
     db.add_source(
         "s", scheme="academic", title="", url="", text_kind="abstract", raw_text=RAW, now=NOW
     )
-    db.put_judgement("h", "s", "groq gpt-oss", OPINION, now=NOW)
+    db.put_judgement("h", "s", "groq gpt-oss", OPINION, passage=PASSAGE, now=NOW)
     later = JudgeOpinion(label=Label.NEI, rationale="on reflection, silent", model="groq gpt-oss")
-    db.put_judgement("h", "s", "groq gpt-oss", later, now=NOW)
-    assert db.get_judgement("h", "s", "groq gpt-oss") == later
+    db.put_judgement("h", "s", "groq gpt-oss", later, passage=PASSAGE, now=NOW)
+    assert db.get_judgement("h", "s", "groq gpt-oss", passage=PASSAGE) == later
+
+
+def test_an_opinion_stored_before_the_quote_check_is_not_served(db: Cache) -> None:
+    """OPEN-ITEMS 20.9: an opinion cached before quotes were checked was never checked,
+    so a run after the change must ask again rather than attach it as if it had been."""
+    db.add_source(
+        "s", scheme="academic", title="", url="", text_kind="abstract", raw_text=RAW, now=NOW
+    )
+    # Exactly the row ``put_judgement`` wrote before the change: keyed by the bare name.
+    with db._conn:
+        db._conn.execute(
+            "INSERT INTO judgements(claim_hash, source_id, judge_model, label, rationale, "
+            "created_at) VALUES (?, ?, ?, ?, ?, ?)",
+            ("h", "s", "groq gpt-oss", "SUPPORTED", "from memory", "2026-10-01T00:00:00+00:00"),
+        )
+    assert db.get_judgement("h", "s", "groq gpt-oss", passage=PASSAGE) is None
+    # A checked opinion stored now is served, under the judge's own name.
+    db.put_judgement("h", "s", "groq gpt-oss", OPINION, passage=PASSAGE, now=NOW)
+    assert db.get_judgement("h", "s", "groq gpt-oss", passage=PASSAGE) == OPINION
+
+
+def test_an_opinion_on_one_passage_is_not_served_for_another(db: Cache) -> None:
+    """An opinion was checked against the passage it was shown. The same claim and
+    source can be decided on another passage (another NLI profile, another ``k``), and
+    that passage has not been checked against anything."""
+    db.add_source(
+        "s", scheme="academic", title="", url="", text_kind="abstract", raw_text=RAW, now=NOW
+    )
+    db.put_judgement("h", "s", "groq gpt-oss", OPINION, passage=PASSAGE, now=NOW)
+    assert db.get_judgement("h", "s", "groq gpt-oss", passage="Dogs bark at night.") is None
+    assert db.get_judgement("h", "s", "groq gpt-oss", passage=PASSAGE) == OPINION
+
+
+def test_the_verified_quote_round_trips(db: Cache) -> None:
+    db.add_source(
+        "s", scheme="academic", title="", url="", text_kind="abstract", raw_text=RAW, now=NOW
+    )
+    silent = JudgeOpinion(label=Label.NEI, rationale="silent", model="groq gpt-oss")
+    db.put_judgement("h", "s", "groq gpt-oss", OPINION, passage=PASSAGE, now=NOW)
+    db.put_judgement("h2", "s", "groq gpt-oss", silent, passage=PASSAGE, now=NOW)
+    stored = db.get_judgement("h", "s", "groq gpt-oss", passage=PASSAGE)
+    assert stored is not None and stored.quote == "cats purr when content"
+    assert db.get_judgement("h2", "s", "groq gpt-oss", passage=PASSAGE) == silent
+
+
+def test_a_judgements_table_without_a_quote_column_gains_one(tmp_path: Path) -> None:
+    """A v5 file from before the quote: the column is added on open, guarded, and the
+    file keeps working; opening it twice does not try to add it twice."""
+    path = tmp_path / "c.sqlite3"
+    Cache(path).close()
+    raw = sqlite3.connect(str(path))
+    with raw:
+        raw.execute("DROP TABLE judgements")
+        raw.execute(
+            "CREATE TABLE judgements (claim_hash TEXT NOT NULL, source_id TEXT NOT NULL "
+            "REFERENCES sources(source_id) ON DELETE CASCADE, judge_model TEXT NOT NULL, "
+            "label TEXT NOT NULL, rationale TEXT NOT NULL, created_at TEXT NOT NULL, "
+            "PRIMARY KEY (claim_hash, source_id, judge_model))"
+        )
+    raw.close()
+
+    for _ in range(2):
+        with Cache(path) as db:
+            columns = {row[1] for row in db._conn.execute("PRAGMA table_info(judgements)")}
+            assert "quote" in columns
+            db.add_source(
+                "s",
+                scheme="academic",
+                title="",
+                url="",
+                text_kind="abstract",
+                raw_text=RAW,
+                now=NOW,
+            )
+            db.put_judgement("h", "s", "groq gpt-oss", OPINION, passage=PASSAGE, now=NOW)
+            assert db.get_judgement("h", "s", "groq gpt-oss", passage=PASSAGE) == OPINION
 
 
 def test_judgements_go_with_the_verdicts_when_the_source_text_changes(db: Cache) -> None:
@@ -692,11 +773,11 @@ def test_judgements_go_with_the_verdicts_when_the_source_text_changes(db: Cache)
     )
     db.put_chunks("s", "bge@rev", PASSAGES, VECTORS, text_sha256=RAW_SHA)
     db.put_verdict("h", "s", "m", Verdict(Label.SUPPORTED, 0.93, "high", PASSAGES[0]), now=NOW)
-    db.put_judgement("h", "s", "groq gpt-oss", OPINION, now=NOW)
+    db.put_judgement("h", "s", "groq gpt-oss", OPINION, passage=PASSAGE, now=NOW)
 
     db.put_chunks("s", "bge@rev", PASSAGES, VECTORS, text_sha256=sha256_text("different text"))
     assert db.get_verdict("h", "s", "m") is None
-    assert db.get_judgement("h", "s", "groq gpt-oss") is None
+    assert db.get_judgement("h", "s", "groq gpt-oss", passage=PASSAGE) is None
 
 
 def test_re_chunking_the_same_text_keeps_the_judgements(db: Cache) -> None:
@@ -704,18 +785,18 @@ def test_re_chunking_the_same_text_keeps_the_judgements(db: Cache) -> None:
         "s", scheme="academic", title="", url="", text_kind="abstract", raw_text=RAW, now=NOW
     )
     db.put_chunks("s", "bge@rev", PASSAGES, VECTORS, text_sha256=RAW_SHA)
-    db.put_judgement("h", "s", "groq gpt-oss", OPINION, now=NOW)
+    db.put_judgement("h", "s", "groq gpt-oss", OPINION, passage=PASSAGE, now=NOW)
     db.put_chunks("s", "other@rev", PASSAGES, VECTORS, text_sha256=RAW_SHA)
-    assert db.get_judgement("h", "s", "groq gpt-oss") == OPINION
+    assert db.get_judgement("h", "s", "groq gpt-oss", passage=PASSAGE) == OPINION
 
 
 def test_clearing_a_source_takes_its_judgements_with_it(db: Cache) -> None:
     db.add_source(
         "s", scheme="academic", title="", url="", text_kind="abstract", raw_text=RAW, now=NOW
     )
-    db.put_judgement("h", "s", "groq gpt-oss", OPINION, now=NOW)
+    db.put_judgement("h", "s", "groq gpt-oss", OPINION, passage=PASSAGE, now=NOW)
     db.clear()
-    assert db.get_judgement("h", "s", "groq gpt-oss") is None
+    assert db.get_judgement("h", "s", "groq gpt-oss", passage=PASSAGE) is None
 
 
 _V3_SCHEMA = (
@@ -781,8 +862,8 @@ def test_migrating_a_v3_file_adds_judgements_and_keeps_everything_else(tmp_path:
         assert db.get_chunks("s", "bge@rev", text_sha256=RAW_SHA) is not None
         assert db.get_raw_text("s", now=NOW) == RAW
         assert db.get_verdict("h", "s", "m") is not None
-        db.put_judgement("h", "s", "groq gpt-oss", OPINION, now=NOW)
-        assert db.get_judgement("h", "s", "groq gpt-oss") == OPINION
+        db.put_judgement("h", "s", "groq gpt-oss", OPINION, passage=PASSAGE, now=NOW)
+        assert db.get_judgement("h", "s", "groq gpt-oss", passage=PASSAGE) == OPINION
 
 
 def test_migrating_a_v1_file_runs_the_whole_chain_including_judgements(tmp_path: Path) -> None:
@@ -792,8 +873,8 @@ def test_migrating_a_v1_file_runs_the_whole_chain_including_judgements(tmp_path:
         assert db.migrated_from == "1"
         db.put_resolution(RAW_REFERENCE, RESOLVED, now=NOW)
         assert db.get_resolution(RAW_REFERENCE, now=NOW) == RESOLVED
-        db.put_judgement("h", "s", "groq gpt-oss", OPINION, now=NOW)
-        assert db.get_judgement("h", "s", "groq gpt-oss") == OPINION
+        db.put_judgement("h", "s", "groq gpt-oss", OPINION, passage=PASSAGE, now=NOW)
+        assert db.get_judgement("h", "s", "groq gpt-oss", passage=PASSAGE) == OPINION
         assert db.get_verdict("h", "s", "m") is not None  # nothing else was lost
 
 

@@ -35,6 +35,27 @@ def _load_script() -> ModuleType:
 
 
 eval_averitec = _load_script()
+
+
+@pytest.fixture(autouse=True)
+def _no_live_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """No test in this module may reach the network or the real cache. A test that
+    calls ``main`` and forgets a stub now fails here instead of starting a live
+    AVeriTeC run, which one did once (2026-10-05). A test that needs one of these
+    patches it again, and its own ``setattr`` wins."""
+    monkeypatch.setattr(eval_averitec, "cache_dir", lambda: tmp_path / "no-live-cache")
+    monkeypatch.setattr(
+        eval_averitec.averitec,
+        "ensure_downloaded",
+        lambda _cache: pytest.fail("a test reached averitec.ensure_downloaded"),
+    )
+    monkeypatch.setattr(
+        eval_averitec.Engine,
+        "default",
+        staticmethod(lambda *a, **k: pytest.fail("a test reached Engine.default")),
+    )
+
+
 Row = eval_averitec.Row
 score = eval_averitec.score
 render_report = eval_averitec.render_report
@@ -709,7 +730,7 @@ def test_score_reports_the_hypothetical_judge_accuracy_and_who_decided() -> None
     assert judged.accuracy_3way == pytest.approx(3 / 4)
     assert judged.escalated == 2
     assert judged.unanswered == 0
-    assert judged.opinions == {GROQ: 1, LOCAL: 1}
+    assert judged.opinions == {(GROQ, "escalated"): 1, (LOCAL, "escalated"): 1}
     assert judged.deciders[eval_averitec.DECIDED_BY_MODELS] == (1, 1)
     assert judged.deciders[GROQ] == (1, 1)
     assert judged.deciders[LOCAL] == (1, 0)
@@ -797,16 +818,27 @@ class _Fetcher:
 
 
 class _Judge:
-    def __init__(self, answers: dict[str, str], model: str = GROQ) -> None:
+    def __init__(
+        self, answers: dict[str, str], model: str = GROQ, drops: dict[str, str] | None = None
+    ) -> None:
         self.answers = answers  # passage text -> label value
         self.model = model
+        # passage text -> why the quote check dropped the judge's opinion of it
+        self.drops = drops or {}
         self.asked: list[object] = []
+        self.skipped: list[str] = []
 
     def review(self, items: list[object], **_: object) -> dict[str, object]:
         from proofpath.judge import JudgeOpinion
         from proofpath.models import Label
 
         self.asked.extend(items)
+        # Per call, as ``Judge.review`` resets it, in the real judge's own wording.
+        self.skipped = [
+            f"{item.id}: {self.drops[item.passage]}"  # type: ignore[attr-defined]
+            for item in items
+            if item.passage in self.drops  # type: ignore[attr-defined]
+        ]
         return {
             item.id: JudgeOpinion(Label(self.answers[item.passage]), "why", self.model)  # type: ignore[attr-defined]
             for item in items
@@ -824,11 +856,23 @@ def _engine(fetcher: _Fetcher) -> object:
     )
 
 
-def _verdicts(monkeypatch: pytest.MonkeyPatch, by_url: dict[str, object]) -> None:
-    def decide(_claim: str, passages: list[object], *_a: object, **_k: object) -> object:
-        return by_url[passages[0].source_id]  # type: ignore[attr-defined]
+def _verdicts(
+    monkeypatch: pytest.MonkeyPatch,
+    by_url: dict[str, object],
+    closest: dict[str, object] | None = None,
+) -> None:
+    """``pipeline.decide_closest`` answering per URL: the verdict, and the closest
+    passage (the verdict's own unless ``closest`` names another)."""
+    near = closest or {}
 
-    monkeypatch.setattr(eval_averitec.pipeline, "decide", decide)
+    def decide_closest(
+        _claim: str, passages: list[object], *_a: object, **_k: object
+    ) -> tuple[object, object]:
+        url = passages[0].source_id  # type: ignore[attr-defined]
+        verdict = by_url[url]
+        return verdict, near.get(url, verdict.passage)  # type: ignore[attr-defined]
+
+    monkeypatch.setattr(eval_averitec.pipeline, "decide_closest", decide_closest)
 
 
 def _verdict(label: str, score: float, tier: str, url: str, reason: str = "") -> object:
@@ -981,3 +1025,435 @@ def test_in_search_mode_the_report_says_the_judge_wrote_the_queries() -> None:
     assert "the verdicts are the models'" in gold
     assert "writes the search queries" in searched
     assert "writes the search queries" not in gold
+
+
+# --- the NEI probes and the quote check (OPEN-ITEMS 20.13, spec 2026-10-05 §2) -------
+
+NOT_FOUND = "the quoted words are not in the passage; opinion dropped"
+
+
+def _nei(url: str) -> object:
+    """An NEI verdict as ``aggregate`` returns it: no passage (product rule 1)."""
+    from proofpath.models import Label, Verdict
+
+    return Verdict(Label.NEI, 0.4, "low", None)
+
+
+def _passage(text: str, url: str) -> object:
+    from proofpath.models import Passage
+
+    return Passage(text, url, 3)
+
+
+def test_judge_nei_without_judge_is_a_usage_error(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as exc:
+        eval_averitec.main(["--judge-nei"])
+    assert exc.value.code == 2
+    assert "--judge-nei" in capsys.readouterr().err
+
+
+def test_nei_sources_go_to_the_judge_with_their_closest_passage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    low, nei, high = "https://a.example/low", "https://b.example/nei", "https://c.example/hi"
+    fetcher = _Fetcher({url: _fetched(url, step=1) for url in (low, nei, high)})
+    _verdicts(
+        monkeypatch,
+        {
+            low: _verdict("REFUTED", 0.3, "low", low),
+            nei: _nei(nei),
+            high: _verdict("SUPPORTED", 0.9, "high", high),
+        },
+        closest={nei: _passage("the closest sentence", nei)},
+    )
+    judge = _Judge({f"passage of {low}": "SUPPORTED", "the closest sentence": "SUPPORTED"})
+    claim = averitec.Claim(id=4, text="A claim.", label="Supported", source_urls=(low, nei, high))
+
+    row = eval_averitec._decide_claim(
+        _engine(fetcher),
+        claim,
+        sleep=0,
+        judge=judge,  # type: ignore[arg-type]
+        judge_nei=True,
+    )
+
+    asked = {item.passage: item for item in judge.asked}  # type: ignore[attr-defined]
+    assert set(asked) == {f"passage of {low}", "the closest sentence"}
+    probe = asked["the closest sentence"]
+    assert (probe.verdict.value, probe.tier) == ("NEI", "low")
+    by_url = {s.url: s for s in row.sources}
+    assert by_url[nei].escalation == "nei" and by_url[nei].probed
+    assert not by_url[nei].escalated  # the product's band is untouched
+    assert by_url[nei].judge_label == "SUPPORTED"
+    assert by_url[low].escalation == "escalated"
+    assert by_url[high].escalation is None
+    # Still the product's verdict: the strongest assertion, the probe changes nothing.
+    assert row.predicted == "SUPPORTED" == product_label(row.sources)
+
+
+def test_without_judge_nei_an_nei_source_is_not_sent(monkeypatch: pytest.MonkeyPatch) -> None:
+    nei = "https://b.example/nei"
+    fetcher = _Fetcher({nei: _fetched(nei, step=1)})
+    _verdicts(monkeypatch, {nei: _nei(nei)}, closest={nei: _passage("close", nei)})
+    judge = _Judge({"close": "SUPPORTED"})
+    claim = averitec.Claim(id=5, text="A claim.", label="Supported", source_urls=(nei,))
+
+    row = eval_averitec._decide_claim(_engine(fetcher), claim, sleep=0, judge=judge)  # type: ignore[arg-type]
+
+    assert judge.asked == []
+    (source,) = row.sources
+    assert source.escalation is None and source.judge_label is None
+
+
+def test_an_nei_source_with_no_closest_passage_is_not_probed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Nothing scored above zero: there is no passage, so nothing to ask (rule 1)."""
+    nei = "https://b.example/nei"
+    fetcher = _Fetcher({nei: _fetched(nei, step=1)})
+    _verdicts(monkeypatch, {nei: _nei(nei)})
+    judge = _Judge({})
+    claim = averitec.Claim(id=6, text="A claim.", label="Refuted", source_urls=(nei,))
+
+    row = eval_averitec._decide_claim(
+        _engine(fetcher),
+        claim,
+        sleep=0,
+        judge=judge,  # type: ignore[arg-type]
+        judge_nei=True,
+    )
+
+    assert judge.asked == []
+    assert row.sources[0].escalation is None
+
+
+def test_an_opinion_the_quote_check_dropped_is_recorded_on_its_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    low, nei = "https://a.example/low", "https://b.example/nei"
+    fetcher = _Fetcher({url: _fetched(url, step=1) for url in (low, nei)})
+    _verdicts(
+        monkeypatch,
+        {low: _verdict("REFUTED", 0.3, "low", low), nei: _nei(nei)},
+        closest={nei: _passage("close", nei)},
+    )
+    judge = _Judge(
+        {},
+        drops={
+            f"passage of {low}": "no quoted words came back; opinion dropped",
+            "close": NOT_FOUND,
+        },
+    )
+    claim = averitec.Claim(id=7, text="A claim.", label="Refuted", source_urls=(low, nei))
+
+    row = eval_averitec._decide_claim(
+        _engine(fetcher),
+        claim,
+        sleep=0,
+        judge=judge,  # type: ignore[arg-type]
+        judge_nei=True,
+    )
+
+    by_url = {s.url: s for s in row.sources}
+    assert by_url[low].dropped == eval_averitec.DROP_NO_QUOTE
+    assert by_url[nei].dropped == eval_averitec.DROP_NOT_IN_PASSAGE
+    assert by_url[low].judge_label is None and by_url[nei].judge_label is None
+
+
+def test_the_judges_note_wording_is_the_one_the_eval_reads() -> None:
+    """The eval counts drops off ``Judge.skipped``; a reworded note would count none."""
+    from proofpath import judge as judge_mod
+
+    assert judge_mod.QUOTE_NOT_FOUND == NOT_FOUND
+    assert judge_mod.QUOTE_MISSING == "no quoted words came back; opinion dropped"
+
+
+def _probe(
+    *,
+    judge_label: str | None = None,
+    dropped: str | None = None,
+) -> Any:
+    """A read NEI source sent to the judge under ``--judge-nei``."""
+    return Source(
+        url=LIVE,
+        state=OK,
+        step=1,
+        label="NEI",
+        score=0.4,
+        tier="low",
+        probed=True,
+        judge_label=judge_label,
+        judge_model=GROQ if judge_label else None,
+        dropped=dropped,
+    )
+
+
+# Six claims, product accuracy 1/6, band-only 2/6, band plus probes 3/6.
+PROBE_ROWS = [
+    # The probe fixes it.
+    Row(0, SUPPORTED, "NEI", (OK,), (LIVE,), (_probe(judge_label="SUPPORTED"),)),
+    # The probe calls a false claim supported: the wrong way.
+    Row(1, REFUTED, "NEI", (OK,), (LIVE,), (_probe(judge_label="SUPPORTED"),)),
+    # A confident model verdict: right in every column.
+    Row(2, SUPPORTED, "SUPPORTED", (OK,), (LIVE,), (_read("SUPPORTED", 0.9, tier="high"),)),
+    # The probe's opinion was dropped by the quote check: it abstains, NEI stays.
+    Row(
+        3,
+        REFUTED,
+        "NEI",
+        (OK,),
+        (LIVE,),
+        (_probe(dropped=eval_averitec.DROP_NOT_IN_PASSAGE),),
+    ),
+    # The band: the judge's NEI abstains, so the low-tier REFUTED goes.
+    Row(
+        4,
+        NEI,
+        "REFUTED",
+        (OK,),
+        (LIVE,),
+        (_read("REFUTED", 0.3, tier="low", escalated=True, judge_label="NEI", judge_model=GROQ),),
+    ),
+    # The band: the opinion was dropped for want of a quote, so the model's vote stands.
+    Row(
+        5,
+        SUPPORTED,
+        "REFUTED",
+        (OK,),
+        (LIVE,),
+        (
+            Source(
+                url=LIVE,
+                state=OK,
+                step=1,
+                label="REFUTED",
+                score=0.3,
+                tier="low",
+                escalated=True,
+                dropped=eval_averitec.DROP_NO_QUOTE,
+            ),
+        ),
+    ),
+]
+
+
+def test_the_band_only_number_ignores_the_probes() -> None:
+    judged = score(PROBE_ROWS, judge=True).judged
+    assert judged is not None
+    assert judged.accuracy_3way == pytest.approx(2 / 6)
+    assert judged.escalated == 2
+    assert judged.probed is None  # not asked for
+
+
+def test_the_probes_number_lets_the_nei_probes_vote_too() -> None:
+    result = score(PROBE_ROWS, judge=True, probes=True)
+    assert result.accuracy_3way == pytest.approx(1 / 6)  # the product, untouched
+    assert result.judged is not None
+    probed = result.judged.probed
+    assert probed is not None
+    assert probed.accuracy_3way == pytest.approx(3 / 6)
+    assert probed.per_label == {SUPPORTED: (3, 2), REFUTED: (2, 0), NEI: (1, 1)}
+    assert probed.probed == 3
+    assert probed.unanswered == 1
+    # (Refuted called SUPPORTED, Supported called REFUTED)
+    assert probed.wrong_way == (1, 1)
+    assert probed.product_wrong_way == (0, 1)
+    # Claim by claim against the product: claims 0 and 4 fixed, none broken.
+    assert (probed.fixed, probed.broken) == (2, 0)
+    assert probed.p_value == pytest.approx(0.5)
+
+
+def test_drops_are_counted_by_escalation_kind_and_reason() -> None:
+    judged = score(PROBE_ROWS, judge=True, probes=True).judged
+    assert judged is not None
+    assert judged.drops == {
+        ("escalated", eval_averitec.DROP_NO_QUOTE): 1,
+        ("nei", eval_averitec.DROP_NOT_IN_PASSAGE): 1,
+    }
+
+
+@pytest.mark.parametrize(
+    ("b", "c", "p"),
+    [
+        (0, 0, 1.0),
+        (1, 0, 1.0),
+        (0, 2, 0.5),
+        # The search-with-judge-queries run of 2026-10-05: 14 fixed, 4 broken, p = 0.031.
+        (14, 4, 4048 * 2 / 2**18),
+        (4, 14, 4048 * 2 / 2**18),
+    ],
+)
+def test_mcnemar_is_the_exact_two_sided_binomial_test(b: int, c: int, p: float) -> None:
+    assert eval_averitec.mcnemar_exact(b, c) == pytest.approx(p)
+
+
+def test_the_report_renders_the_probes_number_and_the_drops() -> None:
+    text = render_report(
+        score(PROBE_ROWS, judge=True, probes=True),
+        date="2026-10-05",
+        limit=6,
+        judge=GROQ,
+        judge_nei=True,
+        no_fallback=True,
+    )
+    assert "- NEI probes: on" in text
+    assert "- judge fallback: off" in text
+    assert "### Band plus NEI probes" in text
+    assert "**0.500**" in text
+    assert "2 fixed, 0 broken" in text and "p = 0.500" in text
+    assert "wrong way: 2 (1 + 1)" in text
+    assert "against 1 (0 + 1) for the product" in text
+    assert _md_line(REFUTED, 2, 0, "0.000") in text
+    assert "### Dropped by the quote check" in text
+    assert _md_line("escalated", eval_averitec.DROP_NO_QUOTE, 1) in text
+    assert _md_line("nei", eval_averitec.DROP_NOT_IN_PASSAGE, 1) in text
+
+
+def test_a_judge_run_without_probes_has_no_probes_section_but_counts_drops() -> None:
+    text = render_report(score(JUDGED_ROWS, judge=True), date="2026-10-05", limit=4, judge=GROQ)
+    assert "### Band plus NEI probes" not in text
+    assert "NEI probes: on" not in text
+    assert "### Dropped by the quote check" in text
+    assert _md_line("none", "—", 0) in text
+
+
+@pytest.mark.parametrize(
+    ("judge_nei", "no_fallback", "name", "report"),
+    [
+        (
+            True,
+            True,
+            "averitec_results-browser-judge-nei-nofallback.json",
+            "2026-10-05-averitec-browser-judge-nei-nofallback.md",
+        ),
+        (
+            True,
+            False,
+            "averitec_results-browser-judge-nei.json",
+            "2026-10-05-averitec-browser-judge-nei.md",
+        ),
+        (
+            False,
+            True,
+            "averitec_results-browser-judge-nofallback.json",
+            "2026-10-05-averitec-browser-judge-nofallback.md",
+        ),
+    ],
+)
+def test_the_new_setups_get_their_own_file_names(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    judge_nei: bool,
+    no_fallback: bool,
+    name: str,
+    report: str,
+) -> None:
+    monkeypatch.setattr(eval_averitec, "cache_dir", lambda: tmp_path)
+    flags = {"browser": True, "judge": True, "judge_nei": judge_nei, "no_fallback": no_fallback}
+    path = eval_averitec._results_path(search=False, fresh=False, **flags)
+    assert path == tmp_path / "datasets" / name
+    out = eval_averitec._report_path(day="2026-10-05", search=False, fresh=False, **flags)
+    assert out == Path("docs/eval") / report
+
+
+def test_no_fallback_builds_the_judge_with_its_fallback_off(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from proofpath.config import Config
+
+    built: list[Any] = []
+
+    def build_client(config: Any, key: object, **_: object) -> object:
+        built.append(config)
+        return SimpleNamespace(provider="groq", model="openai/gpt-oss-120b", close=lambda: None)
+
+    engine = SimpleNamespace(judge=None, escalate=False, searcher=None, close=lambda: None)
+    key = eval_averitec.judge_mod.ApiKey("gsk_test", source="test")
+    monkeypatch.setattr(eval_averitec, "cache_dir", lambda: tmp_path)
+    monkeypatch.setattr(eval_averitec, "load_config", Config)
+    monkeypatch.setattr(eval_averitec.judge_mod, "resolve_api_key", lambda _name: key)
+    monkeypatch.setattr(eval_averitec.judge_mod, "build_client", build_client)
+    monkeypatch.setattr(eval_averitec.averitec, "ensure_downloaded", lambda _cache: tmp_path)
+    monkeypatch.setattr(eval_averitec.averitec, "load", lambda _path, limit=None: [])
+    monkeypatch.setattr(eval_averitec.Engine, "default", staticmethod(lambda *a, **k: engine))
+    out = tmp_path / "report.md"
+
+    assert eval_averitec.main(["--judge", "--no-fallback", "--out", str(out)]) == 0
+
+    assert [config.fallback for config in built] == [eval_averitec.judge_mod.FALLBACK_OFF]
+    assert "- judge fallback: off" in out.read_text(encoding="utf-8")
+
+
+def test_new_rows_round_trip_with_their_escalation_and_drop(tmp_path: Path) -> None:
+    path = tmp_path / "results.json"
+    eval_averitec._save_rows(path, PROBE_ROWS)
+    assert eval_averitec._load_rows(path) == PROBE_ROWS
+
+
+def test_a_results_file_from_before_the_probes_still_loads(tmp_path: Path) -> None:
+    """Written on 2026-10-05, before ``probed`` and ``dropped`` existed: an escalated
+    source keeps the old meaning, the product's band."""
+    path = tmp_path / "results.json"
+    source = (
+        '{"url": "https://a.example/one", "state": "ok", "step": 1, "label": "REFUTED", '
+        '"score": 0.3, "tier": "low", "escalated": true, "judge_label": "SUPPORTED", '
+        '"judge_model": "groq openai/gpt-oss-120b"}'
+    )
+    path.write_text(
+        '[{"claim_id": 1, "gold": "Supported", "predicted": "REFUTED", "states": ["ok"], '
+        f'"urls": ["https://a.example/one"], "sources": [{source}]}}]',
+        encoding="utf-8",
+    )
+    (row,) = eval_averitec._load_rows(path)
+    (loaded,) = row.sources
+    assert loaded.escalation == "escalated"
+    assert not loaded.probed and loaded.dropped is None
+    judged = score([row], judge=True, probes=True).judged
+    assert judged is not None and judged.probed is not None
+    assert judged.accuracy_3way == judged.probed.accuracy_3way == pytest.approx(1.0)
+
+
+def test_the_opinions_table_counts_the_nei_probes_by_kind() -> None:
+    judged = score(PROBE_ROWS, judge=True, probes=True).judged
+    assert judged is not None
+    # Rows 0 and 1 are answered probes; row 4 is an answered escalation. The two
+    # dropped opinions are not opinions.
+    assert judged.opinions == {(GROQ, "nei"): 2, (GROQ, "escalated"): 1}
+    text = render_report(
+        score(PROBE_ROWS, judge=True, probes=True), date="2026-10-05", limit=6, judge=GROQ
+    )
+    assert _md_line(GROQ, "nei", 2) in text
+    assert _md_line(GROQ, "escalated", 1) in text
+
+
+def test_no_fallback_without_judge_is_a_usage_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Guarded: a ``main`` that did not refuse would otherwise start a live run.
+    monkeypatch.setattr(eval_averitec, "cache_dir", lambda: tmp_path)
+    monkeypatch.setattr(
+        eval_averitec.averitec,
+        "ensure_downloaded",
+        lambda _cache: pytest.fail("--no-fallback without --judge was not refused"),
+    )
+    with pytest.raises(SystemExit) as exc:
+        eval_averitec.main(["--no-fallback"])
+    assert exc.value.code == 2
+    assert "--no-fallback" in capsys.readouterr().err
+
+
+def test_every_quote_drop_reason_is_read_and_other_notes_are_not() -> None:
+    from proofpath import judge as judge_mod
+
+    skipped = [
+        f"s0: {judge_mod.QUOTE_MISSING}",
+        f"s1: {judge_mod.QUOTE_TOO_SHORT}",
+        f"s2: {judge_mod.QUOTE_NOT_FOUND}",
+        "s3 came back with no rationale",
+        "the judge's answer was not JSON; 1 items (s4)",
+    ]
+    assert eval_averitec._drops(skipped) == {
+        "s0": eval_averitec.DROP_NO_QUOTE,
+        "s1": eval_averitec.DROP_TOO_SHORT,
+        "s2": eval_averitec.DROP_NOT_IN_PASSAGE,
+    }
