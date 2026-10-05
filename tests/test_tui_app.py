@@ -2546,6 +2546,14 @@ async def test_update_is_refused_while_a_mirrored_verb_is_still_out(
             assert updates == []
         finally:
             release.set()
+        # The ``/resolve`` worker finishes while the app is still up: leaving the block
+        # with it still out closed the screen under it, and on a slow runner it then
+        # wrote to a ``RunLog`` that was gone (Windows CI, 2026-10-05).
+        await until(
+            pilot,
+            lambda: any("RESOLVED" in line.render().plain for line in app.query(KvLine)),
+            "the /resolve to finish",
+        )
 
 
 def _refused_by_the_update(app: ProofpathApp) -> int:
