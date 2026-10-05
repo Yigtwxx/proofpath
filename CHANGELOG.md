@@ -6,6 +6,14 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.12] - 2026-10-05
+
+The judge now has to quote the passage it judges, and an opinion whose quote is not
+there is dropped and said to be. The check is exact at word and number boundaries, so
+"2 million" is not found in "1.2 million". The AVeriTeC eval can now show the judge
+the NEIs too. It fixed 5 claims and broke none, but at p = 0.062 that is short of the
+bar set beforehand, so the product does not do it.
+
 ### Changed
 - **The judge's quote is checked, and shown.** A `SUPPORTED` or `REFUTED` opinion now
   has to return the exact words from the passage that decide it, in a new `quote`
