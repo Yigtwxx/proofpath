@@ -1,8 +1,8 @@
 """Slash commands, and the awaiting mode a bare verb enters (spec section 13.1).
 
 Spec section 13.3's mirror rule: every CLI verb exists in the TUI as the
-same-named slash command, so ``/check``, ``/resolve``, ``/fetch``, ``/config`` and
-``/cache`` are the CLI's verbs and the rest are TUI-only.
+same-named slash command, so ``/check``, ``/resolve``, ``/fetch``, ``/config``,
+``/cache`` and ``/update`` are the CLI's verbs and the rest are TUI-only.
 
 The parser is deliberately dumb. It splits a line into a verb and the rest and
 says whether the verb is still waiting for an argument; it never judges the
@@ -27,6 +27,10 @@ VERBS = (
     "cancel",
     "help",
     "quit",
+    # Last on purpose: at 80x24 the ``/`` list holds ten of these eleven rows, and the
+    # cap then hides ``/quit`` (which the banner's hint line names anyway) and this
+    # one, never ``/help``.
+    "update",
 )
 #: Verbs that open the awaiting mode when typed alone, with the bar's placeholder.
 NEEDS_ARGUMENT = {
@@ -52,6 +56,9 @@ DESCRIPTIONS: Mapping[str, str] = {
     "fetch": "read one URL, DOI or arXiv id",
     "config": "settings panel, or show/set/check",
     "cache": "list or drop cached sources",
+    # ``/update`` alone updates at once (running it is the consent, update spec
+    # decision 4), so it is not in NEEDS_ARGUMENT: ``--check`` is its one option.
+    "update": "update from PyPI, or --check only",
     "allow": "answer the permission question",
     "summarize": "a paragraph over the last run",
     "cancel": "stop a run",

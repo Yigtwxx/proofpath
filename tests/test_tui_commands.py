@@ -99,7 +99,7 @@ def test_parse(line, expected):
 
 def test_verbs_mirror_the_cli_verbs():
     # Spec section 13.3's TUI mirror rule: every CLI verb exists as a slash command.
-    for verb in ("check", "resolve", "fetch", "config", "cache"):
+    for verb in ("check", "resolve", "fetch", "config", "cache", "update"):
         assert verb in VERBS
 
 

@@ -6,6 +6,49 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- **`proofpath update`** installs the latest release from PyPI, and
+  **`proofpath update --check`** only says whether there is one. In the TUI they are
+  `/update` and `/update --check`. Running the command is the consent, so nothing
+  asks. uv tool, pipx and pip installs are each updated with their own tool; pip
+  falls back to `uv pip` when it fails and uv is on PATH. An editable install is
+  never touched: the command names its source directory and says to update it with
+  `git pull` and `uv sync`.
+- **The installed extras are kept.** They are written into the install spec
+  (`proofpath[browser]`), never with a version pin. A plain `uv tool upgrade` was
+  measured to drop packages added to the tool's environment after it was installed,
+  which would have removed the browser wheels you had consented to.
+- **The new version is read back from a fresh process.** An update the resolver held
+  back below the latest version is a failure that names the version it installed.
+  On Windows a failed command adds "close proofpath and run the command above",
+  since a running `proofpath.exe` can be locked.
+- **Temporary environments are left alone.** In a `uvx` or `pipx run` environment
+  nothing runs. The command says that `uvx proofpath@latest` or
+  `pipx run --no-cache proofpath` already fetches the newest.
+- **Commands paste back on every platform.** Each command is logged as `$ <cmd>`; the
+  one printed for running by hand has no `$`. On Windows both use `cmd.exe` quoting,
+  and so does the browser install's log.
+  The version check after the update runs the interpreter isolated (`-I`), so a
+  checkout in the working directory cannot answer for the install.
+- **In the TUI, an update and a run never overlap.** A bare `/update` is refused while
+  a run or a mirrored verb is still going, because the install replaces the code they
+  are executing; `/update --check` is not refused. While an update is installing,
+  every `/check` and mirrored verb is refused until it finishes, including a second
+  `/update`.
+- Exit codes: `0` for up to date, updated, ahead of PyPI, editable, temporary, or
+  (with `--check`) an update available. `1` means the check or the update failed.
+  `permissions.network` is read by the fetch ladder's own rule: `deny`, and `ask`
+  without a terminal, send nothing to PyPI and fail rather than report "up to date".
+  `ask` in a terminal goes ahead with a note.
+
+### Changed
+- **At 80x24 the `/` list now caps.** `/update` makes eleven verbs and 80x24 has
+  room for ten rows. The last two, `/quit` and `/update`, sit behind `... 2 more`.
+  `update` is last on purpose: the banner's hint line already names `/quit`, and
+  `/help` stays visible. One more row, at 80x25, shows them all.
+- `packaging` is a declared dependency. It was already installed through other
+  packages; `update` now imports it directly.
+
 ## [0.4.10] - 2026-10-01
 
 An opt-in, larger NLI model for scientific sources, chosen by a measured bake-off and

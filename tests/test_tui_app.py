@@ -25,6 +25,7 @@ from textual.widgets.input import Selection as InputSelection
 
 from proofpath import __version__, browser, ui
 from proofpath import commands as library
+from proofpath import update as update_mod
 from proofpath import verify as verify_mod
 from proofpath.browser import ConsentGate
 from proofpath.config import Config, ConfigError, JudgeConfig, Permissions, load_config
@@ -45,6 +46,8 @@ from proofpath.tui.app import (
     AWAITING_VERBS,
     CLEARED_NOT_SUMMARIZABLE,
     HINT,
+    UPDATE_INSTALLING,
+    UPDATE_WHILE_RUNNING,
     Banner,
     CommandBlock,
     CoverageFooter,
@@ -77,6 +80,9 @@ from proofpath.tui.widgets.prompt import HELD_SUMMARY
 from proofpath.verify import Engine
 
 SIZE = (80, 24)
+#: The shortest 80-column terminal where ``/`` lists every verb with nothing capped.
+#: Eleven verbs since ``/update`` (update spec section 2.11): 80x24 holds ten rows.
+ALL_VERBS_FIT = (80, 25)
 HOST = "sciencedirect.com"
 
 
@@ -1707,6 +1713,85 @@ async def test_an_unknown_subcommand_is_reported_not_guessed() -> None:
     assert "nope" in text and "try path, ls, show or clear" in text
 
 
+def an_update(state: str, **fields: Any) -> update_mod.UpdateResult:
+    values: dict[str, Any] = {
+        "current": "1.0.0",
+        "latest": "1.1.0",
+        "state": state,
+        "install": update_mod.Install("uv", Path("/venv"), Path("/venv/bin/python")),
+        "command": ("uv", "tool", "install", "--upgrade", "proofpath"),
+    }
+    values.update(fields)
+    return update_mod.UpdateResult(**values)
+
+
+async def test_update_check_renders_in_a_command_block(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``/update --check`` is a mirrored verb (update spec section 2.11): the same
+    library function ``proofpath update --check`` calls, drawn in its own block."""
+    asked: list[tuple[bool, bool]] = []
+
+    def stub(*, config: Config, interactive: bool, check_only: bool = False) -> Any:
+        asked.append((interactive, check_only))
+        return an_update("available")
+
+    monkeypatch.setattr(library, "update_install", stub)
+    app, _ = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "/update --check")
+        text = await lines_of(app, pilot)
+        assert app.query_one(CommandBlock)
+    # The TUI is a terminal: ``permissions.network = ask`` is not a no-TTY deny here.
+    assert asked == [(True, True)]
+    assert "update available: 1.0.0 → 1.1.0" in text
+    assert "uv tool install --upgrade proofpath" in text
+    assert "/update installs it" in text
+
+
+async def test_update_says_to_restart_after_it_succeeds(monkeypatch: pytest.MonkeyPatch) -> None:
+    updated = an_update("updated", installed="1.1.0", log=("$ uv tool", "exit 0"))
+    monkeypatch.setattr(library, "update_install", lambda **kwargs: updated)
+    app, _ = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "/update")
+        text = await lines_of(app, pilot)
+    assert "updated to 1.1.0" in text
+    assert "restart proofpath to use v1.1.0" in text
+
+
+async def test_update_takes_only_check(monkeypatch: pytest.MonkeyPatch) -> None:
+    called: list[bool] = []
+    monkeypatch.setattr(library, "update_install", lambda **kwargs: called.append(True))
+    app, _ = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "/update now")
+        text = await lines_of(app, pilot)
+    assert called == []  # an unknown argument installs nothing
+    assert "/update now" in text and "try /update or /update --check" in text
+
+
+async def test_update_is_refused_while_a_run_is_active_but_check_is_not(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The update replaces the venv under the code a live run is executing."""
+    asked: list[bool] = []
+
+    def stub(*, config: Config, interactive: bool, check_only: bool = False) -> Any:
+        asked.append(check_only)
+        return an_update("available")
+
+    monkeypatch.setattr(library, "update_install", stub)
+    app, schedulers = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "/check one.pdf")
+        assert schedulers[0].runs[0].state == "queued"
+        await submit(pilot, "/update")
+        text = await lines_of(app, pilot)
+        assert asked == []  # refused before the library was asked anything
+        assert UPDATE_WHILE_RUNNING in text
+        await submit(pilot, "/update --check")
+        await until(pilot, lambda: asked == [True], "the check to run beside the live run")
+
+
 async def test_help_lists_every_verb_with_what_it_wants() -> None:
     app, _ = build_app()
     async with app.run_test(size=SIZE) as pilot:
@@ -2311,7 +2396,7 @@ async def test_tab_on_a_recalled_slash_line_brings_the_list_back() -> None:
 
 async def test_the_list_never_covers_the_log_and_the_bottom_grows_by_its_rows() -> None:
     app, _ = build_app()
-    async with app.run_test(size=SIZE) as pilot:
+    async with app.run_test(size=ALL_VERBS_FIT) as pilot:
         bottom = app.query_one("#bottom")
         log = app.query_one(RunLog)
         suggestions = app.query_one(Suggestions)
@@ -2334,8 +2419,8 @@ async def test_the_list_never_covers_the_log_and_the_bottom_grows_by_its_rows() 
         await pilot.press("backspace")
         await pilot.pause()
         # ``/`` alone lists every verb, and with the shortened ``/summarize``
-        # description (item 1) none of the ten rows wraps at eighty columns: at
-        # 80x24 they all fit, so there is nothing to cap and no indicator.
+        # description (item 1) none of the rows wraps at eighty columns: at
+        # ALL_VERBS_FIT they all fit, so there is nothing to cap and no indicator.
         banner = app.query_one("#banner").region.height
         assert len(suggestions.held) == len(commands.VERBS)
         assert suggestions.window == (0, len(commands.VERBS))
@@ -2346,7 +2431,7 @@ async def test_the_list_never_covers_the_log_and_the_bottom_grows_by_its_rows() 
         assert footer.region.bottom == suggestions.region.y
         assert suggestions.region.bottom == frame.region.y
         assert not app.screen.show_vertical_scrollbar
-        assert bottom.region.width == SIZE[0]
+        assert bottom.region.width == ALL_VERBS_FIT[0]
 
         # A shorter terminal is what forces the cap now (not a wrapped row): the
         # banner, the footer (3) and the bar (1) plus one row of log leave fewer
@@ -2372,7 +2457,7 @@ async def test_the_list_never_covers_the_log_and_the_bottom_grows_by_its_rows() 
         assert not app.screen.show_vertical_scrollbar
         assert bottom.region.width == 80
 
-        # The window slides with the selection: ``up`` wraps to ``/quit``, off the
+        # The window slides with the selection: ``up`` wraps to the last verb, off the
         # bottom of the first window, and the top gives way to an indicator instead.
         await pilot.press("up")
         await pilot.pause()
@@ -2382,11 +2467,11 @@ async def test_the_list_never_covers_the_log_and_the_bottom_grows_by_its_rows() 
         assert len(suggestions.drawn) == limit
         assert suggestions.drawn[0] == f"... {first} more"
         assert suggestions.drawn[1:] == suggestions.held[first:last]
-        assert suggestions.drawn[-1].endswith(commands.DESCRIPTIONS["quit"])
+        assert suggestions.drawn[-1].endswith(commands.DESCRIPTIONS[commands.VERBS[-1]])
         assert bottom.region.height == 4 + limit
 
         # Taller again: the window and the indicator both give the rows back.
-        await pilot.resize_terminal(*SIZE)
+        await pilot.resize_terminal(*ALL_VERBS_FIT)
         await pilot.pause()
         assert suggestions.window == (0, len(commands.VERBS))
         assert suggestions.drawn == suggestions.held
@@ -2403,10 +2488,10 @@ async def test_the_list_never_covers_the_log_and_the_bottom_grows_by_its_rows() 
 
 async def test_the_more_indicator_marks_only_the_rows_the_cap_hides() -> None:
     app, _ = build_app()
-    async with app.run_test(size=SIZE) as pilot:
+    async with app.run_test(size=ALL_VERBS_FIT) as pilot:
         suggestions = app.query_one(Suggestions)
         await type_into(pilot, "/")
-        # At SIZE (80x24) all ten rows fit, nothing is hidden: no indicator either end.
+        # At ALL_VERBS_FIT every row fits, nothing is hidden: no indicator either end.
         assert suggestions.window == (0, len(commands.VERBS))
         assert suggestions.drawn == suggestions.held
         assert not any(row.startswith("...") for row in suggestions.drawn)
@@ -2421,7 +2506,7 @@ async def test_the_more_indicator_marks_only_the_rows_the_cap_hides() -> None:
         assert suggestions.drawn[-1] == f"... {len(commands.VERBS) - last} more"
         assert suggestions.drawn[0] != suggestions.drawn[-1]  # only the one end hides
 
-        # ``up`` wraps the selection to ``/quit``, off the bottom of that window:
+        # ``up`` wraps the selection to the last verb, off the bottom of that window:
         # the window slides down and the *top* indicator takes the first drawn line.
         await pilot.press("up")
         await pilot.pause()
@@ -2429,13 +2514,107 @@ async def test_the_more_indicator_marks_only_the_rows_the_cap_hides() -> None:
         assert first > 0
         assert last == len(commands.VERBS)
         assert suggestions.drawn[0] == f"... {first} more"
-        assert suggestions.drawn[-1].endswith(commands.DESCRIPTIONS["quit"])
+        assert suggestions.drawn[-1].endswith(commands.DESCRIPTIONS[commands.VERBS[-1]])
 
-        # Back to SIZE, everything fits again and the indicator goes.
-        await pilot.resize_terminal(*SIZE)
+        # Back to ALL_VERBS_FIT, everything fits again and the indicator goes.
+        await pilot.resize_terminal(*ALL_VERBS_FIT)
         await pilot.pause()
         assert suggestions.window == (0, len(commands.VERBS))
         assert not any(row.startswith("...") for row in suggestions.drawn)
+
+
+async def test_update_is_refused_while_a_mirrored_verb_is_still_out(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ``/resolve`` on its worker runs this install's code as much as a run does."""
+    release = threading.Event()
+    updates: list[bool] = []
+
+    def slow(reference: str, *, config: Config) -> library.Resolved:
+        release.wait(10)
+        return a_resolved()
+
+    monkeypatch.setattr(library, "resolve_reference", slow)
+    monkeypatch.setattr(library, "update_install", lambda **kwargs: updates.append(True))
+    app, _ = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        try:
+            await submit(pilot, "/resolve Jumper 2021")
+            await submit(pilot, "/update")
+            text = await lines_of(app, pilot)
+            assert UPDATE_WHILE_RUNNING in text
+            assert updates == []
+        finally:
+            release.set()
+
+
+def _refused_by_the_update(app: ProofpathApp) -> int:
+    return sum(UPDATE_INSTALLING in line.render().plain for line in app.query(KvLine))
+
+
+async def test_nothing_starts_while_an_update_is_installing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The guard's other direction: the venv is being replaced under this process, so
+    no run, no mirrored verb and no second ``/update`` may start until it is done."""
+    release = threading.Event()
+    calls: list[str] = []
+
+    def installing(*, config: Config, interactive: bool, check_only: bool = False) -> Any:
+        calls.append("update --check" if check_only else "update")
+        release.wait(10)
+        return an_update("updated", installed="1.1.0")
+
+    monkeypatch.setattr(library, "update_install", installing)
+    monkeypatch.setattr(library, "resolve_reference", lambda *a, **k: calls.append("resolve"))
+    monkeypatch.setattr(library, "fetch_target", lambda *a, **k: calls.append("fetch"))
+    monkeypatch.setattr(library, "config_view", lambda: calls.append("config"))
+    monkeypatch.setattr(library, "cache_overview", lambda: calls.append("cache"))
+    held = [
+        "/check one.pdf",
+        "one.pdf",  # the implicit /check
+        "/resolve Jumper 2021",
+        "/fetch https://x.test/p.html",
+        "/config show",
+        "/cache",
+        "/update",
+        "/update --check",
+    ]
+    app, schedulers = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        try:
+            await submit(pilot, "/update")
+            await until(pilot, lambda: calls == ["update"], "the install to start")
+            for line in held:
+                await submit(pilot, line)
+            await until(
+                pilot, lambda: _refused_by_the_update(app) == len(held), "every line refused"
+            )
+            assert calls == ["update"]
+            assert schedulers[0].submitted == []
+        finally:
+            release.set()
+        await until(
+            pilot,
+            lambda: any("restart proofpath" in line.render().plain for line in app.query(KvLine)),
+            "the install to finish",
+        )
+        await submit(pilot, "/check one.pdf")
+        assert [target for target, _ in schedulers[0].submitted] == ["one.pdf"]
+
+
+async def test_at_80x24_the_list_caps_only_quit_and_update() -> None:
+    """Eleven verbs, ten rows: the cap hides the last two, ``/quit`` (the banner's hint
+    line names it anyway) and ``/update``, and never ``/help``."""
+    app, _ = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        suggestions = app.query_one(Suggestions)
+        await type_into(pilot, "/")
+        assert commands.VERBS[-2:] == ("quit", "update")
+        assert suggestions.window == (0, len(commands.VERBS) - 2)
+        assert suggestions.drawn[-1] == "... 2 more"
+        assert any(row[2:].startswith("/help") for row in suggestions.drawn)
+        assert not any(row[2:].startswith(("/quit", "/update")) for row in suggestions.drawn)
 
 
 async def test_the_indicator_is_dropped_when_the_cap_leaves_room_for_only_the_row() -> None:

@@ -36,6 +36,18 @@ Both themes open with the wordmark: `rich` in block glyphs through five crimson 
 `plain` in ASCII. Under it, or beside it on a wide terminal, the version and the hint; a
 rule closes the banner.
 
+**Updating.** `proofpath update` installs the latest release from PyPI, and
+`proofpath update --check` only says whether there is one (`/update` and
+`/update --check` in the TUI). It updates uv tool, pipx and pip installs with their
+own tool and keeps the extras you have installed, such as `browser`, by naming them
+in the install spec. An editable checkout is never touched: update it with `git pull`
+and `uv sync`. A temporary `uvx` or `pipx run` environment is not updated either:
+`uvx proofpath@latest` or `pipx run --no-cache proofpath` already fetches the newest.
+Known limits: `uv tool install --upgrade` does not keep the options stored in uv's
+tool receipt, such as a pinned `--python`, and it drops packages added with `--with`.
+`pipx install --force` drops packages added with `pipx inject`, the `pip_args` the
+install was made with, and a custom `--python`. Reinstall those by hand afterwards.
+
 Bare `proofpath` opens the terminal UI ([a recorded session in both themes](docs/eval/2026-09-15-tui-v2-live.md),
 with SVG screenshots of a real run on v0.4.1, before the wordmark, in [`rich`](docs/eval/tui-raven-rich.svg) and
 [`plain`](docs/eval/tui-raven-plain.svg)). Each run is one panel in its own
@@ -49,7 +61,7 @@ coverage; the docked footer draws it as a bar and never scrolls away.
 
 Paste a path, a URL or a claim and it runs — a post of several lines pastes whole: the
 bar holds it behind a one-line summary, `Enter` checks it, `Esc` drops it. Every
-one-shot verb is a slash command (`/check`, `/resolve`, `/fetch`, `/config`, `/cache`),
+one-shot verb is a slash command (`/check`, `/resolve`, `/fetch`, `/config`, `/cache`, `/update`),
 runs can be started while others are in flight and stopped with `/cancel #n` — a
 stopped run keeps what it had decided. Type `/` and every command is listed above the
 bar with what it wants; `Tab` completes, `↑`/`↓` pick. `/config` opens the settings as

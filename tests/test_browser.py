@@ -6,7 +6,6 @@ No subprocess, no network, no real browser: ``run``, ``prompt``, ``installer``,
 
 from __future__ import annotations
 
-import shlex
 import subprocess
 from pathlib import Path
 
@@ -16,6 +15,7 @@ import respx
 
 from proofpath import browser as bw
 from proofpath import fetch as fx
+from proofpath import shell
 from proofpath.config import Config, FetchConfig, load_config
 
 
@@ -313,7 +313,7 @@ def test_install_falls_back_to_uv_when_pip_missing(monkeypatch: pytest.MonkeyPat
     result = bw.install(log, run=run)
     assert result is True
     assert calls == bw.install_commands()
-    assert log[0] == f"$ {shlex.join(bw.install_commands()[0])}"
+    assert log[0] == f"$ {shell.display_command(bw.install_commands()[0])}"
     assert log[1] == "exit 1"
     assert log[2] == "No module named pip"
     for kwargs in call_kwargs:
@@ -330,7 +330,11 @@ def test_install_fails_without_pip_or_uv(monkeypatch: pytest.MonkeyPatch) -> Non
     result = bw.install(log, run=run)
     assert result is False
     # Only the pip command was attempted: no uv, no scrapling install step.
-    assert log == [f"$ {shlex.join(bw.install_commands()[0])}", "exit 1", "No module named pip"]
+    assert log == [
+        f"$ {shell.display_command(bw.install_commands()[0])}",
+        "exit 1",
+        "No module named pip",
+    ]
 
 
 def test_install_pip_success_skips_uv(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -358,7 +362,7 @@ def test_install_run_raises_oserror_logs_and_fails(monkeypatch: pytest.MonkeyPat
     log: list[str] = []
     result = bw.install(log, run=run)
     assert result is False
-    assert log[0] == f"$ {shlex.join(bw.install_commands()[0])}"
+    assert log[0] == f"$ {shell.display_command(bw.install_commands()[0])}"
     assert log[1] == "exit ? (FileNotFoundError: no such file or directory: 'pip')"
 
 
@@ -498,9 +502,11 @@ def test_a_failed_browser_install_is_not_attempted_twice() -> None:
     assert calls == [pip_cmd, module_cmd]
 
 
-def test_the_install_log_can_be_pasted_back_into_a_shell() -> None:
+def test_the_install_log_can_be_pasted_back_into_a_shell(monkeypatch: pytest.MonkeyPatch) -> None:
     """The log is what a user is shown when an install fails; a line they cannot
-    re-run tells them less than one they can."""
+    re-run tells them less than one they can. POSIX quoting, pinned: the Windows
+    form is the test below."""
+    monkeypatch.setattr(shell, "on_windows", lambda: False)
     log: list[str] = []
     bw.install(
         log,
@@ -509,6 +515,22 @@ def test_the_install_log_can_be_pasted_back_into_a_shell() -> None:
     _pip_cmd, _uv_cmd, module_cmd = bw.install_commands()
     # The -c program holds spaces and a semicolon, and the pip spec holds brackets
     # and a `>`: both are one argument and both must come back quoted as one.
-    assert log[-2] == f"$ {shlex.join(module_cmd)}"
+    assert log[-2] == f"$ {shell.display_command(module_cmd)}"
     assert f"'{bw.SCRAPLING_CLI}'" in log[-2]
     assert "'scrapling[fetchers]>=0.4.15'" in log[0]
+
+
+def test_the_install_log_can_be_pasted_back_into_cmd_on_windows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """On Windows the pip spec's `>` is inside double quotes, where neither cmd.exe nor
+    PowerShell reads it as a redirect, and nothing is in single quotes."""
+    monkeypatch.setattr(shell, "on_windows", lambda: True)
+    log: list[str] = []
+    bw.install(
+        log,
+        run=lambda cmd, **kwargs: subprocess.CompletedProcess(cmd, 0, stdout="", stderr=""),
+    )
+    assert '"scrapling[fetchers]>=0.4.15"' in log[0]
+    assert f'"{bw.SCRAPLING_CLI}"' in log[-2]
+    assert "'" not in log[0]

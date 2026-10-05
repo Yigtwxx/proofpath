@@ -811,5 +811,50 @@ def _write_file(out: ui.Ui, path: Path | None, text: str) -> None:
         raise _fail(out, exc) from exc
 
 
+@app.command("update")
+def update_cmd(
+    ctx: typer.Context,
+    check: Annotated[
+        bool, typer.Option("--check", help="Only say whether a newer release exists.")
+    ] = False,
+) -> None:
+    """Update proofpath to the latest release on PyPI, keeping its extras."""
+    out = _ui(ctx)
+    result = lib.update_install(
+        config=_load_config(out),
+        interactive=cfg.is_interactive(),  # rule 4: ``network = ask`` needs a terminal
+        check_only=check,
+    )
+    _print_update(out, result)
+    if not result.ok:
+        # Update spec section 2.10: a failed check or update is 1, so a script can
+        # tell it from "up to date"; usage errors keep typer's 2.
+        raise typer.Exit(EXIT_FINDINGS)
+
+
+def _print_update(out: ui.Ui, result: lib.UpdateResult) -> None:
+    ui.kv(out, "current", result.current)
+    ui.kv(out, "latest", result.latest or "—")
+    install = result.install
+    if install is not None:
+        where = install.source if install.source is not None else install.prefix
+        ui.kv(out, "install", f"{install.name}  ({where})")
+        if install.updatable:
+            ui.kv(out, "extras", ", ".join(result.extras) or "none")
+    for line in result.log:
+        ui.kv(out, "run", line)
+    if result.ok:
+        ui.kv(out, "state", result.summary)
+    else:
+        ui.error(out, result.summary)
+    if result.command and result.state != "updated":
+        # What would run, or what to run by hand: one line a shell takes back as is.
+        ui.kv(out, "command", lib.display_command(result.command))
+    if result.state == "available":
+        ui.note(out, "proofpath update installs it")
+    for note in result.notes:
+        ui.kv(out, "note", note)
+
+
 if __name__ == "__main__":  # pragma: no cover
     sys.exit(app())

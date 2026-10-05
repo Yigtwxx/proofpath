@@ -30,11 +30,14 @@ from proofpath import fetch as fetch_mod
 from proofpath import judge as judge_mod
 from proofpath import oa as oa_mod
 from proofpath import resolve as resolve_mod
+from proofpath import update as update_mod
 from proofpath.browser import Answer, ConsentGate
 from proofpath.cache import Cache, Cleared, SourceDetail, SourceSummary
 from proofpath.config import Config, JudgeConfig
 from proofpath.paths import config_path
 from proofpath.polite import PoliteClient, ProviderError, user_agent
+from proofpath.shell import display_command
+from proofpath.update import UpdateResult
 
 #: ``judge.provider`` is not one setting: switching provider without its model, base
 #: URL and key variable would leave three fields pointed at the old one.
@@ -313,6 +316,23 @@ def cache_file() -> Path:
         return db.path
 
 
+# --- update -------------------------------------------------------------------------
+
+
+def update_install(*, config: Config, interactive: bool, check_only: bool = False) -> UpdateResult:
+    """Compare this build with PyPI's latest and, unless ``check_only``, update to it,
+    keeping the installed extras (docs/superpowers/specs/2026-10-05-update-command-
+    design.md).
+
+    Nothing asks: running the verb is the consent to install, and ``check_only`` runs
+    nothing. ``interactive`` is required because it decides what
+    ``permissions.network = ask`` means (rule 4): the CLI passes
+    ``config.is_interactive()``, the TUI passes ``True``. Every failure, PyPI's
+    included, is reported in the result rather than raised.
+    """
+    return update_mod.update(config, interactive=interactive, check_only=check_only)
+
+
 __all__ = [
     "JUDGE_PRESET_FIELDS",
     "Answer",
@@ -324,6 +344,7 @@ __all__ = [
     "PromptFn",
     "Resolved",
     "TargetError",
+    "UpdateResult",
     "cache_clear",
     "cache_detail",
     "cache_file",
@@ -332,6 +353,8 @@ __all__ = [
     "config_check",
     "config_set",
     "config_view",
+    "display_command",
     "fetch_target",
     "resolve_reference",
+    "update_install",
 ]

@@ -53,6 +53,9 @@ dependencies = [
     "numpy>=1.26",
     "platformdirs>=4.3",
     "orjson>=3.11",
+    # Pulled in by other packages already; declared because update.py compares
+    # versions with it directly.
+    "packaging>=24.0",
     "tomli>=2.0; python_version < '3.11'",
 ]
 
