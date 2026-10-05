@@ -1559,7 +1559,8 @@ def _summarise(
         summary=text,
         # Named only when there is prose to attribute: a paragraph nobody wrote has
         # no author, and a model named beside an empty summary would read as one.
-        summary_model=judge.name if text else None,
+        # Named by the answer, not by the client's state now (judge-cooldown review).
+        summary_model=(judge.answered_by or judge.name) if text else None,
         stages=(
             *report.stages,
             Stage(name=SUMMARISING, by=judge.name, summary=summary, elapsed=elapsed),
@@ -1577,10 +1578,13 @@ def _summarise(
 
 
 def _switch_notice(emit: Listener) -> Callable[[str], None]:
-    """The judge's switch to its local fallback, as the run's one notice (spec 11).
+    """The judge's switch to its local fallback, as the run's notice (spec 11).
 
     Called on the thread that switched, before the local model is loaded, so a
-    front end can show the line while the wait it announces is still ahead.
+    front end can show the line while the wait it announces is still ahead. After a
+    temporary switch (a short 429, judge-cooldown spec) the same listener carries the
+    back notice once the provider answers again, so the line on screen is replaced by
+    the one that is true now, as ``switched`` is for the report's footer.
     """
 
     def notice(text: str) -> None:

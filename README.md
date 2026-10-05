@@ -466,7 +466,10 @@ in the environment or a `.env` file, never from config, and is never printed.
 **When the judge stops answering.** If the configured judge hits its rate limit or
 otherwise stops answering, the run switches at once to `qwen3.5:9b` in your local
 Ollama, if it is installed (`ollama pull qwen3.5:9b`; proofpath never pulls it). It says so on stderr, in the TUI
-above the prompt, and in the report. The next run tries the configured API again first.
+above the prompt, and in the report. A per-minute limit (a 429 that asks for a wait of
+two minutes or less) only switches until it resets: the run then tries the configured
+API again, goes back to it if it answers, and says that too. The next run tries the
+configured API again first.
 `proofpath config set judge.fallback off` turns this off. Without a local model to
 switch to, the run says so and tells you how to add one, on the same channels.
 

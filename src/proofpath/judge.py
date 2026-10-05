@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import importlib.resources
 import json
+import math
 import re
 import string
 import threading
@@ -59,12 +60,24 @@ class JudgeUnavailable(JudgeError):  # noqa: N818 - reads as a state, not as a f
     a notice can print (``HTTP 500``, ``timeout``, ``empty answer``): never a body,
     never a URL, never a key. The fallback reads both to say why it switched without
     parsing its own message back.
+
+    ``retry_after`` is the wait a 429 named in its ``Retry-After`` header, in seconds,
+    or ``None`` when the last answer named none. The fallback reads it to know when
+    the provider may be asked again (judge-cooldown spec 2.2). A number, never a body.
     """
 
-    def __init__(self, detail: str, *, status: int | None = None, cause: str = "") -> None:
+    def __init__(
+        self,
+        detail: str,
+        *,
+        status: int | None = None,
+        cause: str = "",
+        retry_after: float | None = None,
+    ) -> None:
         super().__init__(detail)
         self.status = status
         self.cause = cause or (f"HTTP {status}" if status is not None else "no answer")
+        self.retry_after = retry_after
 
 
 #: ``think: false`` in Ollama's OpenAI-compatible terms, sent to every Ollama model
@@ -175,6 +188,10 @@ class Completion:
     prompt_tokens: int
     completion_tokens: int
     model: str
+    #: Who answered, as an opinion names it (``"ollama qwen3.5:9b"``): stamped by the
+    #: client that answered, so a fallback that changed hands while the request was
+    #: out cannot name the wrong judge afterwards. Empty from a caller's own fake.
+    by: str = ""
 
 
 @dataclass
@@ -411,7 +428,11 @@ class JudgeClient:
         last = "no request was made"
         status: int | None = None
         cause = ""
+        retry_after: float | None = None
         while attempt < _MAX_ATTEMPTS:
+            # Only the last failure's wait is carried: a 429 followed by a 5xx gave up
+            # on the 5xx, which named none.
+            retry_after = None
             payload: dict[str, Any] = {
                 "model": self._config.model,
                 "messages": messages,
@@ -467,9 +488,9 @@ class JudgeClient:
                     continue
                 if status == 429:
                     header = response.headers.get("Retry-After", "")
-                    seconds = _retry_after_seconds(header) if header else None
+                    retry_after = _retry_after_seconds(header) if header else None
                     # A bare 429 still means "slow down", so wait longer than a 5xx.
-                    delay = 2.0 * 2.0**attempt if seconds is None else seconds
+                    delay = 2.0 * 2.0**attempt if retry_after is None else retry_after
                 elif status >= 500:
                     delay = _backoff(attempt)
                 else:
@@ -481,7 +502,9 @@ class JudgeClient:
             attempt += 1
             if attempt < _MAX_ATTEMPTS:
                 self._wait(delay)
-        raise JudgeUnavailable(last, status=status, cause=cause)
+        # Raised the same way after ``fail_fast``'s break: that is the path the
+        # fallback's primary takes, and the one whose wait it needs.
+        raise JudgeUnavailable(last, status=status, cause=cause, retry_after=retry_after)
 
     def _wait(self, delay: float) -> None:
         delay = min(delay, self._max_wait)
@@ -537,6 +560,7 @@ class JudgeClient:
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
             model=model,
+            by=f"{self.provider} {self.model}",
         )
 
 
@@ -556,6 +580,25 @@ JUDGE_FALLBACK_DOWN = _DOWN_HEAD + _JUDGING
 #: What ``switched`` says once the local model has failed too: the primary's reason,
 #: then the local one. "Judging with local ollama" would then be false (final review).
 JUDGE_FALLBACK_FAILED = "{head}, and local ollama {model} failed too ({cause})"
+#: The judge-cooldown amendment (2026-10-05): a 429 whose ``Retry-After`` is at most
+#: ``COOLDOWN_MAX_S`` is a per-minute limit (Groq's RPM and TPM), so the switch it
+#: causes is temporary and its notice says so; the primary is asked again once that
+#: wait has passed. A longer wait is a daily limit (RPD, TPD) that asking again within
+#: a run cannot beat, and a 429 that names no wait is taken to mean a minute.
+COOLDOWN_MAX_S = 120.0
+COOLDOWN_DEFAULT_S = 60.0
+_UNTIL = " until it resets (~{seconds}s)"
+JUDGE_FALLBACK_COOLING = _LIMIT_HEAD + _JUDGING + _UNTIL
+#: Said once, when the primary answers the first request after its cooldown. It
+#: replaces the switch notice in ``switched``, so the footer of a run that came back
+#: does not say the local model was still judging.
+JUDGE_FALLBACK_BACK = (
+    "{provider} answering again — local ollama {model} stood in for {count} {noun}"
+)
+#: The same return when the local model was latched dead while the primary cooled
+#: down. "Stood in for 0 requests" would drop the one fact the footer must keep: the
+#: local model failed (rule 6).
+JUDGE_FALLBACK_BACK_DEAD = "{provider} answering again — local ollama {model} failed ({cause})"
 #: The install/pull hint: offered once, beside the original error, when there is no
 #: fallback for a reason the user can fix by adding the local model -- never when
 #: they chose ``judge.fallback = off`` themselves, and never a notice of a switch
@@ -689,6 +732,19 @@ class _Plan:
     hint: str | None = None
 
 
+@dataclass(frozen=True)
+class _Handover:
+    """What the thread that switched still owes the others, outside the lock."""
+
+    notice: str
+    #: The gate this switch made, to open once announced and warmed: exactly this
+    #: one. ``self._ready`` may already be a later switch's gate by then, and opening
+    #: that one instead would leave this switch's waiters to time out.
+    gate: threading.Event
+    #: ``False`` when the local model is latched dead: there is nothing to load.
+    warm: bool
+
+
 class FallbackClient:
     """A primary ``JudgeClient`` that switches, once and at once, to a local model.
 
@@ -702,8 +758,13 @@ class FallbackClient:
     and its error says why no fallback was used. A local model that fails too is
     latched dead for the run: every later call raises at once with the same detail.
 
-    The switch is sticky for the life of the client, which is one run: whatever
-    builds a judge for a run builds a new client or calls :meth:`reset`.
+    The switch is sticky for the life of the client, which is one run, with one
+    exception (judge-cooldown spec, 2026-10-05): a 429 that names a wait of at most
+    ``COOLDOWN_MAX_S`` -- a per-minute limit -- only switches until that wait has
+    passed. The first call after it asks the primary again, one thread at a time;
+    if it answers, the primary judges again and the back notice goes out through
+    the same listener. Whatever builds a judge for a run builds a new client or
+    calls :meth:`reset`.
     """
 
     def __init__(
@@ -715,6 +776,7 @@ class FallbackClient:
         ollama_url: str | None = None,
         local_factory: Callable[[str, str], JudgeClient] = local_client,
         warm: Callable[[str, str], None] | None = warm_local,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._primary = primary
         self._primary_timeout = primary.timeout
@@ -748,6 +810,27 @@ class FallbackClient:
         self._notice: str | None = None
         #: The combined detail once the local model has failed too; ``None`` before.
         self._dead: str | None = None
+        # The judge-cooldown amendment. A switch is either sticky (any failure but a
+        # short 429) or cooling: the clock reading from which the primary may be asked
+        # again. Neither, with a local client, means the primary answered again. All
+        # three, and ``_probing``, are read and written under the lock only. Injected
+        # so a test crosses a cooldown without sleeping.
+        self._clock = clock
+        self._sticky = False
+        self._cooldown_until: float | None = None
+        # True while one thread asks the primary again; every other thread stays on
+        # the local model until that probe has answered, so the end of a cooldown
+        # costs the provider one request, not one per waiting thread.
+        self._probing = False
+        # Requests handed to the local model in this period (a switch to its return),
+        # for the back notice. Counted when routed, so one still out at the return is
+        # in it; ``_period`` keeps a late one from counting toward the next period.
+        self._stood_in = 0
+        self._period = 0
+        # The client whose answer landed last: ``cost.model`` names it.
+        self._answered: JudgeClient | None = None
+        # The local failure that latched ``_dead``, for a later switch's notice.
+        self._dead_cause = ""
         # Local answers from before a ``reset``: the client is gone, the spend is not.
         self._spent = JudgeCost()
 
@@ -759,13 +842,25 @@ class FallbackClient:
 
     __str__ = __repr__
 
+    def _standing_in(self) -> JudgeClient | None:
+        """The local client while it judges in the primary's place, else ``None``.
+
+        Not merely "a local client exists": once the primary answers again after a
+        cooldown, the client is kept (its spend, its warm model) but no longer judges,
+        and an opinion must name the model that gave it.
+        """
+        if self._sticky or self._cooldown_until is not None:
+            return self._local
+        return None
+
     @property
     def provider(self) -> str:
-        return "ollama" if self._local is not None else self._primary.provider
+        return "ollama" if self._standing_in() is not None else self._primary.provider
 
     @property
     def model(self) -> str:
-        return self._local.model if self._local is not None else self._primary.model
+        local = self._standing_in()
+        return local.model if local is not None else self._primary.model
 
     @property
     def cost(self) -> JudgeCost:
@@ -775,18 +870,21 @@ class FallbackClient:
         if self._local is not None:
             parts.append(self._local.cost)
         local = self._spent.calls + (self._local.cost.calls if self._local is not None else 0)
+        standing = self._standing_in()
+        answered = self._answered
+        source = answered if answered is not None else standing
         return JudgeCost(
             calls=sum(part.calls for part in parts),
             prompt_tokens=sum(part.prompt_tokens for part in parts),
             completion_tokens=sum(part.completion_tokens for part in parts),
             waited_s=sum(part.waited_s for part in parts),
-            model=self._local.cost.model if self._local is not None else primary.model,
+            model=source.cost.model if source is not None else primary.model,
             local_calls=local,
         )
 
     def reset(self) -> None:
-        """Back to the primary, for a new run: the notice, the plan and a dead local
-        model are all forgotten."""
+        """Back to the primary, for a new run: the notice, the plan, a cooldown and a
+        dead local model are all forgotten."""
         with self._lock:
             if self._local is not None:
                 spent = self._local.cost
@@ -798,6 +896,16 @@ class FallbackClient:
             self._local = None
             self._plan = None
             self._dead = None
+            self._sticky = False
+            self._cooldown_until = None
+            # A probe still out belongs to the run before: its answer must not announce
+            # a return in this one (``_come_back`` checks the flag).
+            self._probing = False
+            self._stood_in = 0
+            # A new period: an answer still out from the last run counts toward neither.
+            self._period += 1
+            self._answered = None
+            self._dead_cause = ""
             self.switched = None
             self.hint = None
             self._primary_detail = ""
@@ -843,26 +951,40 @@ class FallbackClient:
                 reasoning_effort=reasoning_effort,
             )
 
-        local = self._route()
+        local, probe, period = self._route()
         if local is None:
             try:
-                return ask(self._primary)
+                answer = ask(self._primary)
             except JudgeUnavailable as exc:
-                local, notice = self._switch(exc)
-            if notice is not None:
+                local, handover, period = self._switch(exc, probe=probe)
+            except BaseException:
+                if probe:
+                    # Not an answer and not a failure the cooldown knows: let the next
+                    # call probe instead, rather than stay local for the run.
+                    self._end_probe()
+                raise
+            else:
+                with self._lock:
+                    self._answered = self._primary
+                if probe:
+                    self._come_back()
+                return answer
+            if handover is not None:
                 try:
-                    self._announce(notice)
-                    if self._warm is not None:
+                    self._announce(handover.notice)
+                    if handover.warm and self._warm is not None:
                         # After the notice, before the request: the user reads the
                         # line while the model loads (Amendment B 4). Outside the lock.
                         self._warm(self._ollama_url, local.model)
                 finally:
-                    self._ready.set()
+                    handover.gate.set()
         # A thread that did not switch waits for the notice and the warm-up, bounded
         # by the warm-up's own timeout (fix round 2).
         self._ready.wait(timeout=WARM_WAIT_S)
-        if self._dead is not None:
-            raise JudgeUnavailable(self._dead)
+        dead = self._dead
+        if dead is not None:
+            self._uncount(period, local)
+            raise JudgeUnavailable(dead)
         try:
             answer = ask(local)
         except JudgeUnavailable as exc:
@@ -871,16 +993,47 @@ class FallbackClient:
             detail = f"{self._primary_detail}; local ollama {local.model}: {exc}"
             # "Judging with local ollama" is no longer true, so the notice the report
             # carries says both failed instead (final review, minor).
+            self._uncount(period, local)
             self._both_failed(local.model, exc)
             if exc.status is None or exc.status >= 500 or exc.status in _DEAD_STATUSES:
                 # Latched: a dead or stuck Ollama costs this run one wait, not one per
                 # batch. Anything else failed this request only (fix round 2).
-                self._dead = detail
+                with self._lock:
+                    self._dead = detail
+                    self._dead_cause = exc.cause
             raise JudgeUnavailable(detail, status=exc.status, cause=exc.cause) from None
-        if self._notice is not None:
-            # Answering again after a failure that was about one request only.
-            self.switched = self._notice
+        with self._lock:
+            self._answered = local
+            # Only within the period that routed it: an answer that lands after the
+            # probe brought the primary back, or after a later switch, must not put
+            # this period's notice back over the newer one.
+            if self._counted(period, local) and self._notice is not None:
+                # Answering again after a failure that was about one request only.
+                self.switched = self._notice
         return answer
+
+    def _hand_over(self) -> int | None:
+        """Count one request handed to the local model; called under the lock.
+
+        The period it counts in, or ``None`` when the model is latched dead and will
+        be refused the request before it is asked.
+        """
+        if self._dead is not None:
+            return None
+        self._stood_in += 1
+        return self._period
+
+    def _counted(self, period: int | None, local: JudgeClient) -> bool:
+        """Whether a request counted in ``period`` still belongs to the open period;
+        called under the lock."""
+        return period is not None and period == self._period and self._standing_in() is local
+
+    def _uncount(self, period: int | None, local: JudgeClient) -> None:
+        """A counted request that got no answer did not stand in after all. Once the
+        back notice is out its count is said, so only an open period is corrected."""
+        with self._lock:
+            if self._counted(period, local):
+                self._stood_in -= 1
 
     def _both_failed(self, model: str, failure: JudgeUnavailable) -> None:
         """Say in ``switched`` that the local model failed too, after the primary."""
@@ -888,7 +1041,12 @@ class FallbackClient:
         if primary is None:  # pragma: no cover - a local client exists only after a switch
             return
         head = _head(self._primary.provider, primary)
-        self.switched = JUDGE_FALLBACK_FAILED.format(head=head, model=model, cause=failure.cause)
+        with self._lock:
+            if self._standing_in() is None:
+                return  # the primary answers again: the back notice is the true one
+            self.switched = JUDGE_FALLBACK_FAILED.format(
+                head=head, model=model, cause=failure.cause
+            )
 
     def _announce(self, notice: str) -> None:
         """Hand the notice to the listener, once, and never at the answer's expense."""
@@ -897,11 +1055,19 @@ class FallbackClient:
             with suppress(Exception):
                 self.on_switch(notice)
 
-    def _route(self) -> JudgeClient | None:
-        """The local client once switched; otherwise ``None``, with the plan made."""
+    def _route(self) -> tuple[JudgeClient | None, bool, int | None]:
+        """Who takes this call: the local client while it stands in, else ``None`` for
+        the primary, with the plan made. The flag is ``True`` for the one call that asks
+        the primary again once a cooldown has run out (judge-cooldown spec 2.3); the
+        number is the period a local request was counted in (``_hand_over``)."""
         with self._lock:
-            if self._local is not None:
-                return self._local
+            if self._sticky:
+                return self._local, False, self._hand_over()
+            if self._cooldown_until is not None:
+                if self._probing or self._clock() < self._cooldown_until:
+                    return self._local, False, self._hand_over()
+                self._probing = True
+                return None, True, None
             if self._plan is None:
                 self._plan = self._choose()
                 if self._plan.model is not None:
@@ -913,7 +1079,84 @@ class FallbackClient:
                     self._primary.timeout = httpx.Timeout(
                         PRIMARY_READ_TIMEOUT, connect=PRIMARY_CONNECT_TIMEOUT
                     )
-            return None
+            return None, False, None
+
+    def _come_back(self) -> None:
+        """The probe was answered: the primary judges again, and the user is told once.
+
+        The local client is kept, not closed: a thread that was routed to it before
+        the probe answered may still be using it, and its spend belongs to the run.
+        """
+        with self._lock:
+            local = self._local
+            if not self._probing or local is None:
+                return  # a reset came first; that run's return is not this run's news
+            self._probing = False
+            self._cooldown_until = None
+            self._notice = None
+            count = self._stood_in
+            if self._dead is not None:
+                back = JUDGE_FALLBACK_BACK_DEAD.format(
+                    provider=_display(self._primary.provider),
+                    model=local.model,
+                    cause=self._dead_cause,
+                )
+            else:
+                back = JUDGE_FALLBACK_BACK.format(
+                    provider=_display(self._primary.provider),
+                    model=local.model,
+                    count=count,
+                    noun="request" if count == 1 else "requests",
+                )
+            self.switched = back
+        self._announce(back)
+
+    def _end_probe(self) -> None:
+        with self._lock:
+            self._probing = False
+
+    def _probe_failed(self, failure: JudgeUnavailable) -> tuple[JudgeClient, int | None] | None:
+        """The primary failed the probe: the local client answers this request too.
+
+        ``None`` when a reset came first, so the failure is the new run's first one.
+        A short 429 starts a new cooldown from its own ``Retry-After``, with no second
+        notice and no second warm-up: the user has been told and the model is loaded.
+        Any other failure makes the switch sticky, as it would have been the first
+        time, and says so: "until it resets" is no longer true.
+        """
+        notice: str | None = None
+        with self._lock:
+            local = self._local
+            if not self._probing or local is None:
+                return None
+            self._probing = False
+            self._primary_detail = str(failure)
+            self._primary_failure = failure
+            cooldown = _cooldown_s(failure)
+            if cooldown is not None:
+                self._cooldown_until = self._clock() + cooldown
+            else:
+                self._cooldown_until = None
+                self._sticky = True
+                notice = self._notice_for(failure, local.model, None)
+                self._notice = notice
+                self.switched = notice
+            period = self._hand_over()
+        if notice is not None:
+            self._announce(notice)
+        return local, period
+
+    def _notice_for(self, failure: JudgeUnavailable, model: str, cooldown: float | None) -> str:
+        """The notice for a switch made now; called under the lock.
+
+        A local model latched dead stays dead for the run (review, important 1), so a
+        later switch says both failed -- what ``switched`` already says -- instead of
+        announcing a judge that will refuse every request.
+        """
+        if self._dead is None:
+            return _notice(self._primary.provider, model, failure, cooldown)
+        head = _head(self._primary.provider, failure)
+        return JUDGE_FALLBACK_FAILED.format(head=head, model=model, cause=self._dead_cause)
 
     def _choose(self) -> _Plan:
         """The configured model, once ``/api/tags`` confirms it is installed.
@@ -935,8 +1178,15 @@ class FallbackClient:
             return _Plan(None, f"{setting} is not installed", hint=JUDGE_FALLBACK_HINT_MISSING)
         return _Plan(setting)  # as written: the user's own spelling of the name
 
-    def _switch(self, failure: JudgeUnavailable) -> tuple[JudgeClient, str | None]:
-        """Switch once: the local client, and the notice when *this* call switched.
+    def _switch(
+        self, failure: JudgeUnavailable, *, probe: bool = False
+    ) -> tuple[JudgeClient, _Handover | None, int | None]:
+        """Switch once: the local client, the handover when *this* call switched, and
+        the period the request was counted in.
+
+        A short 429 (``_cooldown_s``) switches only until the wait it named has
+        passed; anything else switches for the run. A failed ``probe`` is not a new
+        switch: :meth:`_probe_failed` decides what it changes.
 
         Raises the primary's error, with the reason, when there is no fallback. When
         that reason is one the user can fix -- Ollama unreachable, the model not
@@ -950,10 +1200,16 @@ class FallbackClient:
         switch: the listener runs after the lock is released, so a slow or blocking
         listener can never hold another thread's switch (fix round 1, C).
         """
+        if probe:
+            stood = self._probe_failed(failure)
+            if stood is not None:
+                return stood[0], None, stood[1]
         hint: str | None = None
         with self._lock:
-            if self._local is not None:
-                return self._local, None  # another thread switched while we waited
+            standing = self._standing_in()
+            if standing is not None:
+                # Another thread switched while we waited.
+                return standing, None, self._hand_over()
             plan = self._plan
             if plan is None or plan.model is None:
                 why = _WHY_OFF if plan is None else plan.why
@@ -966,15 +1222,32 @@ class FallbackClient:
                     f"{failure}; no local fallback: {why}",
                     status=failure.status,
                     cause=failure.cause,
+                    retry_after=failure.retry_after,
                 )
             else:
-                notice = _notice(self._primary.provider, plan.model, failure)
+                cooldown = _cooldown_s(failure)
+                notice = self._notice_for(failure, plan.model, cooldown)
                 self._primary_detail = str(failure)
                 self._primary_failure = failure
                 self._notice = notice
-                self._local = self._local_factory(plan.model, self._ollama_url)
+                if self._local is None:
+                    self._local = self._local_factory(plan.model, self._ollama_url)
+                    gate = self._ready
+                else:
+                    # A switch after the primary came back: the same client (a thread
+                    # may still hold it), warmed again, behind a fresh gate so the
+                    # threads that find this switch wait for its notice too. The old
+                    # gate is left to the switch that made it (``_Handover.gate``).
+                    gate = self._ready = threading.Event()
+                if cooldown is None:
+                    self._sticky = True
+                else:
+                    self._cooldown_until = self._clock() + cooldown
+                self._period += 1
+                self._stood_in = 0
                 self.switched = notice
-                return self._local, notice
+                handover = _Handover(notice, gate, warm=self._dead is None)
+                return self._local, handover, self._hand_over()
         if hint is not None:
             self._announce(hint)
         raise error from None
@@ -990,9 +1263,31 @@ def _head(provider: str, failure: JudgeUnavailable) -> str:
     return _DOWN_HEAD.format(provider=name, cause=failure.cause)
 
 
-def _notice(provider: str, model: str, failure: JudgeUnavailable) -> str:
-    """The switch notice: why the primary was left, and who judges now."""
-    return _head(provider, failure) + _JUDGING.format(model=model)
+def _notice(
+    provider: str, model: str, failure: JudgeUnavailable, cooldown: float | None = None
+) -> str:
+    """The switch notice: why the primary was left, who judges now, and, for a
+    temporary switch, roughly for how long. Rounded up and never below one second,
+    so neither a sub-second wait nor ``Retry-After: 0`` is announced as ``~0s``."""
+    notice = _head(provider, failure) + _JUDGING.format(model=model)
+    if cooldown is None:
+        return notice
+    return notice + _UNTIL.format(seconds=max(1, math.ceil(cooldown)))
+
+
+def _cooldown_s(failure: JudgeUnavailable) -> float | None:
+    """How long the local model stands in before the primary is asked again, or
+    ``None`` for a switch that lasts the run (judge-cooldown spec 2.1).
+
+    Only a 429 cools down. A 413 is in ``LIMIT_STATUSES`` too, but it means the
+    request alone busts the TPM: the same request asked again a minute later fails
+    the same way. The key (401, 403), a 5xx, a timeout or an empty answer is not
+    something a wait is known to fix either.
+    """
+    if failure.status != 429:
+        return None
+    wait = COOLDOWN_DEFAULT_S if failure.retry_after is None else failure.retry_after
+    return wait if wait <= COOLDOWN_MAX_S else None
 
 
 def build_client(
@@ -1197,6 +1492,9 @@ class Judge:
         self.unavailable = False
         self.detail = ""
         self.status: int | None = None
+        #: Who gave the last answer this judge received (``Completion.by``), for what
+        #: it wrote outside an opinion: the summary.
+        self.answered_by = ""
 
     @property
     def name(self) -> str:
@@ -1322,6 +1620,7 @@ class Judge:
             # provider's own exception can carry the key.
             self._give_up(f"{type(exc).__name__} from the judge client")
             return ""
+        self.answered_by = completion.by or self.name
         text = completion.text.strip()
         if not text:
             # A 200 whose content is whitespace is not a summary with nothing to say.
@@ -1440,7 +1739,10 @@ class Judge:
                 # Rule 1 applies to the judge too: no quoted reason, no opinion.
                 self.skipped.append(f"{ident} came back with no rationale")
                 continue
-            into[ident] = JudgeOpinion(label=label, rationale=rationale, model=self.name)
+            # Named by the answer, not by ``self.name`` read now: the client may have
+            # changed hands since this answer left it (judge-cooldown review).
+            by = completion.by or self.name
+            into[ident] = JudgeOpinion(label=label, rationale=rationale, model=by)
 
 
 def _render(item: JudgeItem) -> str:

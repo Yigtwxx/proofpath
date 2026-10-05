@@ -48,6 +48,16 @@ All notable changes to this project are documented here. The format follows
   `/help` stays visible. One more row, at 80x25, shows them all.
 - `packaging` is a declared dependency. It was already installed through other
   packages; `update` now imports it directly.
+- **The judge goes back to Groq once its minute limit resets.** A 429 whose
+  `Retry-After` is at most 120 seconds (60 when it names none) now switches to the
+  local model only until that wait has passed: `Groq limit reached — judging with
+  local ollama qwen3.5:9b until it resets (~30s)`. The first request after it asks
+  Groq again, from one thread only; if Groq answers, the judge stays on it and says
+  so once (`Groq answering again — local ollama qwen3.5:9b stood in for 4 requests`),
+  on stderr, in the TUI and in the report's footer. Another short 429 starts a new
+  wait, quietly. Nobody waits: the local model answers while Groq cools down. A daily
+  limit (a longer `Retry-After`), a 413, a rejected key, a 5xx or no answer still
+  switches for the rest of the run, with the same notice as before.
 
 ## [0.4.10] - 2026-10-01
 

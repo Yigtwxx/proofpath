@@ -623,6 +623,8 @@ class FakeJudge:
 
     PARAGRAPH = "Three references do not say this."
     name = "fake judge-1"
+    #: Who gave the last answer, as ``Judge.answered_by``: empty until one arrives.
+    answered_by = ""
 
     def __init__(self, *, text: str = PARAGRAPH, detail: str = "") -> None:
         self._text = text
@@ -634,6 +636,8 @@ class FakeJudge:
 
     def summarize(self, report_markdown: str, *, max_tokens: int = 1500) -> str:
         self.seen = report_markdown
+        if self._text:
+            self.answered_by = self.name
         return self._text
 
     def close(self) -> None:
@@ -4173,6 +4177,9 @@ async def test_ctrl_l_clears_a_collapsed_panel_and_keeps_an_open_one() -> None:
 # --- the local fallback judge's notice (spec section 11, Task 11) --------------------
 
 SWITCHED = "Groq limit reached — judging with local ollama qwen3.5:9b"
+# What a real client says for a bare 429: a per-minute limit, so the switch is
+# temporary and the notice says so (judge-cooldown spec, the default 60 s).
+COOLING = f"{SWITCHED} until it resets (~60s)"
 
 
 def _bottom_order(app: ProofpathApp) -> list[str]:
@@ -4265,7 +4272,36 @@ async def test_the_rich_footer_keeps_its_height_under_the_notice() -> None:
         assert notice.region.bottom <= app.query_one(PromptFrame).region.y
 
 
-async def test_each_run_tries_the_api_first_and_the_old_notice_is_cleared() -> None:
+async def test_the_back_notice_replaces_the_switch_notice_above_the_prompt() -> None:
+    """Judge-cooldown spec: the provider answering again comes down the same road as
+    the switch, and the row above the bar then says what is true now."""
+    back = "Groq answering again — local ollama qwen3.5:9b stood in for 3 requests"
+    app, schedulers = build_app()
+    async with app.run_test(size=SIZE) as pilot:
+        notice = app.query_one(JudgeNotice)
+        scheduler = schedulers[0]
+        await submit(pilot, "/check draft.md")
+        run = scheduler.runs[0]
+        scheduler.push(run, Note(COOLING, notice=True))
+        await pilot.pause()
+        assert notice.text == COOLING
+        scheduler.push(run, Note(back, notice=True))
+        await pilot.pause()
+
+        assert notice.display and notice.text == back
+        assert back in _notes(app)
+
+
+@pytest.mark.parametrize(
+    ("status", "switched"),
+    [
+        (429, COOLING),  # a minute limit: temporary
+        (401, "Groq rejected the key (HTTP 401) — judging with local ollama qwen3.5:9b"),
+    ],
+)
+async def test_each_run_tries_the_api_first_and_the_old_notice_is_cleared(
+    status: int, switched: str
+) -> None:
     """Amendment B 9, end to end on the real scheduler and the real pipeline halves.
 
     Run 1's Groq answers 429 and the run switches to the local model; run 2's Groq
@@ -4299,7 +4335,7 @@ async def test_each_run_tries_the_api_first_and_the_old_notice_is_cleared() -> N
 
     with respx.mock(assert_all_called=False) as mock:
         groq = mock.post("https://api.groq.com/openai/v1/chat/completions").mock(
-            side_effect=[httpx.Response(429), ok("openai/gpt-oss-120b")]
+            side_effect=[httpx.Response(status), ok("openai/gpt-oss-120b")]
         )
         mock.get("http://localhost:11434/api/tags").mock(
             return_value=httpx.Response(200, json={"models": [{"name": "qwen3.5:9b"}]})
@@ -4319,8 +4355,8 @@ async def test_each_run_tries_the_api_first_and_the_old_notice_is_cleared() -> N
             first = lambda: app._scheduler.runs[0]  # noqa: E731 - read after it exists
             await until(pilot, lambda: first().state in ("done", "failed"), "run 1")
             assert first().state == "done", first().error
-            assert first().report is not None and first().report.judge_notice == SWITCHED
-            assert notice.display and notice.text == SWITCHED
+            assert first().report is not None and first().report.judge_notice == switched
+            assert notice.display and notice.text == switched
 
             await submit(pilot, CLAIM)
             second = lambda: app._scheduler.runs[1]  # noqa: E731
@@ -4380,7 +4416,7 @@ async def test_summarize_shows_the_switch_notice_and_still_writes_the_summary(
             await until(pilot, lambda: paragraph in _kv_text(app), "the local summary")
             notice = app.query_one(JudgeNotice)
             await until(pilot, lambda: notice.display, "the notice")
-            assert notice.text == SWITCHED
+            assert notice.text == COOLING
             text = _kv_text(app)
 
     assert f"(model-written, ollama qwen3.5:9b) {paragraph}" in text

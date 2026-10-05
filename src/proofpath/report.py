@@ -364,7 +364,8 @@ class Report:
     search: SearchSummary | None = None
     # The notice of a judge that switched to its local fallback (spec section 11), or
     # ``None``. A run that changed who gives its second opinion says so in the report,
-    # not only in a line that scrolled past while it ran.
+    # not only in a line that scrolled past while it ran. After a cooldown it is the
+    # back notice instead: the latest one, so the footer is true at the end of the run.
     judge_notice: str | None = None
 
     def exit_code(self) -> int:
