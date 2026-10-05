@@ -15,7 +15,7 @@ The answer travels back over a ``concurrent.futures.Future``, which is what lets
 worker thread block on a question the event loop is drawing.
 
 The mirrored verbs (spec section 13.3) hold no more logic than the rest: ``/resolve``,
-``/fetch``, ``/config`` and ``/cache`` call :mod:`proofpath.commands`, the same
+``/fetch``, ``/config``, ``/cache`` and ``/update`` call :mod:`proofpath.commands`, the same
 functions ``cli.py`` calls, on a worker thread, and :mod:`proofpath.tui.verbs` only
 turns what comes back into lines. ``/config`` on its own is the one exception: it
 opens the settings panel of :mod:`proofpath.tui.widgets.config_panel`, which writes
@@ -96,7 +96,19 @@ HINT = "paste a file path, a URL, or a claim.            /help  /config  /quit"
 DEFAULT_PLACEHOLDER = "paste a file path, a URL, or a claim"
 #: The CLI verbs the TUI mirrors (spec section 13.3): each one calls the same
 #: :mod:`proofpath.commands` function ``cli.py`` calls, on a worker thread.
-MIRRORED = ("resolve", "fetch", "config", "cache")
+MIRRORED = ("resolve", "fetch", "config", "cache", "update")
+#: What a bare ``/update`` says while anything is still running. Its install replaces
+#: the venv under the code those runs are executing (update spec section 2.11), so it
+#: waits for them; ``/update --check`` installs nothing and is never refused.
+UPDATE_WHILE_RUNNING = (
+    "not while a run is active: /update replaces the code it runs on"
+    " -- let it finish or /cancel it first"
+)
+#: The other direction: what anything that runs this install's code says while a bare
+#: ``/update`` is replacing it -- a run, a mirrored verb, or a second ``/update``.
+UPDATE_INSTALLING = "an update is installing; wait for it to finish"
+#: The verbs that guard holds back: ``/check`` and every mirrored verb.
+HELD_BY_UPDATE = ("check", *MIRRORED)
 #: What ``/summarize`` says when no judge can be built from the config and the
 #: environment. It is one call over a finished report (spec section 11.1), but it is
 #: still a call, so it needs a provider and a key like every other one.
@@ -347,6 +359,8 @@ class ProofpathApp(App[None]):
         #: One map, so ``/allow`` answers the newest question without a second lookup.
         self.pending: dict[int, Future[Answer]] = {}
         self._command_blocks: dict[int, CommandBlock] = {}
+        #: True while a bare ``/update`` is on its worker (``UPDATE_INSTALLING``).
+        self._installing = False
         self._owner = 0  # the negative half of the id space, for ``/fetch``
         #: Set the moment ``_quit`` starts. A question asked after that is answered
         #: ``no`` without ever being drawn: the app is on its way out, and a worker
@@ -829,6 +843,11 @@ class ProofpathApp(App[None]):
             await self._dispatch(parsed)
 
     async def _dispatch(self, command: commands.Command) -> None:
+        if self._installing and command.verb in HELD_BY_UPDATE:
+            # Checked before anything starts: the venv is being replaced under this
+            # process, and a run started now would load code from it mid-swap.
+            await self._refuse(command, UPDATE_INSTALLING)
+            return
         if command.verb == "check":
             self._check(command.arg)
         elif command.verb == "cancel":
@@ -843,8 +862,25 @@ class ProofpathApp(App[None]):
             await self._quit()
         elif command.verb == "config" and not command.arg:
             await self._open_config_panel()
+        elif _installs(command) and self._anything_running():
+            await self._refuse(command, UPDATE_WHILE_RUNNING)
         elif command.verb in MIRRORED:
             self._mirror(command)
+
+    def _anything_running(self) -> bool:
+        """A run that has not finished, or a mirrored verb whose worker is still out:
+        ``_command_blocks`` holds one exactly that long, and ``/fetch`` runs this
+        install's code as much as a ``/check`` does."""
+        runs = self._scheduler.runs if self._scheduler is not None else ()
+        return any(run.state not in TERMINAL for run in runs) or bool(self._command_blocks)
+
+    async def _refuse(self, command: commands.Command, reason: str) -> None:
+        """Answer a verb in its own block without running it: one error line."""
+        block = CommandBlock(f"/{command.verb} {command.arg}".strip(), self._out, self._theme)
+        # Awaited: the block's line container exists only once it has been composed.
+        await self.query_one(RunLog).mount(block)
+        block.show([error_line(self._out, reason)])
+        self._scroll_log()
 
     # --- the mirrored verbs ----------------------------------------------------------
 
@@ -867,6 +903,8 @@ class ProofpathApp(App[None]):
         self._owner -= 1
         owner = self._owner
         self._command_blocks[owner] = block
+        if _installs(command):
+            self._installing = True
         self.query_one(RunLog).mount(block)
         self._scroll_log()
         self.run_worker(self._run_verb(command, block, owner), name=line, group="mirror")
@@ -888,6 +926,8 @@ class ProofpathApp(App[None]):
         finally:
             self._settle_prompt(owner, "no")
             self._command_blocks.pop(owner, None)
+            if _installs(command):
+                self._installing = False
         block.show(lines)
         if command.verb == "config" and command.arg.split()[:1] == ["set"]:
             # The file on disk has just changed; the session must not keep deciding by
@@ -1193,6 +1233,11 @@ class ProofpathApp(App[None]):
         if self._scheduler is not None:
             await self._scheduler.close()
         self.exit()
+
+
+def _installs(command: commands.Command) -> bool:
+    """A bare ``/update``: the one mirrored verb that replaces this install."""
+    return command.verb == "update" and not command.arg
 
 
 def run(config: Config, out: ui.Ui) -> None:

@@ -634,3 +634,19 @@ The user picked the recommended option on all four questions.
   hypothetical accuracy by the model whose vote won.
 - **Git.** One feature branch and one PR: the script, its tests, the `docs/eval`
   reports and the README "Measured" row.
+
+## 21. `proofpath update` — 2026-10-05
+
+The user asked for an update command like `claude update`. They picked the recommended
+option on three of the four questions. On the fourth they chose "every install method"
+over "uv tool and pipx only". Design: `docs/superpowers/specs/2026-10-05-update-command-design.md`.
+
+- **Where:** CLI `proofpath update [--check]` and TUI `/update`, through one
+  `proofpath.commands` function. No check runs at startup.
+- **Which installs:** uv tool, pipx and pip are updated. An editable install is never
+  touched; it is told how to update itself.
+- **Extras:** the extras that are installed go into the install spec
+  (`proofpath[browser]`). Measured the same day: `uv tool upgrade` removes packages added
+  to the tool environment with pip, and the browser extra is installed that way on
+  consent.
+- **Behaviour:** running the command updates straight away; `--check` only reports.
